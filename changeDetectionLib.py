@@ -1,11 +1,11 @@
 """
-Apply change detection methods usin GEE
+Apply change detection methods using Google Earth Engine (GEE)
 
 geeViz.changeDetectionLib is the core module for setting up various change detection algorithms within GEE. Notably, it facilitates the use of LandTrendr and CCDC data preparation, application, and output formatting, compression, and decompression. 
 """
 
 """
-   Copyright 2025 Ian Housman, Leah Campbell, Josh Heyer
+   Copyright 2025 Ian Housman, Leah Campbell, Josh Heyer, Lila Leatherman
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -41,7 +41,20 @@ changeDurationPalette = "BD1600,E2F400,0C2780".split(",")
 
 ######################################################################
 # Helper to multiply image
-def multBands(img, distDir, by=1):
+def multBands(img:ee.Image, 
+              distDir: int, 
+              by=1)-> ee.Image:
+    
+    """Helper function to multiply an image
+
+    Args:
+        img: the image to be multiplied
+        distDir: the direction of change for a loss in vegetation for the chosen band/index. Possible values: 1, -1
+        by: the scale factor by which to multiply
+
+    Returns:
+        An Earth Engine image multiplied by the specified scale factor
+    """
     out = img.multiply(ee.Image(distDir).multiply(by))
     out = ee.Image(out.copyProperties(img, ["system:time_start"]).copyProperties(img))
     return out
@@ -64,7 +77,17 @@ default_lt_run_params = {
 ######################################################################
 # Helper to multiply new baselearner format values (LandTrendr & Verdet) by the appropriate amount when importing
 # Duration is the only band that does not get multiplied by 0.0001 upon import.
-def LT_VT_multBands(img):
+def LT_VT_multBands(img: ee.Image) -> ee.Image :
+
+    """Helper to multiply new baselearner format values (LandTrendr & Verdet) by the appropriate amount when importing. Duration is the only band that does not get multiplied by 0.0001 upon import.
+
+    Args:
+        img: LandTrendr Baselearner output image with bands for fitted, slope, diff, mag, and dur. 
+
+    Returns:
+        LandTrendr Baselearner output with bands multiplied by a scale factor of 0.0001
+    """
+
     fitted = img.select(".*_fitted").multiply(0.0001)
     slope = img.select(".*_slope").multiply(0.0001)
     diff = img.select(".*_diff").multiply(0.0001)
@@ -75,7 +98,19 @@ def LT_VT_multBands(img):
     return out
 
 
-def addToImage(img, howMuch):
+def addToImage(img:ee.Image, 
+               howMuch:float) -> ee.Image:
+
+    """Helper to add a set value to an image
+
+    Args:
+        img: Earth Engine image to have a value added to it
+        howMuch: quantity to be added to image
+
+    Returns:
+        Earth Engine image with value added to it
+    """
+
     out = img.add(ee.Image(howMuch))
     out = ee.Image(out.copyProperties(img, ["system:time_start"]).copyProperties(img))
     return out
