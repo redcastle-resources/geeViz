@@ -1,3 +1,120 @@
+# geeViz 2025.4.3 Release Notes
+
+## April 18, 2025
+
+### New Features
+
+- **Additional Pydocs** - Added/updated pydocs throughout the package.
+
+---
+
+# geeViz 2025.4.3 Release Notes
+
+## April 17, 2025
+
+### Bug fixes
+
+- `geeViz.geeView.simpleSetProject` bug fix.It would not create the credential directory if it did not already exist. Not it creates it.
+
+---
+
+# geeViz 2025.4.2 Release Notes
+
+## April 17, 2025
+
+### New Features
+
+- **`assetManagerLib.ingestFromGCSImagesAsBands()`** - New function for ingesting multiple images as bands of a single Earth Engine image asset. Takes a list of dictionaries, with each dictionary containing a key/value for the 'gcsURI' of the input image, and optional keys/values for 'pyramidingPolicy', 'noDataValue', and 'bandName'.
+- **`assetManagerLib.uploadToGEEAssetImagesAsBands()`** - New wrapper function for uploading multiple images to gcloud and manifesting them as bands of a single Earth Engine image asset. Takes a dictionary in which keys are file paths to each image, and values are dictionaries with keys/values for 'pyramidingPolicy', 'noDataValue', and 'bandName'.
+- **`assetManagerLib.uploadTifToGCS()`** - New function for uploading individual tifs to gcloud. Uses `gcloud storage` command instead of `gsutil`.
+- **`assetManagerLib.create_image_collection()`** - This function now takes an optional dictionary as a parameter that defines properties to set for the image collection.
+
+- **`examples.LCMS_Levels_Viewer_Notebook` updates** - In preparation for the v2024.10 release of LCMS, the new levels that will be published are now supported and better-documented in the notebook.
+
+---
+
+# geeViz 2025.4.1 Release Notes
+
+## April 16, 2025
+
+### New Features
+
+- **geeView area charting chartType setting** - Can now set the `chartType` (`vizParams["areaChartParams"]["chartType"]`) to "line", "bar", "stacked-line", and "stacked-bar". This is only used for `ee.ImageCollection` objects. For `ee.Image` objects, the chartType is always "bar". See pydoc for `Map.addLayer`, `Map.addTimeLapse`, and `Map.addAreaChartLayer` for details.
+
+### Bug fixes
+
+- `geeViz.geeView.robustInitializer()` bug fix. Method was broken by some updates to the GEE API returning a number for a project ID. This is now fixed. The new `robustIntializer()` is far simpler than the prior versions, so it will not handle as many scenarios as before. The overall stability should be improved though.
+
+---
+
+# geeViz 2025.3.6 Release Notes
+
+## March 31, 2025
+
+### Bug fixes
+
+- `geeViz.geeView` `Map.view()` bug fix for Google Colab. Updated to handle the new Google Colab proxy syntax. The old syntax should work still should they switch back in the future.
+
+---
+
+# geeViz 2025.3.5 Release Notes
+
+## March 31, 2025
+
+### New Features
+
+- **New `examples.LANDTRENDRVizNotebook.ipynb`** - Adapted the `examples.LANDTRENDRViz.py` script to a notebook format. Use this to learn how to take exported LandTrendr outputs and visualize them and use them for change detection.
+
+- **New `examples.Aboveground_Biomass_Viewer_Notebook.ipynb`** - Shows how the visualize and summarize the ESA CCI Global Forest Above Ground Biomass dataset using `geeViz`.
+
+---
+
+# geeViz 2025.3.4 Release Notes
+
+## March 21, 2025
+
+### Bug fixes
+
+- `geeViz.geeView` auto-authentication/initialization create directory bug fix. In the past, this module would always try to create a `.config` directory. Not it only does this if it is using the standard refresh token auth method.
+
+- `examples.LANDTRENDRWrapperNotebook` study area bug fix. The `studyArea` was called on before it was declared in the first example. This was removed.
+
+---
+
+# geeViz 2025.3.3 Release Notes
+
+## March 17, 2025
+
+### New Features
+
+- `getImagesLib.simpeWaterMask` `elevationImagePath` `ee.Image | ee.ImageCollection` support - You can now provide an `ee.Image` or `ee.ImageCollection` type input for the `elevationImagePath` parameter. Previously, this had to be a string. Since some elevation assets are `ee.ImageCollections` supporting additional types was needed.
+
+---
+
+# geeViz 2025.3.2 Release Notes
+
+## March 5, 2025
+
+### New Features
+
+- **`getImagesLib.superSimpleGetS2` `studyArea` Optional** - You no longer have to provide a studyArea for the `getImagesLib.superSimpleGetS2` method. This allows for global, map extent focused applications to use this method. When using this method, only the `.filterDate` method will render an output, so `startJulian` and `endJulian` are ignored. Ideally the `startDate` and `endDate` will suffice.
+
+- **`examples.LANDTRENDRWrapperNotebook.ipynb` Improved Markdown** - Improved the markdown for the `examples.LANDTRENDRWrapperNotebook.ipynb` for easier understanding of what is going on.
+
+- **`examples.timeLapseExample.py` Updates** - Updated the assets and visualization methods in `examples.timeLapseExample.py`
+
+---
+
+# geeViz 2025.3.1 Release Notes
+
+## March 3, 2025
+
+### Bug fixes
+
+- `geeViz layer indexing` simplification. Layer IDs are always the name with an index only appended if a layer with the same name was already added.
+
+---
+
 # geeViz 2025.1.6 Release Notes
 
 ## January 23, 2025
