@@ -13,13 +13,51 @@ print('Importing geeViz MCP Server from', __file__)
 # CLI argument parsing (before heavy imports so --help is instant)
 # ---------------------------------------------------------------------------
 _SANDBOX_ENABLED: bool | None = None  # will be resolved in main()
+_audit_user_code_active = False  # True only during user code execution in sandbox
 
 # Parse --sandbox / --no-sandbox early so _help can document them
 for _arg in sys.argv[1:]:
     if _arg == "--sandbox":
         _SANDBOX_ENABLED = True
+        os.environ["GEEVIZ_SANDBOX"] = "1"
     elif _arg == "--no-sandbox":
         _SANDBOX_ENABLED = False
+
+# ---------------------------------------------------------------------------
+# Audit hook — runtime-level defense that cannot be bypassed from Python.
+# Catches os.system, subprocess.Popen, open(), exec(), import of blocked
+# modules, etc. even when accessed via module attribute traversal
+# (e.g. gv.os.system). Only active when --sandbox is set.
+# ---------------------------------------------------------------------------
+if _SANDBOX_ENABLED:
+    _AUDIT_BLOCKED_IMPORTS = frozenset({
+        "os", "subprocess", "shutil", "pathlib", "socket", "http",
+        "urllib", "requests", "ctypes", "signal", "threading",
+        "multiprocessing", "webbrowser", "tempfile", "code", "codeop",
+        "pty", "pipes", "resource", "pickle", "shelve", "xmlrpc",
+    })
+    # Track whether we're inside the server's own init (allow) or user code (block)
+    _audit_user_code_active = False
+
+    def _sandbox_audit_hook(event, args):
+        if not _audit_user_code_active:
+            return  # Allow server's own operations
+        if event == "import":
+            mod_name = args[0].split(".")[0] if args[0] else ""
+            if mod_name in _AUDIT_BLOCKED_IMPORTS:
+                raise ImportError(
+                    f"Sandbox: import of '{args[0]}' is blocked. "
+                    f"Only Earth Engine, geeViz, and standard data libraries are allowed."
+                )
+        elif event == "os.system":
+            raise PermissionError("Sandbox: os.system() is blocked.")
+        elif event == "subprocess.Popen":
+            raise PermissionError("Sandbox: subprocess is blocked.")
+        elif event in ("os.exec", "os.posix_spawn", "os.spawn"):
+            raise PermissionError(f"Sandbox: {event} is blocked.")
+
+    sys.addaudithook(_sandbox_audit_hook)
+
 
 if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
     _help = """usage: python -m geeViz.mcp.server [--help] [--sandbox | --no-sandbox]
@@ -360,14 +398,56 @@ _MODULE_MAP = {
     "geePalettes": "geeViz.geePalettes",
 }
 
-# Persistent REPL namespace for run_code
-_namespace: dict = {}
+# ---------------------------------------------------------------------------
+# Per-session state — isolates REPL namespace, Map, code history, outputs,
+# and reports across concurrent users/sessions.
+# ---------------------------------------------------------------------------
+import threading as _threading
 
-# Code history for save_session
-_code_history: list[str] = []
-_script_dir = os.path.join(_THIS_DIR, "generated_scripts")
-_output_dir = os.path.join(_THIS_DIR, "generated_outputs")
-_current_script_path: str | None = None
+_BASE_OUTPUT_DIR = os.path.join(_THIS_DIR, "generated_outputs")
+_BASE_SCRIPT_DIR = os.path.join(_THIS_DIR, "generated_scripts")
+_DEFAULT_SESSION_ID = "_default"
+
+
+class _SessionState:
+    """All mutable state scoped to a single session."""
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        self.namespace: dict = {}
+        self.code_history: list[str] = []
+        self.current_script_path: str | None = None
+        self.active_report = None
+        self.initialized = False
+        # Per-session output directory
+        if session_id == _DEFAULT_SESSION_ID:
+            self.output_dir = _BASE_OUTPUT_DIR
+            self.script_dir = _BASE_SCRIPT_DIR
+        else:
+            self.output_dir = os.path.join(_BASE_OUTPUT_DIR, session_id)
+            self.script_dir = os.path.join(_BASE_SCRIPT_DIR, session_id)
+        # Stdout streaming file
+        self.stdout_stream_file = os.path.join(self.output_dir, ".stdout_stream")
+        self.stdout_active = False
+
+
+_sessions: dict[str, _SessionState] = {}
+_sessions_lock = _threading.Lock()
+
+
+def _get_session(session_id: str | None = None) -> _SessionState:
+    """Get or create a session state object. Thread-safe."""
+    sid = session_id or _DEFAULT_SESSION_ID
+    if sid in _sessions:
+        return _sessions[sid]
+    with _sessions_lock:
+        if sid not in _sessions:
+            _sessions[sid] = _SessionState(sid)
+        return _sessions[sid]
+
+
+# Backward-compatible module-level references for non-session-aware code
+_output_dir = _BASE_OUTPUT_DIR
+_script_dir = _BASE_SCRIPT_DIR
 
 
 def _load_env():
@@ -453,66 +533,81 @@ def _init_ee_credentials():
         pass
 
 
-def _ensure_initialized():
-    """Lazy-initialize EE and populate the REPL namespace. Thread-safe."""
+def _ensure_ee_initialized():
+    """Initialize EE credentials once (global, not per-session)."""
     global _initialized
     if _initialized:
         return
     with _init_lock:
         if _initialized:
             return
-
-        # Initialize EE credentials before importing geeViz
-        # (geeViz.geeView calls ee.Initialize on import)
         _init_ee_credentials()
-
-        import geeViz.geeView as gv
-        import geeViz.getImagesLib as gil
-        import geeViz.getSummaryAreasLib as sal
-        import geeViz.edwLib as edw
-        import geeViz.googleMapsLib as gm
-        import geeViz.geePalettes as palettes
-        from geeViz.outputLib import charts as cl
-        from geeViz.outputLib import thumbs as tl
-        from geeViz.outputLib import reports as rl
-        import ee
-
-        _namespace.update({
-            "ee": ee,
-            "Map": gv.Map,
-            "gv": gv,
-            "gil": gil,
-            "sal": sal,
-            "edw": edw,
-            "gm": gm,
-            "palettes": palettes,
-            "cl": cl,
-            "tl": tl,
-            "rl": rl,
-            "save_file": _safe_write_file,
-            "__builtins__": _make_safe_builtins(),
-        })
+        # Import geeViz to trigger ee.Initialize
+        import geeViz.geeView  # noqa: F401
         _initialized = True
 
 
-def _reset_namespace():
-    """Clear and re-populate the REPL namespace. Also resets code history."""
-    global _initialized, _current_script_path
-    _namespace.clear()
-    _code_history.clear()
-    _current_script_path = None
-    _initialized = False
-    _ensure_initialized()
+def _ensure_initialized(session_id: str | None = None):
+    """Lazy-initialize EE (global) and populate session namespace. Thread-safe."""
+    _ensure_ee_initialized()
+    sess = _get_session(session_id)
+    if sess.initialized:
+        return sess
+
+    import geeViz.geeView as gv
+    import geeViz.getImagesLib as gil
+    import geeViz.getSummaryAreasLib as sal
+    import geeViz.edwLib as edw
+    import geeViz.googleMapsLib as gm
+    import geeViz.geePalettes as palettes
+    from geeViz.outputLib import charts as cl
+    from geeViz.outputLib import thumbs as tl
+    from geeViz.outputLib import reports as rl
+    import ee
+
+    # Each session gets its own Map instance for layer isolation
+    session_map = gv.mapper() if session_id and session_id != _DEFAULT_SESSION_ID else gv.Map
+
+    # Per-session save_file writes to session's output dir
+    def _session_save_file(filename, content, mode="w"):
+        return _safe_write_file(filename, content, mode, output_dir=sess.output_dir)
+
+    sess.namespace.update({
+        "ee": ee,
+        "Map": session_map,
+        "gv": gv,
+        "gil": gil,
+        "sal": sal,
+        "edw": edw,
+        "gm": gm,
+        "palettes": palettes,
+        "cl": cl,
+        "tl": tl,
+        "rl": rl,
+        "save_file": _session_save_file,
+        "__builtins__": _make_safe_builtins(),
+    })
+    sess.initialized = True
+    return sess
 
 
-def _save_history_to_file() -> str:
+def _reset_namespace(session_id: str | None = None):
+    """Clear and re-populate a session's REPL namespace. Also resets code history."""
+    sess = _get_session(session_id)
+    sess.namespace.clear()
+    sess.code_history.clear()
+    sess.current_script_path = None
+    sess.initialized = False
+    _ensure_initialized(session_id)
+
+
+def _save_history_to_file(sess: _SessionState) -> str:
     """Write accumulated code history to a timestamped .py file. Returns the path."""
-    global _current_script_path
     import datetime
-    os.makedirs(_script_dir, exist_ok=True)
-    if _current_script_path is None:
+    os.makedirs(sess.script_dir, exist_ok=True)
+    if sess.current_script_path is None:
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        _current_script_path = os.path.join(_script_dir, f"session_{ts}.py")
+        sess.current_script_path = os.path.join(sess.script_dir, f"session_{ts}.py")
     header = (
         "# Auto-generated by geeViz MCP server\n"
         "# Each section below is one run_code call, in order.\n\n"
@@ -529,11 +624,11 @@ def _save_history_to_file() -> str:
     )
     body = "\n\n".join(
         f"# --- run_code call {i+1} ---\n{block}"
-        for i, block in enumerate(_code_history)
+        for i, block in enumerate(sess.code_history)
     )
-    with open(_current_script_path, "w", encoding="utf-8") as f:
+    with open(sess.current_script_path, "w", encoding="utf-8") as f:
         f.write(header + body + "\n")
-    return _current_script_path
+    return sess.current_script_path
 
 
 # ---------------------------------------------------------------------------
@@ -582,27 +677,35 @@ _BLOCKED_BUILTINS = frozenset({
 })
 
 
-def _safe_write_file(filename: str, content: str, mode: str = "w") -> str:
+def _safe_write_file(filename: str, content: str, mode: str = "w",
+                     output_dir: str | None = None) -> str:
     """Write content to a file in the safe output directory.
 
-    Only allows writing to geeViz/mcp/generated_outputs/ to prevent
-    arbitrary file system access. Returns the full path of the written file.
+    Only allows writing to geeViz/mcp/generated_outputs/ (or a session
+    subdirectory) to prevent arbitrary file system access.
 
     Args:
         filename: Just the filename (no directory). e.g. "chart.html"
         content: String content to write.
         mode: Write mode, "w" (text) or "wb" (binary). Default "w".
+        output_dir: Override output directory (used for session isolation).
 
     Returns:
         Full path to the written file.
     """
-    # Strip any path components — only allow bare filenames
+    _out = output_dir or _output_dir
     safe_name = os.path.basename(filename)
     if not safe_name:
         raise ValueError("filename must not be empty")
-    os.makedirs(_output_dir, exist_ok=True)
-    full_path = os.path.join(_output_dir, safe_name)
-    with open(full_path, mode) as f:
+    os.makedirs(_out, exist_ok=True)
+    full_path = os.path.join(_out, safe_name)
+    # Auto-detect mode from content type
+    if isinstance(content, bytes):
+        mode = "wb"
+    elif isinstance(content, str):
+        mode = "w"
+    kwargs = {"encoding": "utf-8"} if "b" not in mode else {}
+    with open(full_path, mode, **kwargs) as f:
         f.write(content)
     return full_path
 
@@ -674,20 +777,34 @@ def _check_code_patterns(code: str) -> list[str]:
                         f"BLOCKED: call to '{node.func.id}()' is not allowed for security."
                     )
 
+        # --- Batch export blocking (sandbox only): block .start() and task.start() ---
+        # Export wrapper functions are allowed (they support start=False),
+        # but actually starting tasks is blocked in sandbox mode.
+        if _SANDBOX_ENABLED:
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr == "start":
+                    warnings.append(
+                        "BLOCKED: .start() calls are not allowed in this environment. "
+                        "Batch exports (to Assets, Drive, or Cloud Storage) cannot run here. "
+                        "Download the code using the Download button and run it locally to execute exports."
+                    )
+
         # --- EE performance: detect .getInfo() calls (always active) ---
         if not (isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "getInfo"):
             continue
 
-        # Check if .getInfo() is inside a for/while loop
+        # Check if .getInfo() is inside a for/while loop — BLOCKED, not just a warning
         for parent in ast.walk(tree):
             if isinstance(parent, (ast.For, ast.While)):
                 for child in ast.walk(parent):
                     if child is node:
                         warnings.append(
-                            "Warning: .getInfo() inside a loop can be very slow. "
-                            "Consider gathering results server-side with ee.List or ee.Dictionary."
+                            "BLOCKED: .getInfo() inside a loop is not allowed — it causes "
+                            "extreme slowness (one server round-trip per iteration). "
+                            "Use server-side operations instead: ee.List, ee.Dictionary, "
+                            ".map(), or pass the full collection to cl.summarize_and_chart()."
                         )
                         break
 
@@ -812,8 +929,25 @@ def _save_and_clean_result(result_val):
         return repr(cleaned)[:2000]
 
 
+class _StreamingStdout(io.StringIO):
+    """StringIO that also appends output to a file for cross-process polling."""
+    def __init__(self, stream_file: str):
+        super().__init__()
+        self._stream_file = stream_file
+
+    def write(self, s):
+        try:
+            with open(self._stream_file, "a", encoding="utf-8") as f:
+                f.write(s)
+        except Exception:
+            pass
+        return super().write(s)
+
+
 @app.tool(annotations=_WRITE)
-async def run_code(code: str, timeout: int = 120, reset: bool = False, ctx: Context = None) -> str:
+async def run_code(code: str, timeout: int = 120, reset: bool = False,
+                   stream_stdout: bool = False, session_id: str = None,
+                   ctx: Context = None) -> str:
     """Execute Python/GEE code in a persistent REPL namespace (like Jupyter).
 
     The namespace persists across calls -- variables set in one call are
@@ -838,15 +972,18 @@ async def run_code(code: str, timeout: int = 120, reset: bool = False, ctx: Cont
                  in background.
         reset: If True, clear the namespace and re-initialize before
                executing.
+        stream_stdout: If True, print output is available in real-time
+                       via the /stdout polling endpoint. Default False.
+        session_id: Session identifier for namespace isolation. Default
+                    None (shared default session).
         ctx: MCP Context (auto-injected by FastMCP). Used for progress reporting.
 
     Returns:
         JSON with keys: success (bool), stdout, stderr, result, error.
     """
     if reset:
-        _reset_namespace()
-    else:
-        _ensure_initialized()
+        _reset_namespace(session_id)
+    sess = _ensure_initialized(session_id)
 
     # Static analysis: detect risky and blocked patterns before execution
     code_warnings = _check_code_patterns(code)
@@ -863,7 +1000,18 @@ async def run_code(code: str, timeout: int = 120, reset: bool = False, ctx: Cont
             "script_path": None,
         })
 
-    stdout_buf = io.StringIO()
+    # Set up stdout capture — streaming version appends to a file for polling
+    if stream_stdout:
+        try:
+            os.makedirs(os.path.dirname(sess.stdout_stream_file), exist_ok=True)
+            with open(sess.stdout_stream_file, "w", encoding="utf-8") as f:
+                f.write("")  # clear
+        except Exception:
+            pass
+        sess.stdout_active = True
+        stdout_buf = _StreamingStdout(sess.stdout_stream_file)
+    else:
+        stdout_buf = io.StringIO()
     stderr_buf = io.StringIO()
     result_holder: list = [None]
     error_holder: list = [None]
@@ -872,11 +1020,11 @@ async def run_code(code: str, timeout: int = 120, reset: bool = False, ctx: Cont
     # We track both existence and mtime so files overwritten in place
     # (common with save_file when the agent re-generates an image) are
     # still reported as outputs.
-    os.makedirs(_output_dir, exist_ok=True)
+    os.makedirs(sess.output_dir, exist_ok=True)
     _mtimes_before = {
-        f: os.path.getmtime(os.path.join(_output_dir, f))
-        for f in os.listdir(_output_dir)
-        if os.path.isfile(os.path.join(_output_dir, f))
+        f: os.path.getmtime(os.path.join(sess.output_dir, f))
+        for f in os.listdir(sess.output_dir)
+        if os.path.isfile(os.path.join(sess.output_dir, f))
     }
     _files_before = set(_mtimes_before.keys())
 
@@ -886,23 +1034,27 @@ async def run_code(code: str, timeout: int = 120, reset: bool = False, ctx: Cont
     _orig_stdout = sys.stdout
     _orig_stderr = sys.stderr
 
+    _ns = sess.namespace  # capture for closure
+
     def _exec():
+        global _audit_user_code_active
         try:
+            if _SANDBOX_ENABLED:
+                _audit_user_code_active = True
             with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
-                # Try to detect if the last statement is an expression
                 tree = ast.parse(code)
                 if tree.body and isinstance(tree.body[-1], ast.Expr):
-                    # Execute everything except the last statement
                     if len(tree.body) > 1:
                         mod = ast.Module(body=tree.body[:-1], type_ignores=[])
-                        exec(compile(mod, "<mcp>", "exec"), _namespace)
-                    # Eval the last expression to capture its value
+                        exec(compile(mod, "<mcp>", "exec"), _ns)
                     expr = ast.Expression(body=tree.body[-1].value)
-                    result_holder[0] = eval(compile(expr, "<mcp>", "eval"), _namespace)
+                    result_holder[0] = eval(compile(expr, "<mcp>", "eval"), _ns)
                 else:
-                    exec(compile(code, "<mcp>", "exec"), _namespace)
+                    exec(compile(code, "<mcp>", "exec"), _ns)
         except Exception:
             error_holder[0] = traceback.format_exc()
+        finally:
+            _audit_user_code_active = False
 
     thread = threading.Thread(target=_exec, daemon=True)
     thread.start()
@@ -944,6 +1096,10 @@ async def run_code(code: str, timeout: int = 120, reset: bool = False, ctx: Cont
     sys.stdout = _orig_stdout
     sys.stderr = _orig_stderr
 
+    # Clear streaming flag
+    if stream_stdout:
+        sess.stdout_active = False
+
     # Prepend static analysis warnings to stderr
     stderr_val = stderr_buf.getvalue()
     if code_warnings:
@@ -984,8 +1140,8 @@ async def run_code(code: str, timeout: int = 120, reset: bool = False, ctx: Cont
         })
 
     # Success -- record in history and save to file
-    _code_history.append(code)
-    script_path = _save_history_to_file()
+    sess.code_history.append(code)
+    script_path = _save_history_to_file(sess)
 
     result_val = result_holder[0]
 
@@ -996,12 +1152,12 @@ async def run_code(code: str, timeout: int = 120, reset: bool = False, ctx: Cont
 
     # Detect new or modified output files (from save_file, auto-save, or direct writes)
     _files_after = [
-        f for f in os.listdir(_output_dir)
-        if os.path.isfile(os.path.join(_output_dir, f))
+        f for f in os.listdir(sess.output_dir)
+        if os.path.isfile(os.path.join(sess.output_dir, f))
     ]
     _new_files = []
     for f in _files_after:
-        fpath = os.path.join(_output_dir, f)
+        fpath = os.path.join(sess.output_dir, f)
         mt = os.path.getmtime(fpath)
         if f not in _files_before or mt > _mtimes_before.get(f, 0):
             _new_files.append(f)
@@ -1011,7 +1167,7 @@ async def run_code(code: str, timeout: int = 120, reset: bool = False, ctx: Cont
     if _new_files:
         md_lines = []
         for fname in _new_files:
-            fpath = os.path.join(_output_dir, fname).replace("\\", "/")
+            fpath = os.path.join(sess.output_dir, fname).replace("\\", "/")
             ext = os.path.splitext(fname)[1].lower()
             label = os.path.splitext(fname)[0].replace("_", " ").replace("-", " ").title()
             if ext in _IMG_EXTS:
@@ -1070,6 +1226,7 @@ def inspect_asset(
     start_date: str = "",
     end_date: str = "",
     region_var: str = "",
+    session_id: str = None,
 ) -> str:
     """Get detailed metadata for any GEE asset (Image, ImageCollection, FeatureCollection, etc.).
 
@@ -1094,8 +1251,8 @@ def inspect_asset(
 
     _TIMEOUT = 10  # seconds per EE query
 
-    _ensure_initialized()
-    ee = _namespace["ee"]
+    sess = _ensure_initialized(session_id)
+    ee = sess.namespace["ee"]
 
     # --- Step 1: Fast catalog metadata (no compute, never hangs) ---
     try:
@@ -1175,7 +1332,7 @@ def inspect_asset(
                 filters_applied["start_date"] = "1970-01-01"
                 filters_applied["end_date"] = end_date
             if region_var:
-                region = _namespace.get(region_var)
+                region = sess.namespace.get(region_var)
                 if region is None:
                     return json.dumps({"error": f"Variable {region_var!r} not found in namespace."})
                 if isinstance(region, ee.FeatureCollection):
@@ -1454,7 +1611,7 @@ def _get_api_reference(module: str, function_name: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 @app.tool(annotations=_READ_ONLY)
-def search_functions(query: str = "", module: str = "", function_name: str = "") -> str:
+def search_functions(query: str = "", module: str = "", function_name: str = "", session_id: str = None) -> str:
     """Search for functions, list module contents, or get full API docs for a specific function.
 
     Combines search, listing, and detailed lookup into one tool:
@@ -1482,7 +1639,7 @@ def search_functions(query: str = "", module: str = "", function_name: str = "")
         signature, and description. When function_name is provided, also
         includes the full docstring.
     """
-    _ensure_initialized()
+    _ensure_initialized(session_id)
 
     # --- Detailed lookup mode: function_name provided ---
     if function_name:
@@ -1703,7 +1860,7 @@ def _list_example_files() -> list[str]:
 # ---------------------------------------------------------------------------
 
 @app.tool(annotations=_READ_ONLY_OPEN)
-def list_assets(folder: str) -> str:
+def list_assets(folder: str, session_id: str = None) -> str:
     """List assets in a GEE folder or collection.
 
     Args:
@@ -1712,8 +1869,8 @@ def list_assets(folder: str) -> str:
     Returns:
         JSON list of {id, type, sizeBytes} for each asset (max 200).
     """
-    _ensure_initialized()
-    ee = _namespace["ee"]
+    sess = _ensure_initialized(session_id)
+    ee = sess.namespace["ee"]
 
     try:
         result = ee.data.listAssets({"parent": folder})
@@ -1741,7 +1898,7 @@ def list_assets(folder: str) -> str:
 # ---------------------------------------------------------------------------
 
 @app.tool(annotations=_READ_ONLY_OPEN)
-def track_tasks(name_filter: str = "") -> str:
+def track_tasks(name_filter: str = "", session_id: str = None) -> str:
     """Get status of recent Earth Engine tasks.
 
     Args:
@@ -1751,8 +1908,8 @@ def track_tasks(name_filter: str = "") -> str:
         JSON list of recent tasks with description, state, type, start time,
         runtime, and error message (max 50).
     """
-    _ensure_initialized()
-    ee = _namespace["ee"]
+    sess = _ensure_initialized(session_id)
+    ee = sess.namespace["ee"]
 
     try:
         tasks = ee.data.getTaskList()
@@ -1781,7 +1938,7 @@ def track_tasks(name_filter: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 @app.tool(annotations=_WRITE)
-def map_control(action: str = "view", open_browser: bool = True, filename: str = "map.html"):
+def map_control(action: str = "view", open_browser: bool = True, filename: str = "map.html", session_id: str = None):
     """Control the geeView interactive map.
 
     `action="view"` writes the per-session runGeeViz.js to disk and opens
@@ -1792,7 +1949,10 @@ def map_control(action: str = "view", open_browser: bool = True, filename: str =
 
     Args:
         action: Action to perform:
-            - "view" (default): Open the map and return the URL.
+            - "view" (default): Validates all layers first (runs
+              test_layers internally). If any layer fails, returns the
+              errors without opening the map. If all pass, opens the map
+              and returns the URL.
             - "layers": List current layers with visibility and viz params.
             - "layer_names": Quick list of just layer names (lightweight).
             - "clear": Remove all layers and commands.
@@ -1802,9 +1962,11 @@ def map_control(action: str = "view", open_browser: bool = True, filename: str =
             - "test_view": Slow but thorough — captures a PNG via headless
               Chrome CDP. Returns tile_errors and console_messages. Requires
               websocket-client.
-            - "export": Write a self-contained geeView HTML to
-              ``generated_outputs/{filename}``. The HTML uses absolute asset
-              paths under ``/geeView/static`` and a ``__GEEVIZ_TOKEN__``
+            - "export": Validates all layers first (like "view"), then
+              writes a self-contained geeView HTML to
+              ``generated_outputs/{filename}``. If any layer fails, returns
+              errors without exporting. The HTML uses absolute asset paths
+              under ``/geeView/static`` and a ``__GEEVIZ_TOKEN__``
               placeholder for the access token. Suitable for chat UIs that
               serve the HTML themselves and inject a fresh token on load.
               Use this for chat-embedded maps that should survive session
@@ -1812,15 +1974,32 @@ def map_control(action: str = "view", open_browser: bool = True, filename: str =
         open_browser: For action="view", whether to open in browser (default True).
         filename: For action="export", the output filename (saved under
             ``generated_outputs/``). Defaults to ``map.html``.
+        session_id: Session identifier for namespace isolation.
 
     Returns:
         JSON with action-specific results.
     """
-    _ensure_initialized()
-    Map = _namespace["Map"]
+    sess = _ensure_initialized(session_id)
+    Map = sess.namespace["Map"]
     act = action.lower().strip()
 
     if act == "view":
+        # --- Pre-flight: validate all layers before opening the map ---
+        try:
+            test_result = Map.testLayers()
+            failed = [l for l in test_result["layers"] if l["status"] == "error"]
+            if failed:
+                return json.dumps({
+                    "pass": False,
+                    "message": f"Map not opened — {len(failed)} layer(s) failed validation. Fix errors and retry.",
+                    "layers": test_result["layers"],
+                })
+        except Exception as exc:
+            return json.dumps({
+                "pass": False,
+                "message": f"Layer validation raised an exception: {exc}. Map not opened.",
+            })
+
         # If any layer has canAreaChart=True and no turnOn command is already set,
         # auto-enable area charting instead of the default inspector.
         try:
@@ -1909,10 +2088,17 @@ def map_control(action: str = "view", open_browser: bool = True, filename: str =
             return json.dumps({"error": str(exc)})
 
         errors = [l for l in result["layers"] if l["status"] == "error"]
-        status = f"{len(errors)} layer error(s) detected." if errors else "All layers passed."
+        warnings = [l for l in result["layers"] if l.get("warnings")]
+        parts = []
+        if errors:
+            parts.append(f"{len(errors)} layer error(s) detected.")
+        if warnings:
+            parts.append(f"{len(warnings)} layer(s) with warnings.")
+        if not parts:
+            parts.append("All layers passed.")
         return json.dumps({
-            "pass": result["pass"],
-            "message": status,
+            "pass": result["pass"] and not errors,
+            "message": " ".join(parts),
             "layers": result["layers"],
         })
 
@@ -1934,6 +2120,22 @@ def map_control(action: str = "view", open_browser: bool = True, filename: str =
         })
 
     elif act == "export":
+        # --- Pre-flight: validate all layers before exporting ---
+        try:
+            test_result = Map.testLayers()
+            failed = [l for l in test_result["layers"] if l["status"] == "error"]
+            if failed:
+                return json.dumps({
+                    "pass": False,
+                    "message": f"Map not exported — {len(failed)} layer(s) failed validation. Fix errors and retry.",
+                    "layers": test_result["layers"],
+                })
+        except Exception as exc:
+            return json.dumps({
+                "pass": False,
+                "message": f"Layer validation raised an exception: {exc}. Map not exported.",
+            })
+
         # Same auto-area-charting fallback as `view`
         try:
             existing_cmds = list(getattr(Map, "mapCommandList", []))
@@ -1954,9 +2156,8 @@ def map_control(action: str = "view", open_browser: bool = True, filename: str =
         except Exception:
             pass
 
-        # Resolve output path under the shared generated_outputs directory.
-        # _output_dir is the module-level path used by run_code's save_file().
-        out_path = filename if os.path.isabs(filename) else os.path.join(_output_dir, filename)
+        # Resolve output path under the session's generated_outputs directory.
+        out_path = filename if os.path.isabs(filename) else os.path.join(sess.output_dir, filename)
         try:
             written_path = Map.export_html(out_path)
         except Exception as exc:
@@ -1977,7 +2178,7 @@ def map_control(action: str = "view", open_browser: bool = True, filename: str =
 # ---------------------------------------------------------------------------
 
 @app.tool(annotations=_WRITE)
-def save_session(filename: str = "", format: str = "py") -> str:
+def save_session(filename: str = "", format: str = "py", session_id: str = None) -> str:
     """Save the accumulated run_code history to a .py script or .ipynb notebook.
 
     Args:
@@ -1990,43 +2191,44 @@ def save_session(filename: str = "", format: str = "py") -> str:
     Returns:
         JSON with the file path and number of code blocks/cells saved.
     """
+    sess = _get_session(session_id)
+
     if format not in ("py", "ipynb"):
         return json.dumps({
             "error": f"Invalid format: {format!r}. Must be 'py' or 'ipynb'.",
         })
 
-    if not _code_history:
+    if not sess.code_history:
         return json.dumps({
             "error": "No code has been executed yet. Use run_code first.",
         })
 
     if format == "py":
-        global _current_script_path
         if filename:
             if not filename.endswith(".py"):
                 filename += ".py"
-            os.makedirs(_script_dir, exist_ok=True)
-            _current_script_path = os.path.join(_script_dir, filename)
+            os.makedirs(sess.script_dir, exist_ok=True)
+            sess.current_script_path = os.path.join(sess.script_dir, filename)
 
-        path = _save_history_to_file()
+        path = _save_history_to_file(sess)
         return json.dumps({
             "success": True,
             "script_path": path,
-            "code_blocks": len(_code_history),
-            "message": f"Saved {len(_code_history)} code block(s) to {path}",
+            "code_blocks": len(sess.code_history),
+            "message": f"Saved {len(sess.code_history)} code block(s) to {path}",
         })
 
     # format == "ipynb"
     import datetime
-    os.makedirs(_script_dir, exist_ok=True)
+    os.makedirs(sess.script_dir, exist_ok=True)
 
     if filename:
         if not filename.endswith(".ipynb"):
             filename += ".ipynb"
-        nb_path = os.path.join(_script_dir, filename)
+        nb_path = os.path.join(sess.script_dir, filename)
     else:
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        nb_path = os.path.join(_script_dir, f"session_{ts}.ipynb")
+        nb_path = os.path.join(sess.script_dir, f"session_{ts}.ipynb")
 
     # Build notebook structure (nbformat 4.5)
     cells = []
@@ -2061,7 +2263,7 @@ def save_session(filename: str = "", format: str = "py") -> str:
     })
 
     # One code cell per run_code call
-    for i, block in enumerate(_code_history):
+    for i, block in enumerate(sess.code_history):
         lines = block.splitlines(True)  # keep line endings
         # Ensure last line has newline for notebook format
         if lines and not lines[-1].endswith("\n"):
@@ -2097,8 +2299,8 @@ def save_session(filename: str = "", format: str = "py") -> str:
     return json.dumps({
         "success": True,
         "notebook_path": nb_path,
-        "code_cells": len(_code_history),
-        "message": f"Saved {len(_code_history)} code cell(s) to {nb_path}",
+        "code_cells": len(sess.code_history),
+        "message": f"Saved {len(sess.code_history)} code cell(s) to {nb_path}",
     })
 
 
@@ -2110,7 +2312,7 @@ _NAMESPACE_BUILTINS = {"ee", "Map", "gv", "gil"}
 
 
 @app.tool(annotations=_READ_ONLY_OPEN)
-def env_info(action: str = "version") -> str:
+def env_info(action: str = "version", session_id: str = None) -> str:
     """Get environment information: versions, REPL namespace, or project details.
 
     Args:
@@ -2139,10 +2341,10 @@ def env_info(action: str = "version") -> str:
         return json.dumps(result)
 
     elif act == "namespace":
-        _ensure_initialized()
-        ee = _namespace["ee"]
+        sess = _ensure_initialized(session_id)
+        ee = sess.namespace["ee"]
         entries = []
-        for name, obj in sorted(_namespace.items()):
+        for name, obj in sorted(sess.namespace.items()):
             if name.startswith("_") or name in _NAMESPACE_BUILTINS:
                 continue
             type_name = type(obj).__name__
@@ -2166,8 +2368,8 @@ def env_info(action: str = "version") -> str:
         })
 
     elif act == "project":
-        _ensure_initialized()
-        ee = _namespace["ee"]
+        sess = _ensure_initialized(session_id)
+        ee = sess.namespace["ee"]
         result: dict = {}
         try:
             result["project_id"] = ee.data._get_state().cloud_api_user_project
@@ -2203,7 +2405,7 @@ def env_info(action: str = "version") -> str:
                 except Exception:
                     pass
         # Re-initialize the REPL namespace with fresh modules
-        _reset_namespace()
+        _reset_namespace(session_id)
         return json.dumps({
             "action": "reload",
             "reloaded_modules": reloaded,
@@ -2234,6 +2436,7 @@ def export_image(
     bucket: str = "",
     output_no_data: int = -32768,
     file_format: str = "GeoTIFF",
+    session_id: str = None,
 ) -> str:
     """Export an ee.Image to a GEE asset, Google Drive, or Cloud Storage.
 
@@ -2264,16 +2467,16 @@ def export_image(
     Returns:
         JSON with export status or an error.
     """
-    _ensure_initialized()
-    ee = _namespace["ee"]
-    gil = _namespace["gil"]
+    sess = _ensure_initialized(session_id)
+    ee = sess.namespace["ee"]
+    gil = sess.namespace["gil"]
     dest = destination.lower().strip()
 
     if dest not in ("asset", "drive", "cloud"):
         return json.dumps({"error": f"Unknown destination: {destination!r}. Use 'asset', 'drive', or 'cloud'."})
 
     # Look up image
-    image = _namespace.get(image_var)
+    image = sess.namespace.get(image_var)
     if image is None:
         return json.dumps({"error": f"Variable {image_var!r} not found in namespace."})
     if not isinstance(image, ee.Image):
@@ -2282,7 +2485,7 @@ def export_image(
     # Look up region
     region = None
     if region_var:
-        region = _namespace.get(region_var)
+        region = sess.namespace.get(region_var)
         if region is None:
             return json.dumps({"error": f"Variable {region_var!r} not found in namespace."})
         if isinstance(region, ee.FeatureCollection):
@@ -2295,6 +2498,9 @@ def export_image(
     stdout_buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(stdout_buf):
+            # In sandbox mode, create task but don't start it
+            _start = not _SANDBOX_ENABLED
+
             if dest == "asset":
                 if not asset_id:
                     return json.dumps({"error": "asset_id is required for destination='asset'."})
@@ -2303,6 +2509,7 @@ def export_image(
                     image, asset_name, asset_id,
                     pyramidingPolicyObject={"default": pyramiding_policy},
                     roi=region, scale=scale, crs=crs, overwrite=overwrite,
+                    start=_start,
                 )
             elif dest == "drive":
                 if not output_name or not drive_folder:
@@ -2310,6 +2517,7 @@ def export_image(
                 gil.exportToDriveWrapper(
                     image, output_name, drive_folder,
                     region, scale, crs, None, output_no_data,
+                    start=_start,
                 )
             elif dest == "cloud":
                 if not output_name or not bucket:
@@ -2318,9 +2526,18 @@ def export_image(
                     image, output_name, bucket,
                     region, scale, crs, None, output_no_data,
                     file_format, {"cloudOptimized": True}, overwrite,
+                    start=_start,
                 )
     except Exception as exc:
         return json.dumps({"error": f"Export failed: {exc}", "stdout": stdout_buf.getvalue()})
+
+    if _SANDBOX_ENABLED:
+        return json.dumps({
+            "success": False,
+            "destination": dest,
+            "message": "Export task was created but NOT started (sandbox mode). "
+                       "Download the code and run it locally to execute the export.",
+        })
 
     return json.dumps({
         "success": True,
@@ -2620,7 +2837,7 @@ def search_datasets(query: str, source: str = "all", max_results: int = 50) -> s
 
 import base64 as _base64
 @app.tool(annotations=_DESTRUCTIVE)
-def cancel_tasks(name_filter: str = "") -> str:
+def cancel_tasks(name_filter: str = "", session_id: str = None) -> str:
     """Cancel running and ready Earth Engine tasks.
 
     If name_filter is provided, cancels only tasks whose description
@@ -2636,7 +2853,7 @@ def cancel_tasks(name_filter: str = "") -> str:
     Returns:
         JSON with task counts and cancellation status.
     """
-    _ensure_initialized()
+    _ensure_initialized(session_id)
     import geeViz.taskManagerLib as tml
 
     # Get current task state before cancellation
@@ -2681,6 +2898,7 @@ def manage_asset(
     all_users_can_read: bool = False,
     readers: str = "",
     writers: str = "",
+    session_id: str = None,
 ) -> str:
     """Manage GEE assets: delete, copy, move, create folders, update permissions.
 
@@ -2703,8 +2921,8 @@ def manage_asset(
     Returns:
         JSON confirmation or error.
     """
-    _ensure_initialized()
-    ee = _namespace["ee"]
+    sess = _ensure_initialized(session_id)
+    ee = sess.namespace["ee"]
     import geeViz.assetManagerLib as aml
     act = action.lower().strip()
 
@@ -2840,7 +3058,7 @@ _REFERENCE_DATA = {
 
 
 @app.tool(annotations=_READ_ONLY)
-def get_reference_data(name: str = "") -> str:
+def get_reference_data(name: str = "", session_id: str = None) -> str:
     """Look up geeViz reference dictionaries (band mappings, collection IDs, viz params, etc.).
 
     Args:
@@ -2850,7 +3068,7 @@ def get_reference_data(name: str = "") -> str:
     Returns:
         JSON string with the dict contents or listing of available dicts.
     """
-    _ensure_initialized()
+    _ensure_initialized(session_id)
 
     # Listing mode
     if not name:
@@ -2902,6 +3120,7 @@ def get_streetview(
     fov: float = 90,
     radius: int = 50,
     source: str = "default",
+    session_id: str = None,
 ) -> str:
     """Get Google Street View imagery at a location for ground-truthing.
 
@@ -2928,7 +3147,7 @@ def get_streetview(
         Metadata (date, location, copyright) and Street View images.
         Returns error if no imagery exists at the location.
     """
-    _ensure_initialized()
+    sess = _ensure_initialized(session_id)
     import geeViz.googleMapsLib as _gm
 
     # Check metadata first (free)
@@ -2951,7 +3170,7 @@ def get_streetview(
                          180: "S", 225: "SW", 270: "W", 315: "NW"}
 
     # Fetch images and save to files
-    os.makedirs(_output_dir, exist_ok=True)
+    os.makedirs(sess.output_dir, exist_ok=True)
     saved_images = []
     md_lines = []
     for h in heading_list:
@@ -2963,7 +3182,7 @@ def get_streetview(
             if img_bytes:
                 label = _direction_labels.get(int(h) % 360, f"{h}deg")
                 fname = f"streetview_{label}.jpg"
-                fpath = os.path.join(_output_dir, fname).replace("\\", "/")
+                fpath = os.path.join(sess.output_dir, fname).replace("\\", "/")
                 with open(fpath, "wb") as f:
                     f.write(img_bytes)
                 saved_images.append({"heading": h, "label": label, "path": fpath, "size": len(img_bytes)})
@@ -2990,6 +3209,7 @@ def search_places(
     lat: float = 0,
     radius: float = 5000,
     max_results: int = 10,
+    session_id: str = None,
 ) -> str:
     """Search for places using the Google Places API.
 
@@ -3007,7 +3227,7 @@ def search_places(
     Returns:
         JSON with matching places (name, address, coordinates, rating, types).
     """
-    _ensure_initialized()
+    _ensure_initialized(session_id)
     import geeViz.googleMapsLib as _gm
 
     kwargs: dict[str, Any] = {
@@ -3049,6 +3269,7 @@ def create_report(
     tone: str = "neutral",
     header_text: str = "",
     prompt: str = "",
+    session_id: str = None,
 ) -> str:
     """Create (or reset) a report. Must be called before add_report_section.
 
@@ -3066,11 +3287,10 @@ def create_report(
     Returns:
         Confirmation with the report title and settings.
     """
-    _ensure_initialized()
-    global _active_report
+    sess = _ensure_initialized(session_id)
     from geeViz.outputLib import reports as _rl
 
-    _active_report = _rl.Report(
+    sess.active_report = _rl.Report(
         title=title,
         theme=theme,
         layout=layout,
@@ -3107,6 +3327,7 @@ def add_report_section(
     reducer: str = "",
     generate_table: bool = True,
     generate_chart: bool = True,
+    session_id: str = None,
 ) -> str:
     """Add a section to the active report.
 
@@ -3149,18 +3370,17 @@ def add_report_section(
     Returns:
         Confirmation with the section index and title.
     """
-    _ensure_initialized()
-    global _active_report
-    ee = _namespace["ee"]
+    sess = _ensure_initialized(session_id)
+    ee = sess.namespace["ee"]
 
-    if _active_report is None:
+    if sess.active_report is None:
         return json.dumps({"error": "No active report. Call create_report first."})
 
     # Resolve EE objects from namespace
-    ee_obj = _namespace.get(ee_obj_var)
+    ee_obj = sess.namespace.get(ee_obj_var)
     if ee_obj is None:
         return json.dumps({"error": f"Variable '{ee_obj_var}' not found in REPL namespace."})
-    geom = _namespace.get(geometry_var)
+    geom = sess.namespace.get(geometry_var)
     if geom is None:
         return json.dumps({"error": f"Variable '{geometry_var}' not found in REPL namespace."})
 
@@ -3208,7 +3428,7 @@ def add_report_section(
         tf = None
 
     try:
-        _active_report.add_section(
+        sess.active_report.add_section(
             ee_obj=ee_obj,
             geometry=geom,
             title=title,
@@ -3222,10 +3442,10 @@ def add_report_section(
     except Exception as exc:
         return json.dumps({"error": f"Failed to add section: {exc}"})
 
-    n = len(_active_report._sections)
+    n = len(sess.active_report._sections)
     return json.dumps({
         "success": True,
-        "message": f"Section {n} '{title}' added to report '{_active_report.title}'.",
+        "message": f"Section {n} '{title}' added to report '{sess.active_report.title}'.",
         "total_sections": n,
         "tip": "Add more sections or call generate_report to produce the output.",
     })
@@ -3235,6 +3455,7 @@ def add_report_section(
 def generate_report(
     format: str = "html",
     output_filename: str = "",
+    session_id: str = None,
 ) -> str:
     """Generate the report from all added sections.
 
@@ -3251,12 +3472,11 @@ def generate_report(
     Returns:
         The file path of the generated report, plus a metadata summary.
     """
-    _ensure_initialized()
-    global _active_report
+    sess = _ensure_initialized(session_id)
 
-    if _active_report is None:
+    if sess.active_report is None:
         return json.dumps({"error": "No active report. Call create_report first."})
-    if not _active_report._sections:
+    if not sess.active_report._sections:
         return json.dumps({"error": "Report has no sections. Call add_report_section first."})
 
     fmt = format.lower().strip()
@@ -3264,24 +3484,46 @@ def generate_report(
         return json.dumps({"error": f"Invalid format '{format}'. Use 'html', 'md', or 'pdf'."})
 
     # Determine output path
-    os.makedirs(_output_dir, exist_ok=True)
+    os.makedirs(sess.output_dir, exist_ok=True)
     if output_filename:
-        out_path = os.path.join(_output_dir, output_filename)
+        out_path = os.path.join(sess.output_dir, output_filename)
     else:
         import time as _time_mod
         ts = int(_time_mod.time())
         ext = {"html": ".html", "md": ".md", "pdf": ".pdf"}[fmt]
-        safe_title = "".join(c if c.isalnum() or c in " _-" else "_" for c in _active_report.title)[:40].strip()
-        out_path = os.path.join(_output_dir, f"report_{safe_title}_{ts}{ext}")
+        safe_title = "".join(c if c.isalnum() or c in " _-" else "_" for c in sess.active_report.title)[:40].strip()
+        out_path = os.path.join(sess.output_dir, f"report_{safe_title}_{ts}{ext}")
 
     try:
-        result = _active_report.generate(format=fmt, output_path=out_path)
+        if fmt == "pdf":
+            # PDF: _render_pdf needs output_path internally. It will either:
+            # - return a file path (if Chrome/pdfkit succeeded)
+            # - return HTML string (fallback — no PDF converter available)
+            # In sandbox, subprocess is blocked so it always falls back to HTML.
+            content = sess.active_report.generate(format="pdf", output_path=out_path)
+            if isinstance(content, str) and not os.path.isfile(content):
+                # Got HTML string back (fallback) — use light theme for print
+                orig_theme = sess.active_report.theme
+                sess.active_report.theme = "light"
+                content = sess.active_report.generate(format="pdf", output_path=out_path)
+                sess.active_report.theme = orig_theme
+                # Save as .html instead of .pdf
+                html_path = out_path.rsplit(".", 1)[0] + ".html"
+                _safe_write_file(os.path.basename(html_path), content, output_dir=sess.output_dir)
+                out_path = html_path
+            elif isinstance(content, str):
+                out_path = content  # successful PDF path
+        else:
+            # HTML or MD: generate content, write via save_file
+            content = sess.active_report.generate(format=fmt)
+            _safe_write_file(os.path.basename(out_path), content, "w", output_dir=sess.output_dir)
+        result = out_path
     except Exception as exc:
         return json.dumps({"error": f"Report generation failed: {exc}"})
 
     # Build metadata
     try:
-        meta_df = _active_report.metadata()
+        meta_df = sess.active_report.metadata()
         meta_md = meta_df.to_markdown(index=False)
     except Exception:
         meta_md = "(metadata unavailable)"
@@ -3290,29 +3532,29 @@ def generate_report(
         "success": True,
         "format": fmt,
         "output_path": out_path,
-        "sections": len(_active_report._sections),
+        "sections": len(sess.active_report._sections),
         "metadata": meta_md,
         "tip": f"Report saved to {out_path}",
     })
 
 
 @app.tool(annotations=_READ_ONLY)
-def get_report_status() -> str:
+def get_report_status(session_id: str = None) -> str:
     """Check the current report status -- title, theme, section count, and
     section titles.
 
     Returns:
         Report status or a message if no report is active.
     """
-    global _active_report
-    if _active_report is None:
+    sess = _get_session(session_id)
+    if sess.active_report is None:
         return json.dumps({
             "active": False,
             "message": "No active report. Call create_report to start one.",
         })
 
     sections = []
-    for i, sec in enumerate(_active_report._sections):
+    for i, sec in enumerate(sess.active_report._sections):
         sections.append({
             "index": i + 1,
             "title": sec.title,
@@ -3323,25 +3565,25 @@ def get_report_status() -> str:
 
     return json.dumps({
         "active": True,
-        "title": _active_report.title,
-        "theme": _active_report.theme,
-        "layout": _active_report.layout,
-        "tone": _active_report.tone,
-        "section_count": len(_active_report._sections),
+        "title": sess.active_report.title,
+        "theme": sess.active_report.theme,
+        "layout": sess.active_report.layout,
+        "tone": sess.active_report.tone,
+        "section_count": len(sess.active_report._sections),
         "sections": sections,
     })
 
 
 @app.tool(annotations=_DESTRUCTIVE)
-def clear_report() -> str:
+def clear_report(session_id: str = None) -> str:
     """Discard the active report and all its sections.
 
     Returns:
         Confirmation that the report was cleared.
     """
-    global _active_report
-    old_title = _active_report.title if _active_report else None
-    _active_report = None
+    sess = _get_session(session_id)
+    old_title = sess.active_report.title if sess.active_report else None
+    sess.active_report = None
     if old_title:
         return json.dumps({"success": True, "message": f"Report '{old_title}' cleared."})
     return json.dumps({"success": True, "message": "No active report to clear."})

@@ -1,5 +1,27 @@
 # geeViz Release Notes
 
+## 2026.4.2 — April 21, 2026
+
+### geeView
+
+- **`Map.view()` display logic reworked**: Notebooks now default to IFrame only (no extra browser tab). Scripts default to browser only. If one is explicitly set, only that one opens. Both can be enabled by setting both to `True`.
+- **`Map.testLayers()` autoViz validation**: When `autoViz: True`, validates that image bands have matching `<bandName>_class_values/names/palette` properties. Returns error (not just warning) when no band has class properties — the map will break without them. Also detects orphaned properties set for wrong band names.
+
+### outputLib.charts
+
+- **`save_chart_html()` simplified**: Removed `deepcopy` and theme re-application that was corrupting Plotly binary data (`bdata`). Now uses `fig.write_html()` directly. Removed `theme`, `sankey`, `bg_color`, `font_color` params (charts are already themed by `summarize_and_chart`).
+- **`_safe_write_file` encoding fix**: Now uses `encoding="utf-8"` for text writes, fixing `UnicodeEncodeError` on Windows (cp1252) for characters like `→`.
+
+### outputLib.thumbs
+
+- **GIF date labels larger**: `date_font_size` now defaults to 1.4× `label_font_size` (was equal), making year labels more prominent than scalebar ticks.
+- **Pydoc fixes**: Corrected `crs` default (EPSG:3857, not None), `inset_on_map` default in `generate_filmstrip` (False, not True), and documented missing params (`burn_in_geometry`, `geometry_outline_color`, `clip_to_geometry`, etc.).
+
+### MCP Server
+
+- **`run_code` `stream_stdout` param**: New `stream_stdout=True` option streams print output to a file that the agent frontend can poll in real-time. Default `False` (backward compatible).
+- **Agent instructions updated**: `search_datasets` and other MCP tools are now documented as tools (not Python functions) in COMMON MISTAKES to prevent `NameError` in `run_code`.
+
 ## 2026.4.1 — April 15, 2026
 
 ### MCP Server — Map Test Action and Tool Fixes

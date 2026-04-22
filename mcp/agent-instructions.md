@@ -57,6 +57,41 @@
 
 `ee`, `Map` (use directly — do NOT call `gv.Map()`), `gv`, `gil`, `sal`, `tl`, `rl`, `cl`, `gm` (googleMapsLib), `palettes` (geePalettes), `save_file`.
 
+## Self-contained code blocks
+
+Each `run_code` call should be **self-contained** — define all variables it needs (study area, collections, composites, etc.) within that single call. Do NOT rely on variables from prior `run_code` calls. The user can download any code block as a standalone script, so it must work independently. The REPL namespace persists for convenience, but write code as if each block runs in a fresh namespace with only the imports above.
+
+## CRITICAL: No .getInfo() inside loops
+
+**NEVER** put `.getInfo()` inside a `for` or `while` loop. Each `.getInfo()` is a round-trip to the EE server — inside a loop this is extremely slow and triggers warnings.
+
+**Wrong:**
+```python
+for year in years:
+    col = ee.ImageCollection(...).filter(...)
+    if col.size().getInfo() > 0:  # BAD — getInfo in loop
+        img = col.median()
+```
+
+**Right — use server-side logic:**
+```python
+# Build everything server-side, no loop needed
+col = ee.ImageCollection(...).filter(...)
+# Use ee.List.sequence + .map() instead of Python for-loops
+# Or just pass the full collection to summarize_and_chart — it handles mosaicking internally
+result = cl.summarize_and_chart(col, area, band_names='NDVI', chart_type='line+markers')
+```
+
+**Right — if you must loop, no getInfo:**
+```python
+annual_images = []
+for year in years:
+    img = col.filter(ee.Filter.calendarRange(year, year, 'year')).median()
+    img = img.set({'system:time_start': ee.Date.fromYMD(year, 7, 1).millis()})
+    annual_images.append(img)  # No getInfo — pure server-side
+ic = ee.ImageCollection.fromImages(annual_images)
+```
+
 ## COMMON MISTAKES — avoid these
 
 - **`Map = gv.Map()`** — WRONG. `Map` is already the singleton mapper object. Use `Map` directly.
@@ -70,6 +105,7 @@
 - **Manual `reduceRegion` / `reduceRegions`** — WRONG. Use `result = cl.summarize_and_chart(ee_obj, geometry)` which handles the reducer, scale, and returns `{"df": DataFrame, "chart": Figure}`. This applies to point samples too — pass the point geometry directly.
 - **Using matplotlib, seaborn, or any other charting library** — WRONG. **Always** use `cl.summarize_and_chart()` for generating charts and `cl.save_chart_png(fig, "chart.png")` or `cl.save_chart_html(fig, "chart.html")` for saving them. Never `import matplotlib`, never `plt.plot()`, never `plt.savefig()`. The `cl` module handles all charting — time series, area charts, donuts, bar, sankey — with proper theming and formatting.
 - **`create_report()` as a Python function** — WRONG. Use `rl.Report(title)` in `run_code`, not the MCP tool as a Python call.
+- **Calling MCP tools as Python functions in `run_code`** — WRONG. `search_datasets`, `search_functions`, `inspect_asset`, `search_places`, `map_control`, `list_assets`, `export_image`, etc. are MCP tools — call them as separate tool calls, NOT as Python functions inside `run_code`. For example, `search_datasets('LCMS')` inside `run_code` will fail with `NameError: name 'search_datasets' is not defined`. Call `search_datasets` as its own tool call instead.
 - **ALWAYS `.filterBounds(study_area)` on ImageCollections before ANY operation** — `.addLayer()`, `.addTimeLapse()`, `.mosaic()`, `.first()`, `.median()`, etc. Tiled collections (LCMS, NLCD, MTBS) will show wrong regions (Alaska) without it. Non-tiled collections (S2, Landsat) will timeout without it. **No exceptions.** The charting and thumbnail functions do this internally, but you must do it for `addLayer`/`addTimeLapse`.
 - **Using `.first()` on tiled collections (LCMS, NLCD, MTBS)** — WRONG. These datasets are spatially tiled — `.first()` grabs an arbitrary tile (often Alaska, not your study area). ALWAYS `.filterBounds(study_area)` first, then `.mosaic()`. Example:
   ```python
@@ -85,7 +121,7 @@
 - **Using report tools when user asks for a PNG/thumbnail/image** — WRONG. If the user says "show me a png", "give me an image", "thumbnail", etc., use `tl.generate_thumbs(ee_obj, geometry)` in `run_code` and `save_file("name.png", result['bytes'], mode='wb')`. Do NOT use `create_report` / `add_report_section` / `generate_report` for simple image requests. Reports are for multi-section documents with narratives, not single images.
 - **Thematic data with `{'min': X, 'max': Y}` instead of `{'autoViz': True, 'canAreaChart': True}`** — WRONG. `Map.addLayer(worldcover, {'min': 10, 'max': 100}, 'ESA WorldCover')` produces a meaningless continuous gradient. CORRECT: `Map.addLayer(worldcover, {'autoViz': True, 'canAreaChart': True}, 'ESA WorldCover')`. This applies to ALL categorical/thematic data: LCMS, NLCD, ESA WorldCover, MTBS, Dynamic World, MODIS LC, etc. **The ONLY correct viz for thematic data is `{'autoViz': True, 'canAreaChart': True}`.** Never pass min/max/palette for thematic layers.
 - **Guessing band names** — WRONG. Before using any dataset in code, call `inspect_asset` to get actual band names. They vary across datasets/versions (e.g. MapBiomas: `classification_2000`, not `landcover`; MODIS: `LST_Day_1km`, not `temperature`). Don't assume from training data.
-- **Linking to Google Maps for Street View** — WRONG. Use the `get_streetview` MCP tool to fetch and save actual Street View images. It returns saved JPGs with markdown references. Never just provide a Google Maps URL.
+- **Using Street View imagery** — WRONG. Do NOT use `get_streetview`, `gm.streetview_image()`, `gm.streetview_panorama()`, or any Street View API. Downloading and analyzing Street View imagery violates the Google Maps Platform Terms of Service. If the user asks for Street View, explain that it is not available due to licensing restrictions.
 - **Manual `ee.FeatureCollection('TIGER/...')` for study areas** — WRONG. Use `sal` (getSummaryAreasLib): `sal.getUSCounties(area)`, `sal.getUSStates(area)`, `sal.getUSFSForests(area)`, `sal.getUSFSDistricts(area)`, `sal.getProtectedAreas(area)`, `sal.getRoads(area)`, `sal.getBuildings(area)`, `sal.getAdminBoundaries(area, level=0|1|2)`. These handle filtering and return clean FeatureCollections. Always use `sal` for boundaries.
 - **Thresholding — pick the right pattern based on user intent.** When you create a binary mask via `.gt()`, `.lt()`, `.gte()`, `.lte()`, etc.:
 
@@ -103,7 +139,9 @@
       'areaChartParams': {'shouldUnmask': True, 'unmaskValue': 0},
   }, 'NDVI > 0.5')
   ```
-  Note class_values/names/palette still include both `0` and `1` (so the legend/chart can label both), but `.selfMask()` keeps the 0s off the map. `shouldUnmask: True` tells the viewer to `.unmask(0)` before reducing for the area chart so the denominator is correct.
+  Note class_values/names/palette still include both `0` and `1` (so the legend/chart can label both), but `.selfMask()` keeps the 0s off the map. `shouldUnmask: True` with `unmaskValue: 0` tells the geeView viewer to unmask pixels before computing area chart stats, so percentages are relative to total area (not just the unmasked portion).
+
+  **Important:** `shouldUnmask`/`unmaskValue` are **geeView viewer params** (for interactive map area charting via `Map.addLayer`). For **Python-side charting** via `cl.summarize_and_chart()`, use `include_masked_area=True` instead — that's a separate parameter in the Python charting library.
 
   **Case B — User wants to compare above vs. below** (e.g. "classify areas as vegetation vs. not vegetation"). Keep both 0 and 1 values and symbolize both classes:
   ```python
@@ -134,7 +172,7 @@
 ## Key patterns
 
 - `Map.clearMap()` then `Map.addLayer(img, viz, "name")` in `run_code`, then `map_control(action="export", filename="...")` (chat) or `map_control(action="view")` (notebook) as a **separate tool call** (never `Map.view()` inside `run_code`). The chat/web environment will tell you which action to use; default to `export` if the environment isn't specified.
-- **Test before showing the map:** (1) `run_code` — add layers; (2) `map_control(action="test_layers")` — inspect results, fix any layer errors and repeat step 1 until all pass; (3) only after test passes, render the map via `map_control(action="export", filename="...")` (chat / web UI) or `map_control(action="view")` (notebooks / scripts). `test_layers` is fast (~1-2s) — it calls `getMapId()` on all layers in parallel to validate bands, viz params, and computations without launching a browser. **Always run `test_layers` before `export` or `view`** and silently fix any errors it surfaces — never tell the user a test was run.
+- **Layer validation is automatic.** Both `map_control(action="view")` and `map_control(action="export")` run `test_layers` internally before proceeding. If any layer fails validation, the map is NOT opened/exported — the response includes the errors. Fix the errors in `run_code` and call `view`/`export` again. You do NOT need to call `test_layers` separately before `view` or `export` — it happens automatically. You can still call `test_layers` directly if you want to check layers without opening the map.
 - **When to use `addTimeLapse` vs `addLayer`:** Use `Map.addTimeLapse(ic, viz, 'name')` when the user wants to see temporal change (before/after, seasonal, multi-year) — it ONLY accepts `ee.ImageCollection`. **Always `.filterBounds(area)` tiled collections before adding as a time lapse.** Use `Map.addLayer()` for everything else — it accepts `ee.Image`, `ee.ImageCollection`, `ee.Geometry`, `ee.Feature`, and `ee.FeatureCollection`. `addTimeLapse` adds a time slider to the map UI. **If the ImageCollection has more than ~40 images, do NOT use `addTimeLapse`** — it will be too slow. Use `Map.addLayer(ic, viz, 'name')` instead, which reduces what's displayed on the map but retains all time steps for area and pixel charting.
 - **S2 composite:** `s2 = gil.superSimpleGetS2(area, '2023-06-01', '2023-09-30').median()` then `Map.addLayer(s2, gil.vizParamsFalse10k, 'S2 False Color')` — S2 values are 0-10000, use `10k` viz params.
 - **S2 true color:** `Map.addLayer(s2, gil.vizParamsTrue10k, 'S2 True Color')`
@@ -177,10 +215,15 @@
 - **Filmstrip (side-by-side grid):** `result = tl.generate_filmstrip(ic, geometry)` then `save_file("name.png", result['bytes'], mode='wb')` — requires `ee.ImageCollection`. Single PNG with one cell per time step in a grid (default 3 columns). Use when comparing multiple years/dates side by side (e.g. "show me 1990, 2000, 2010, 2020 land cover"). Returns dict with `bytes` (PNG) and `format` ("png").
 - **Animated GIF:** `result = tl.generate_gif(ic, geometry)` then `save_file("name.gif", result['bytes'], mode='wb')` — requires `ee.ImageCollection`. Animated GIF cycling through time steps. Use for animation or time-lapse. Returns dict with `bytes` (GIF) and `format` ("gif").
 - **Map + chart GIF:** `result = tl.generate_map_chart_gif(ic, geometry, band_name='Land_Cover', basemap='esri-satellite', title='Title')` then `save_file("name.gif", result['bytes'], mode='wb')` — requires `ee.ImageCollection`. Animated GIF with map frames above cumulative line charts. Returns dict with `bytes` (GIF) and `format` ("gif"). Can be slow for many frames.
-- **Reports:** `report = rl.Report(title, theme="dark")` → `report.add_section(ee_obj, geometry, title)` → `report.generate(format="html", output_path="report.html")`
+- **Reports:** `report = rl.Report(title, theme="dark")` → `report.add_section(ee_obj, geometry, title)` → generate and save via `save_file`:
+  ```python
+  html = report.generate(format="html")
+  save_file("report.html", html)
+  ```
+  **Do NOT pass `output_path=` to `report.generate()`.** That writes to CWD, which the artifact pipeline can't see. Always get the HTML string back and route it through `save_file()` so it lands in `generated_outputs/` and appears as an inline artifact in the chat.
 - **Study areas:** `sal.simple_buffer(ee.Geometry.Point([lon,lat]), size=15000)` or `sal.getUSCounties(point)`, `sal.getUSFSForests(point)`, etc. The first argument (`area`) is always **required** — pass a point or geometry.
 - **Geocoding:** `gm.geocode("place")` or `search_places` MCP tool
-- **Street View:** Use the `get_streetview` MCP tool — it fetches actual images, saves them to files, and returns markdown. Do NOT just link to Google Maps. For more control in `run_code`: `gm.streetview_image(lon, lat, heading=0)`, `gm.streetview_panorama()`, `gm.interpret_image()`
+- **Street View:** NOT AVAILABLE. Do NOT use `get_streetview` or any `gm.streetview_*` functions. Downloading Street View imagery violates the Google Maps Platform Terms of Service. If asked, explain this to the user.
 - **Places/Elevation/Air Quality:** `gm.search_places("coffee", lat=40.7, lon=-111.9)`, `gm.get_elevation(lon, lat)`, `gm.get_air_quality(lon, lat)`, `gm.get_solar_insights(lon, lat)`
 - **Palettes:** `palettes` is in namespace. Collections: `palettes.cmocean`, `palettes.matplotlib`, `palettes.colorbrewer`, `palettes.crameri`, `palettes.kovesi`, `palettes.niccoli`, `palettes.misc`. Each is a dict of named palettes with numbered variants. Example: `palettes.cmocean['Thermal'][7]` returns a 7-color thermal palette list.
 - **EDW:** `from geeViz.edwLib import search_services, query_features` in `run_code`
@@ -189,7 +232,8 @@
 
 - `gil.getProcessedLandsatScenes(studyArea, startYear, endYear, startJulian, endJulian)` — Julian days required. Returns processed Landsat scenes with cloud masking and band renaming.
 - `gil.superSimpleGetS2(studyArea, startDate, endDate)` — **preferred** for S2. Returns ee.ImageCollection with geeViz band names (`red`, `green`, `blue`, `nir`, `swir1`, `swir2`). Values 0-10000.
-- `cl.summarize_and_chart(ee_obj, geometry)` — pass ImageCollection directly (auto-mosaics tiled data). `date_format="YYYY-MM"` for sub-annual. `feature_label` for per-feature subplots.
+- `cl.summarize_and_chart(ee_obj, geometry)` — pass ImageCollection directly (auto-mosaics tiled data). `date_format` controls x-axis labels: `"YYYY"` for annual, `"YYYY-MM"` for monthly, `"YYYY-MM-dd"` for daily. Default auto-detects. `feature_label` for per-feature subplots.
+- `tl.generate_gif(col, geometry)` — `date_format` controls the date label burned into each frame: `"YYYY"` for year only (annual composites), `"YYYY-MM"` for month, `"YYYY-MM-dd"` for daily. Match the format to the temporal resolution of your data.
 
 ## Pitfalls
 
@@ -207,8 +251,8 @@
 ## Tools (21)
 
 **Lookup:** `search_functions` (search, list, or get full docs with `function_name=`), `inspect_asset`, `examples`, `search_datasets`, `get_reference_data`, `env_info` (supports action="reload" to hot-reload modules)
-**Execution:** `run_code`, `save_session`
-**Map:** `map_control` (view|layers|layer_names|clear|test_layers|test_view) — `test_layers` is a fast quality gate (~1-2s): calls `getMapId()` on all layers in parallel. Always call it BEFORE `view`, fix any layer errors, then `view` only when clean. `test_view` is a slow browser-based screenshot with full JS console capture — use only when you need a visual check.
-**Assets/Tasks:** `list_assets`, `track_tasks`, `cancel_tasks`, `manage_asset`, `export_image`
-**Google Maps:** `get_streetview`, `search_places`
+**Execution:** `run_code` (always pass `stream_stdout=True` so the user sees print output in real-time), `save_session`
+**Map:** `map_control` (view|export|layers|layer_names|clear|test_layers|test_view) — `view` opens the map in a browser (local/notebook use), `export` writes a self-contained HTML file (chat/web UI use). Both automatically run `test_layers` first and block if any layer fails — you do NOT need to call `test_layers` separately. `test_view` is a slow browser-based screenshot with full JS console capture — use only when you need a visual check.
+**Assets/Tasks:** `list_assets`, `track_tasks`, `cancel_tasks`, `manage_asset`, `export_image` — in sandbox mode, `.start()` is blocked and exports are created but not started. The user should download the code to run exports locally.
+**Google Maps:** `search_places` (Street View tools are disabled — see above)
 **Reports:** `create_report`, `add_report_section`, `generate_report`, `get_report_status`, `clear_report`

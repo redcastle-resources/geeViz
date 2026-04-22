@@ -4708,7 +4708,7 @@ def medoidMosaicMSD(inCollection: ee.ImageCollection, medoidIncludeBands: ee.Lis
 # From earthengine-api batch.Export.toAsset documentation: "region: The lon,lat coordinates for a LinearRing or Polygon specifying the region to export.
 #     Can be specified as a nested lists of numbers or a serialized string. Defaults to the image's region."
 def exportToAssetWrapper(
-    imageForExport: ee.Image, assetName: str, assetPath: str, pyramidingPolicyObject: dict | None = None, roi: ee.Geometry | None = None, scale: float | None = None, crs: str | None = None, transform: list | None = None, overwrite: bool = False
+    imageForExport: ee.Image, assetName: str, assetPath: str, pyramidingPolicyObject: dict | None = None, roi: ee.Geometry | None = None, scale: float | None = None, crs: str | None = None, transform: list | None = None, overwrite: bool = False, start: bool = True
 ):
     """Exports an image to an Earth Engine asset with overwrite handling.
 
@@ -4733,9 +4733,13 @@ def exportToAssetWrapper(
             list. Defaults to ``None``.
         overwrite (bool, optional): If ``True``, deletes existing asset or
             cancels a running export before re-exporting. Defaults to ``False``.
+        start (bool, optional): If ``True``, starts the export task immediately.
+            If ``False``, creates the task but does not start it and returns the
+            task object. Defaults to ``True``.
 
     Returns:
-        None: Starts an Earth Engine export task as a side effect.
+        ee.batch.Task | None: The export task object if ``start=False``,
+            otherwise ``None`` (task is started as a side effect).
 
     Examples:
         >>> import ee
@@ -4793,15 +4797,20 @@ def exportToAssetWrapper(
             maxPixels=1e13,
         )
         print("Exporting:", assetName)
-        # print(t)
-        t.start()
+        if start and os.environ.get("GEEVIZ_SANDBOX") == "1":
+            print("Sandbox mode: export task created but NOT started. Run this code locally to start the export.")
+            return t
+        if start:
+            t.start()
+        else:
+            return t
     else:
         print(f"{assetName} currently exists or is being exported and overwrite = False. Set overwite = True if you would like to overwite any existing asset or asset exporting task")
     # Map.addLayer(imageForExport,vizParamsFalse,assetName)
 
 
 #########################################################################
-def exportToDriveWrapper(imageForExport: ee.Image, outputName: str, driveFolderName: str, roi: ee.Geometry, scale: float | None = None, crs: str | None = None, transform: list | None = None, outputNoData: int = -32768):
+def exportToDriveWrapper(imageForExport: ee.Image, outputName: str, driveFolderName: str, roi: ee.Geometry, scale: float | None = None, crs: str | None = None, transform: list | None = None, outputNoData: int = -32768, start: bool = True):
     """Exports an image to Google Drive as a GeoTIFF.
 
     Wraps ``ee.batch.Export.image.toDrive``, clipping the image to the
@@ -4822,9 +4831,13 @@ def exportToDriveWrapper(imageForExport: ee.Image, outputName: str, driveFolderN
             list. Defaults to ``None``.
         outputNoData (int, optional): Value used to fill masked pixels.
             Defaults to ``-32768``.
+        start (bool, optional): If ``True``, starts the export task immediately.
+            If ``False``, creates the task but does not start it and returns the
+            task object. Defaults to ``True``.
 
     Returns:
-        None: Starts an Earth Engine export task as a side effect.
+        ee.batch.Task | None: The export task object if ``start=False``,
+            otherwise ``None`` (task is started as a side effect).
 
     Examples:
         >>> import ee
@@ -4864,7 +4877,13 @@ def exportToDriveWrapper(imageForExport: ee.Image, outputName: str, driveFolderN
         1e13,
     )
     print("Exporting:", outputName)
-    t.start()
+    if start and os.environ.get("GEEVIZ_SANDBOX") == "1":
+        print("Sandbox mode: export task created but NOT started. Run this code locally to start the export.")
+        return t
+    if start:
+        t.start()
+    else:
+        return t
 
 
 #########################################################################
@@ -4880,6 +4899,7 @@ def exportToCloudStorageWrapper(
     fileFormat: str = "GeoTIFF",
     formatOptions: dict = {"cloudOptimized": True},
     overwrite: bool = False,
+    start: bool = True,
 ):
     """Exports an image to Google Cloud Storage with overwrite handling.
 
@@ -4907,9 +4927,13 @@ def exportToCloudStorageWrapper(
             export. Defaults to ``{'cloudOptimized': True}``.
         overwrite (bool, optional): If ``True``, deletes existing blobs or
             cancels running exports before re-exporting. Defaults to ``False``.
+        start (bool, optional): If ``True``, starts the export task immediately.
+            If ``False``, creates the task but does not start it and returns the
+            task object. Defaults to ``True``.
 
     Returns:
-        None: Starts an Earth Engine export task as a side effect.
+        ee.batch.Task | None: The export task object if ``start=False``,
+            otherwise ``None`` (task is started as a side effect).
 
     Examples:
         >>> import ee
@@ -4963,7 +4987,13 @@ def exportToCloudStorageWrapper(
         )
         print("Exporting:", outputName)
         print(t)
-        t.start()
+        if start and os.environ.get("GEEVIZ_SANDBOX") == "1":
+            print("Sandbox mode: export task created but NOT started. Run this code locally to start the export.")
+            return t
+        if start:
+            t.start()
+        else:
+            return t
 
 
 #########################################################################
@@ -6361,7 +6391,7 @@ def nDayComposites(images, startYear, endYear, startJulian, endJulian, composite
 ###############################################################
 #########################################################################
 def exportCollection(
-    exportPathRoot, outputName, studyArea, crs, transform, scale, collection, startYear, endYear, startJulian, endJulian, compositingReducer, timebuffer, exportBands, overwrite=False, exportToAssets=False, exportToCloud=False, bucket=None
+    exportPathRoot, outputName, studyArea, crs, transform, scale, collection, startYear, endYear, startJulian, endJulian, compositingReducer, timebuffer, exportBands, overwrite=False, exportToAssets=False, exportToCloud=False, bucket=None, start: bool = True
 ):
     """Exports yearly composites from an image collection to EE assets or Cloud Storage.
 
@@ -6388,9 +6418,13 @@ def exportCollection(
         exportToAssets (bool, optional): Export to EE assets. Defaults to False.
         exportToCloud (bool, optional): Export to Cloud Storage. Defaults to False.
         bucket (str | None, optional): Cloud Storage bucket name. Defaults to None.
+        start (bool, optional): If ``True``, starts export tasks immediately.
+            If ``False``, creates the tasks but does not start them and returns
+            a list of task objects. Defaults to ``True``.
 
     Returns:
-        None: Submits export tasks as a side effect.
+        list[ee.batch.Task] | None: A list of task objects if ``start=False``,
+            otherwise ``None`` (tasks are started as a side effect).
 
     Examples:
         >>> import geeViz.getImagesLib as gil
@@ -6410,6 +6444,8 @@ def exportCollection(
 
     # Select bands for export
     collection = collection.select(exportBands)
+
+    tasks = []
 
     # Iterate across each year and export image
     for year in ee.List.sequence(startYear + timebuffer, endYear - timebuffer).getInfo():
@@ -6437,7 +6473,7 @@ def exportCollection(
         exportPath = exportPathRoot + "/" + exportName
 
         if exportToAssets:
-            exportToAssetWrapper(
+            t = exportToAssetWrapper(
                 composite,
                 exportName,
                 exportPath,
@@ -6447,10 +6483,13 @@ def exportCollection(
                 crs,
                 transform,
                 overwrite,
+                start,
             )
+            if not start and t is not None:
+                tasks.append(t)
 
         if exportToCloud:
-            exportToCloudStorageWrapper(
+            t = exportToCloudStorageWrapper(
                 composite,
                 exportName,
                 bucket,
@@ -6459,7 +6498,13 @@ def exportCollection(
                 crs,
                 transform,
                 overwrite,
+                start,
             )
+            if not start and t is not None:
+                tasks.append(t)
+
+    if not start:
+        return tasks
 
 
 #########################################################################
@@ -6485,6 +6530,7 @@ def exportCompositeCollection(
     exportBands,
     additionalPropertyDict=None,
     overwrite=False,
+    start: bool = True,
 ):
     """Exports yearly composites to Earth Engine assets with scaled integer values.
 
@@ -6518,9 +6564,13 @@ def exportCompositeCollection(
             attach to each exported image. Defaults to None.
         overwrite (bool, optional): If True, overwrites existing assets.
             Defaults to False.
+        start (bool, optional): If ``True``, starts export tasks immediately.
+            If ``False``, creates the tasks but does not start them and returns
+            a list of task objects. Defaults to ``True``.
 
     Returns:
-        None: Submits export tasks as a side effect.
+        list[ee.batch.Task] | None: A list of task objects if ``start=False``,
+            otherwise ``None`` (tasks are started as a side effect).
 
     Examples:
         >>> import geeViz.getImagesLib as gil
@@ -6542,6 +6592,9 @@ def exportCompositeCollection(
     outputName = outputName.replace("/\//g", "-")
 
     collection = collection.select(exportBands)
+
+    tasks = []
+
     for year in ee.List.sequence(startYear + timebuffer, endYear - timebuffer).getInfo():
         # Set up dates
         startYearT = year - timebuffer
@@ -6581,7 +6634,7 @@ def exportCompositeCollection(
         exportName = outputName + "_" + toaOrSR + "_" + compositingMethod + "_" + str(int(startYearT)) + "_" + str(int(endYearT)) + "_" + str(int(startJulian)) + "_" + str(int(endJulian))
         exportPath = exportPathRoot + "/" + exportName
 
-        exportToAssetWrapper(
+        t = exportToAssetWrapper(
             imageForExport=composite,
             assetName=exportName,
             assetPath=exportPath,
@@ -6591,7 +6644,13 @@ def exportCompositeCollection(
             crs=crs,
             transform=transform,
             overwrite=overwrite,
+            start=start,
         )
+        if not start and t is not None:
+            tasks.append(t)
+
+    if not start:
+        return tasks
 
 
 #########################################################################

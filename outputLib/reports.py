@@ -302,9 +302,10 @@ class Report:
                   (``ee.ImageCollection`` only).
                 * ``None`` or ``False`` — no thumbnail.
 
-            chart_types (list of str, optional): Chart types to produce
-                for this section.  Each entry is a single chart type
-                string passed to ``summarize_and_chart(chart_type=...)``.
+            chart_types (list of str or str, optional): Chart types to
+                produce for this section.  Accepts a list of strings, a
+                single string, or a comma-delimited string.  Each entry
+                is passed to ``summarize_and_chart(chart_type=...)``.
                 Valid values include ``"bar"``, ``"stacked_bar"``,
                 ``"line+markers"``, ``"stacked_line+markers"``,
                 ``"donut"``, ``"scatter"``, and ``"sankey"``.
@@ -313,13 +314,15 @@ class Report:
                 ``transition_periods``, ``sankey_band_name``, and
                 ``min_percentage`` kwargs are used for that chart.
 
-                An empty list ``[]`` or ``None`` auto-detects a single
-                chart type (existing behavior).  Maximum recommended
-                length is 3.
+                An empty list ``[]``, empty string, or ``None``
+                auto-detects a single chart type (existing behavior).
+                Maximum recommended length is 3.
 
                 Examples::
 
-                    chart_types=["sankey", "line+markers"]
+                    chart_types="sankey"                    # single string
+                    chart_types="sankey,bar"                # comma-delimited
+                    chart_types=["sankey", "line+markers"]  # list
                     chart_types=["bar", "donut"]
                     chart_types=["sankey"]  # sankey only, no line chart
 
@@ -346,8 +349,13 @@ class Report:
         Returns:
             Report: self (for method chaining).
         """
-        # Normalize chart_types
-        ct_list = list(chart_types) if chart_types else []
+        # Normalize chart_types — accept "sankey" or "sankey,bar" or ["sankey","bar"]
+        if isinstance(chart_types, str):
+            ct_list = [s.strip() for s in chart_types.split(",") if s.strip()]
+        elif chart_types:
+            ct_list = list(chart_types)
+        else:
+            ct_list = []
 
         self._sections.append(_Section(
             ee_obj, geometry, title, prompt, kwargs,
@@ -1741,16 +1749,13 @@ class Report:
         except Exception as e:
             print(f"  pdfkit failed: {e}")
 
-        # Strategy 3: Fallback — save print-ready HTML
-        fallback = output_path.rsplit(".", 1)[0] + "_printable.html"
-        with open(fallback, "w", encoding="utf-8") as f:
-            f.write(html)
+        # Strategy 3: Fallback — return print-ready HTML content
+        # (caller is responsible for saving via save_file or open)
         print(
-            f"PDF conversion not available.\n"
-            f"Print-ready HTML saved to: {fallback}\n"
-            f"Open in a browser -> Print -> Save as PDF"
+            "PDF conversion not available (Chrome/wkhtmltopdf not found).\n"
+            "Returning print-ready HTML instead. Download and open in browser -> Print -> Save as PDF."
         )
-        return fallback
+        return html
 
 
 # ---------------------------------------------------------------------------

@@ -1652,8 +1652,7 @@ def generate_gif(ee_obj, geometry, viz_params=None, band_name=None,
             ``"lower-left"``, or ``"lower-right"``.
             Defaults to ``"upper-left"``.
         date_font_size (int, optional): Font size in pixels for the
-            date label.  Auto-scaled from ``dimensions`` when ``None``.
-            Defaults to ``None``.
+            date label.  Default ``None`` (auto: 1.4× ``label_font_size``).
         burn_in_legend (bool, optional): Append a legend panel to the
             right side of each frame for thematic data.  Only rendered
             when class names and palette are available in image
@@ -1675,7 +1674,7 @@ def generate_gif(ee_obj, geometry, viz_params=None, band_name=None,
             Defaults to ``None`` (not saved).
         crs (str, optional): CRS code (e.g. ``"EPSG:4326"``).
             Applies ``setDefaultProjection`` to each frame.
-            Defaults to ``None``.
+            Defaults to ``'EPSG:3857'``.
         transform (list, optional): Affine transform as a 6-element
             list.  Requires ``crs``.  Defaults to ``None``.
         scale (float, optional): Nominal pixel scale in meters.
@@ -1713,6 +1712,21 @@ def generate_gif(ee_obj, geometry, viz_params=None, band_name=None,
             compact layout.
         title (str, optional): Title text rendered as a strip above the
             GIF frames.  Defaults to ``None`` (no title).
+        title_font_size (int, optional): Font size in pixels for the
+            title strip.  Defaults to ``18``.
+        label_font_size (int, optional): Font size in pixels for legend
+            labels and scalebar ticks.  Defaults to ``12``.
+        burn_in_geometry (bool, optional): Draw the study area geometry
+            outline on each frame.  Defaults to ``False``.
+        geometry_outline_color (tuple or None, optional): Color for the
+            geometry outline.  When ``None``, auto-derived from
+            ``font_color``.  Defaults to ``None``.
+        geometry_fill_color (str or None, optional): Fill color for the
+            geometry interior.  Defaults to ``None`` (no fill).
+        geometry_outline_weight (int, optional): Line width in pixels
+            for the geometry outline.  Defaults to ``2``.
+        clip_to_geometry (bool, optional): Clip imagery to the geometry
+            boundary.  Defaults to ``True``.
 
     Returns:
         dict: A dictionary with the following keys:
@@ -1795,9 +1809,9 @@ def generate_gif(ee_obj, geometry, viz_params=None, band_name=None,
             fw, fh = pil_frames[0].size
             basemap_img = _fetch_basemap(bounds, fw, fh, basemap, crs=crs)
 
-    # Auto-scale font size for date
+    # Auto-scale font size for date — larger than scalebar tick labels
     if date_font_size is None:
-        date_font_size = label_font_size
+        date_font_size = max(label_font_size, int(label_font_size * 1.4))
     font = _get_font(date_font_size)
 
     # Build legend panel once (same for all frames)
@@ -1928,7 +1942,7 @@ def generate_filmstrip(ee_obj, geometry, viz_params=None, band_name=None,
             Defaults to ``None`` (not saved).
         crs (str, optional): CRS code (e.g. ``"EPSG:4326"``).
             Applies ``setDefaultProjection`` to each frame.
-            Defaults to ``None``.
+            Defaults to ``'EPSG:3857'``.
         transform (list, optional): Affine transform as a 6-element
             list.  Requires ``crs``.  Defaults to ``None``.
         scale (float, optional): Nominal pixel scale in meters.
@@ -1961,9 +1975,26 @@ def generate_filmstrip(ee_obj, geometry, viz_params=None, band_name=None,
         inset_on_map (bool, optional): Place the inset on the map
             rather than as a separate strip.  For filmstrips this
             controls positioning in the bottom strip area.
-            Defaults to ``True``.
+            Defaults to ``False``.
         title (str, optional): Title text rendered as a strip above the
             grid.  Defaults to ``None`` (no title).
+        title_font_size (int, optional): Font size in pixels for the
+            title strip.  Defaults to ``18``.
+        label_font_size (int, optional): Font size in pixels for legend
+            labels and scalebar ticks.  Defaults to ``12``.
+        burn_in_geometry (bool, optional): Draw the study area geometry
+            outline on each frame.  Defaults to ``False``.
+        geometry_outline_color (tuple or None, optional): Color for the
+            geometry outline.  When ``None``, auto-derived from
+            ``font_color``.  Defaults to ``None``.
+        geometry_fill_color (str or None, optional): Fill color for the
+            geometry interior.  Defaults to ``None`` (no fill).
+        geometry_outline_weight (int, optional): Line width in pixels
+            for the geometry outline.  Defaults to ``2``.
+        clip_to_geometry (bool, optional): Clip imagery to the geometry
+            boundary.  Defaults to ``True``.
+        geometry_legend_label (str, optional): Label for the geometry
+            in the legend.  Defaults to ``"Study Area"``.
 
     Returns:
         dict: A dictionary with the following keys:
@@ -4176,7 +4207,7 @@ def generate_thumbs(ee_obj, geometry, viz_params=None, band_name=None,
             Defaults to ``None`` (not saved).
         crs (str, optional): CRS code (e.g. ``"EPSG:4326"``).
             Applies ``setDefaultProjection`` to the image.
-            Defaults to ``None``.
+            Defaults to ``'EPSG:3857'``.
         transform (list, optional): Affine transform as a 6-element
             list.  Requires ``crs``.  Defaults to ``None``.
         scale (float, optional): Nominal pixel scale in meters.
@@ -4208,7 +4239,7 @@ def generate_thumbs(ee_obj, geometry, viz_params=None, band_name=None,
         inset_scale (float, optional): Relative height of the inset
             compared to the frame height.  Defaults to ``0.3``.
         inset_on_map (bool, optional): Place the inset directly on the
-            map rather than below it.  Defaults to ``True``.
+            map rather than below it.  Defaults to ``False``.
         title (str, optional): Title text rendered as a strip above the
             thumbnail.  Defaults to ``None`` (no title).
         burn_in_geometry (bool, optional): Paint the geometry boundary

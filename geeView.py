@@ -792,51 +792,93 @@ class mapper:
 
                     "canAreaChart" (bool): whether to include this layer for area charting. If the layer is complex, area charting can be quite slow,
 
-                    "areaChartParams" (dict, optional): Dictionary of additional parameters for area charting:
+                    "areaChartParams" (dict, optional): Parameters for the interactive area charting
+                        in the geeView map viewer. Passed to the viewer's JS ``areaChart.addLayer()``.
+                        All keys are optional.
 
-                        {
-                            "reducer" (Reducer, default `ee.Reducer.mean()` if no bandName_class_values, bandName_class_names, bandName_class_palette properties are available. `ee.Reducer.frequencyHistogram` if those are available or `thematic`:True (see below)): The reducer used to compute zonal summary statistics.,
+                        **Reducer & spatial resolution:**
 
-                            "crs" (str, default "EPSG:5070"): the coordinate reference system string to use for are chart zonal stats,
+                        * ``"reducer"`` (ee.Reducer): Reducer for zonal stats. Default
+                          ``ee.Reducer.frequencyHistogram()`` for thematic data (when
+                          ``bandName_class_values/names/palette`` properties exist),
+                          ``ee.Reducer.mean()`` otherwise.
+                        * ``"crs"`` (str, default ``"EPSG:5070"``): CRS for zonal stats.
+                        * ``"transform"`` (list, default ``[30, 0, -2361915, 0, -30, 3177735]``):
+                          Snap transform for zonal stats.
+                        * ``"scale"`` (int, default None): Spatial resolution. Only specify
+                          if ``transform`` is None.
+                        * ``"minZoomSpecifiedScale"`` (int, default 11): Zoom level below
+                          which spatial resolution doubles per zoom step.
 
-                            "transform" (list, default [30, 0, -2361915, 0, -30, 3177735]): the transform to snap to for zonal stats,
+                        **Chart type & display:**
 
-                            "scale" (int, default None): The spatial resolution to use for zonal stats. Only specify if transform : None.
+                        * ``"line"`` (bool, default True): Create a line chart.
+                        * ``"sankey"`` (bool, default False): Create Sankey transition charts.
+                          Only for thematic ``ee.ImageCollection`` with ``system:time_start``.
+                        * ``"chartType"`` (str, default ``"line"`` for ImageCollection,
+                          ``"bar"`` for Image): Options: ``"line"``, ``"bar"``,
+                          ``"stacked-line"``, ``"stacked-bar"``.
+                        * ``"steppedLine"`` (bool, default False): Step interpolation.
+                        * ``"showGrid"`` (bool, default True): Show grid lines.
+                        * ``"rangeSlider"`` (bool, default False): Show x-axis range slider.
+                        * ``"autoScale"`` (bool): Auto-scale chart axes.
 
-                            "line" (bool, default True): Whether to create a line chart,
+                        **Sankey-specific:**
 
-                            "sankey" (bool, default False): Whether to create Sankey charts - only available for thematic (discrete) inputs that have a `system:time_start` property set for each image,
+                        * ``"sankeyTransitionPeriods"`` (list of lists): Years for sankey
+                          transitions (e.g. ``[[1985,1987],[2000,2002],[2020,2022]]``).
+                        * ``"sankeyMinPercentage"`` (float, default 0.5): Min class % to
+                          include in sankey.
 
-                            "chartLabelMaxWidth" (int, default 40): The maximum number of characters, including spaces, allowed in a single line of a chart class label. The class name will be broken at this number of characters, including spaces, to go to the next line,
+                        **Masking / threshold support:**
 
-                            "chartLabelMaxLength" (int, default 100): The maximum number of characters, including spaces, allowed in a chart class label. Any class name with more characters, including spaces, than this number will be cut off at this number of characters,
+                        * ``"shouldUnmask"`` (bool, default False): Include masked pixels
+                          in area chart by unmasking before reducing. Use with
+                          ``.selfMask()`` threshold layers so percentages are relative
+                          to total area.
+                        * ``"unmaskValue"`` (int/float, default 0): Value to unmask to.
 
-                            "sankeyTransitionPeriods" (list of lists, default None): The years to use as transition periods for sankey charts (e.g. [[1985,1987],[2000,2002],[2020,2022]]). If not provided, users can enter years in the map user interface under `Area Tools -> Transition Charting Periods`. These will automatically be used for any layers where no sankeyTransitionPeriods were provided. If years are provided, the years in the user interface will not be used for that layer,
+                        **Labels & formatting:**
 
-                            "sankeyMinPercentage" (float, default 0.5): The minimum percentage a given class has to be to be shown in the sankey chart,
+                        * ``"bandNames"`` (list or str): Bands to chart. Defaults to
+                          all bands or ``viz["bands"]``.
+                        * ``"dateFormat"`` (str, default ``"YYYY"``): Date format for
+                          x-axis labels.
+                        * ``"xAxisLabel"`` (str): Custom x-axis label.
+                        * ``"yAxisLabel"`` (str): Custom y-axis label. Defaults to
+                          ``"% Area"`` for thematic, ``"Mean"`` for continuous.
+                        * ``"xAxisProperty"`` (str): Property for x-axis values
+                          instead of date.
+                        * ``"xTickDateFormat"`` (str): Date format for x-axis ticks.
+                        * ``"hovermode"`` (str, default ``"closest"``): Options:
+                          ``"closest"``, ``"x"``, ``"y"``, ``"x unified"``,
+                          ``"y unified"``.
+                        * ``"palette"`` (list or comma-separated str): Hex colors for
+                          chart series.
+                        * ``"chartLabelMaxWidth"`` (int, default 40): Max chars per
+                          line in class labels.
+                        * ``"chartLabelMaxLength"`` (int, default 100): Max total
+                          chars in class labels.
+                        * ``"barChartMaxClasses"`` (int, default 20): Max classes in
+                          bar charts.
+                        * ``"chartPrecision"`` (int, default 3): Decimal places.
+                        * ``"chartDecimalProportion"`` (float, default 0.25):
+                          Proportion of total decimal places to show.
 
-                            "thematic" (bool): Whether input has discrete values or not. If True, it forces the reducer to `ee.Reducer.frequencyHistogram()` even if not specified and even if bandName_class_values, bandName_class_names, bandName_class_palette properties are not available,
+                        **Sizing:**
 
-                            "palette" (list, or comma-separated strings): List of hex codes for colors for charts. This is especially useful when bandName_class_values, bandName_class_names, bandName_class_palette properties are not available, but there is a desired set of colors for each band to have on the chart,
+                        * ``"chartWidth"`` (int): Chart width in pixels.
+                        * ``"chartHeight"`` (int): Chart height in pixels.
+                        * ``"chartTitleFontSize"`` (int): Title font size.
+                        * ``"chartLabelFontSize"`` (int): Label font size.
+                        * ``"chartAxisTitleFontSize"`` (int): Axis title font size.
 
-                            "showGrid" (bool, default True): Whether to show the grid lines on the line or bar graph,
+                        **Class overrides (auto-detected from image properties):**
 
-                            "rangeSlider" (bool,default False): Whether to include the x-axis range selector on the bottom of each graph (`https://plotly.com/javascript/range-slider/>`),
-
-                            "barChartMaxClasses" (int, default 20): The maximum number of classes to show for image bar charts. Will automatically only show the top `bartChartMaxClasses` in any image bar chart. Any downloaded csv table will still have all of the class counts,
-
-                            "minZoomSpecifiedScale" (int, default 11): The map zoom level where any lower zoom level, not including this zoom level, will multiply the spatial resolution used for the zonal stats by 2 for each lower zoom level. E.g. if the `minZoomSpecifiedScale` is 9 and the `scale` is 30, any zoom level >= 9 will compute zonal stats at 30m spatial resolution. Then, at zoom level 8, it will be 60m. Zoom level 7 will be 120m, etc,
-
-                            "chartPrecision" (int, default 3): Used to override the default global precision settings for a specific area charting layer. See `setQueryPrecision` for setting the global charting precision. When specified, for this specific area charting layer, will show the larger of `chartPrecision` decimal places or ceiling(`chartDecimalProportion` * total decimal places). E.g. if the number is 1.12345678, 0.25 of 8 decimal places is 2, so 3 will be used and yield 1.123,
-
-                            "chartDecimalProportion" (float, default 0.25): Used to override the default global precision settings for a specific area charting layer. See `setQueryPrecision` for setting the global charting precision. When specified, for this specific area charting layer, will show the larger of `chartPrecision` decimal places or `chartDecimalProportion` * total decimal places. E.g. if the number is 1.1234567891234, ceiling(0.25 of 13) decimal places is 4, so 4 will be used and yield 1.1235,
-
-                            "hovermode" (str, default "closest"): The mode to show hover text in area summary charts. Options include "closest", "x", "y", "x unified", and "y unified",
-
-                            "yAxisLabel" (str, default an appropriate label based on whether data are thematic or continuous): The Y axis label that will be included in charts. Defaults to a unit of % area for thematic and mean for continuous data,
-
-                            "chartType" (str, default "line" for `ee.ImageCollection` and "bar" for `ee.Image` objects): The type of chart to show. Options include "line", "bar", "stacked-line", and "stacked-bar". This is only used for `ee.ImageCollection` objects. For `ee.Image` objects, the chartType is always "bar".
-                        }
+                        * ``"class_names"`` (dict): Override class names by band.
+                        * ``"class_values"`` (dict): Override class values by band.
+                        * ``"class_palette"`` (dict): Override class colors by band.
+                        * ``"class_visibility"`` (dict): Override class visibility.
 
                 }
             name (str): Descriptive name for map layer that will be shown on the map UI
@@ -989,51 +1031,93 @@ class mapper:
 
                     "canAreaChart" (bool): whether to include this layer for area charting. If the layer is complex, area charting can be quite slow,
 
-                    "areaChartParams" (dict, optional): Dictionary of additional parameters for area charting:
+                    "areaChartParams" (dict, optional): Parameters for the interactive area charting
+                        in the geeView map viewer. Passed to the viewer's JS ``areaChart.addLayer()``.
+                        All keys are optional.
 
-                        {
-                            "reducer" (Reducer, default `ee.Reducer.mean()` if no bandName_class_values, bandName_class_names, bandName_class_palette properties are available. `ee.Reducer.frequencyHistogram` if those are available or `thematic`:True (see below)): The reducer used to compute zonal summary statistics.,
+                        **Reducer & spatial resolution:**
 
-                            "crs" (str, default "EPSG:5070"): the coordinate reference system string to use for are chart zonal stats,
+                        * ``"reducer"`` (ee.Reducer): Reducer for zonal stats. Default
+                          ``ee.Reducer.frequencyHistogram()`` for thematic data (when
+                          ``bandName_class_values/names/palette`` properties exist),
+                          ``ee.Reducer.mean()`` otherwise.
+                        * ``"crs"`` (str, default ``"EPSG:5070"``): CRS for zonal stats.
+                        * ``"transform"`` (list, default ``[30, 0, -2361915, 0, -30, 3177735]``):
+                          Snap transform for zonal stats.
+                        * ``"scale"`` (int, default None): Spatial resolution. Only specify
+                          if ``transform`` is None.
+                        * ``"minZoomSpecifiedScale"`` (int, default 11): Zoom level below
+                          which spatial resolution doubles per zoom step.
 
-                            "transform" (list, default [30, 0, -2361915, 0, -30, 3177735]): the transform to snap to for zonal stats,
+                        **Chart type & display:**
 
-                            "scale" (int, default None): The spatial resolution to use for zonal stats. Only specify if transform : None.
+                        * ``"line"`` (bool, default True): Create a line chart.
+                        * ``"sankey"`` (bool, default False): Create Sankey transition charts.
+                          Only for thematic ``ee.ImageCollection`` with ``system:time_start``.
+                        * ``"chartType"`` (str, default ``"line"`` for ImageCollection,
+                          ``"bar"`` for Image): Options: ``"line"``, ``"bar"``,
+                          ``"stacked-line"``, ``"stacked-bar"``.
+                        * ``"steppedLine"`` (bool, default False): Step interpolation.
+                        * ``"showGrid"`` (bool, default True): Show grid lines.
+                        * ``"rangeSlider"`` (bool, default False): Show x-axis range slider.
+                        * ``"autoScale"`` (bool): Auto-scale chart axes.
 
-                            "line" (bool, default True): Whether to create a line chart,
+                        **Sankey-specific:**
 
-                            "sankey" (bool, default False): Whether to create Sankey charts - only available for thematic (discrete) inputs that have a `system:time_start` property set for each image,
+                        * ``"sankeyTransitionPeriods"`` (list of lists): Years for sankey
+                          transitions (e.g. ``[[1985,1987],[2000,2002],[2020,2022]]``).
+                        * ``"sankeyMinPercentage"`` (float, default 0.5): Min class % to
+                          include in sankey.
 
-                            "chartLabelMaxWidth" (int, default 40): The maximum number of characters, including spaces, allowed in a single line of a chart class label. The class name will be broken at this number of characters, including spaces, to go to the next line,
+                        **Masking / threshold support:**
 
-                            "chartLabelMaxLength" (int, default 100): The maximum number of characters, including spaces, allowed in a chart class label. Any class name with more characters, including spaces, than this number will be cut off at this number of characters,
+                        * ``"shouldUnmask"`` (bool, default False): Include masked pixels
+                          in area chart by unmasking before reducing. Use with
+                          ``.selfMask()`` threshold layers so percentages are relative
+                          to total area.
+                        * ``"unmaskValue"`` (int/float, default 0): Value to unmask to.
 
-                            "sankeyTransitionPeriods" (list of lists, default None): The years to use as transition periods for sankey charts (e.g. [[1985,1987],[2000,2002],[2020,2022]]). If not provided, users can enter years in the map user interface under `Area Tools -> Transition Charting Periods`. These will automatically be used for any layers where no sankeyTransitionPeriods were provided. If years are provided, the years in the user interface will not be used for that layer,
+                        **Labels & formatting:**
 
-                            "sankeyMinPercentage" (float, default 0.5): The minimum percentage a given class has to be to be shown in the sankey chart,
+                        * ``"bandNames"`` (list or str): Bands to chart. Defaults to
+                          all bands or ``viz["bands"]``.
+                        * ``"dateFormat"`` (str, default ``"YYYY"``): Date format for
+                          x-axis labels.
+                        * ``"xAxisLabel"`` (str): Custom x-axis label.
+                        * ``"yAxisLabel"`` (str): Custom y-axis label. Defaults to
+                          ``"% Area"`` for thematic, ``"Mean"`` for continuous.
+                        * ``"xAxisProperty"`` (str): Property for x-axis values
+                          instead of date.
+                        * ``"xTickDateFormat"`` (str): Date format for x-axis ticks.
+                        * ``"hovermode"`` (str, default ``"closest"``): Options:
+                          ``"closest"``, ``"x"``, ``"y"``, ``"x unified"``,
+                          ``"y unified"``.
+                        * ``"palette"`` (list or comma-separated str): Hex colors for
+                          chart series.
+                        * ``"chartLabelMaxWidth"`` (int, default 40): Max chars per
+                          line in class labels.
+                        * ``"chartLabelMaxLength"`` (int, default 100): Max total
+                          chars in class labels.
+                        * ``"barChartMaxClasses"`` (int, default 20): Max classes in
+                          bar charts.
+                        * ``"chartPrecision"`` (int, default 3): Decimal places.
+                        * ``"chartDecimalProportion"`` (float, default 0.25):
+                          Proportion of total decimal places to show.
 
-                            "thematic" (bool): Whether input has discrete values or not. If True, it forces the reducer to `ee.Reducer.frequencyHistogram()` even if not specified and even if bandName_class_values, bandName_class_names, bandName_class_palette properties are not available,
+                        **Sizing:**
 
-                            "palette" (list, or comma-separated strings): List of hex codes for colors for charts. This is especially useful when bandName_class_values, bandName_class_names, bandName_class_palette properties are not available, but there is a desired set of colors for each band to have on the chart,
+                        * ``"chartWidth"`` (int): Chart width in pixels.
+                        * ``"chartHeight"`` (int): Chart height in pixels.
+                        * ``"chartTitleFontSize"`` (int): Title font size.
+                        * ``"chartLabelFontSize"`` (int): Label font size.
+                        * ``"chartAxisTitleFontSize"`` (int): Axis title font size.
 
-                            "showGrid" (bool, default True): Whether to show the grid lines on the line or bar graph,
+                        **Class overrides (auto-detected from image properties):**
 
-                            "rangeSlider" (bool,default False): Whether to include the x-axis range selector on the bottom of each graph (`https://plotly.com/javascript/range-slider/>`),
-
-                            "barChartMaxClasses" (int, default 20): The maximum number of classes to show for image bar charts. Will automatically only show the top `bartChartMaxClasses` in any image bar chart. Any downloaded csv table will still have all of the class counts,
-
-                            "minZoomSpecifiedScale" (int, default 11): The map zoom level where any lower zoom level, not including this zoom level, will multiply the spatial resolution used for the zonal stats by 2 for each lower zoom level. E.g. if the `minZoomSpecifiedScale` is 9 and the `scale` is 30, any zoom level >= 9 will compute zonal stats at 30m spatial resolution. Then, at zoom level 8, it will be 60m. Zoom level 7 will be 120m, etc,
-
-                            "chartPrecision" (int, default 3): Used to override the default global precision settings for a specific area charting layer. See `setQueryPrecision` for setting the global charting precision. When specified, for this specific area charting layer, will show the larger of `chartPrecision` decimal places or ceiling(`chartDecimalProportion` * total decimal places). E.g. if the number is 1.12345678, 0.25 of 8 decimal places is 2, so 3 will be used and yield 1.123,
-
-                            "chartDecimalProportion" (float, default 0.25): Used to override the default global precision settings for a specific area charting layer. See `setQueryPrecision` for setting the global charting precision. When specified, for this specific area charting layer, will show the larger of `chartPrecision` decimal places or `chartDecimalProportion` * total decimal places. E.g. if the number is 1.1234567891234, ceiling(0.25 of 13) decimal places is 4, so 4 will be used and yield 1.1235,
-
-                            "hovermode" (str, default "closest"): The mode to show hover text in area summary charts. Options include "closest", "x", "y", "x unified", and "y unified",
-
-                            "yAxisLabel" (str, default an appropriate label based on whether data are thematic or continuous): The Y axis label that will be included in charts. Defaults to a unit of % area for thematic and mean for continuous data,
-
-                            "chartType" (str, default "line" for `ee.ImageCollection` and "bar" for `ee.Image` objects): The type of chart to show. Options include "line", "bar", "stacked-line", and "stacked-bar". This is only used for `ee.ImageCollection` objects. For `ee.Image` objects, the chartType is always "bar".
-                        }
+                        * ``"class_names"`` (dict): Override class names by band.
+                        * ``"class_values"`` (dict): Override class values by band.
+                        * ``"class_palette"`` (dict): Override class colors by band.
+                        * ``"class_visibility"`` (dict): Override class visibility.
 
                 }
             name (str): Descriptive name for map layer that will be shown on the map UI
@@ -1365,8 +1449,7 @@ class mapper:
           ``http://localhost:<port>/geeView/?accessToken=...`` in the
           default browser via ``webbrowser.open()``.
         - **Notebooks (VS Code, Jupyter)**: displays an inline
-          ``IFrame(src="http://localhost:<port>/geeView/...")`` and
-          also opens the browser.
+          ``IFrame`` only (no browser tab).
         - **Google Colab**: uses ``google.colab.kernel.proxyPort()``
           to get a proxy URL (auto-detected, no user action).
         - **Vertex AI Workbench**: uses ``self.proxy_url`` (set it
@@ -1375,14 +1458,20 @@ class mapper:
         - **Cloud Run / remote deployments**: set ``Map.proxy_url``
           to your service's public URL, same pattern as Workbench.
 
+        When neither ``open_browser`` nor ``open_iframe`` is specified,
+        only one opens: IFrame in notebooks, browser otherwise. If one
+        is explicitly set (e.g. ``open_browser=True``), only that one
+        opens. If one is explicitly disabled (e.g.
+        ``open_browser=False``), the other opens instead. Both can be
+        set to ``True`` to get both.
+
         Args:
-            open_browser (bool): Whether or not to open the browser.
-                If unspecified, auto-selected: True outside notebooks,
-                True in notebooks too (since VS Code IFrame can be
-                unreliable).
-            open_iframe (bool): Whether or not to open an inline
-                IFrame. If unspecified, auto-selected: True in
-                notebooks, False otherwise.
+            open_browser (bool | None): Open in the default browser.
+                Default ``None`` (auto: ``True`` outside notebooks,
+                ``False`` in notebooks).
+            open_iframe (bool | None): Display an inline IFrame.
+                Default ``None`` (auto: ``True`` in notebooks,
+                ``False`` otherwise).
             iframe_height (int, default 525): Height of the inline
                 IFrame in pixels.
 
@@ -1423,10 +1512,16 @@ class mapper:
             self.project, self.accessToken, self.accessTokenCreationTime
         )
 
-        # Determine display mode
+        # Determine display mode — if user explicitly sets one, only that one fires.
+        # If user explicitly disables one (e.g. open_browser=False), the other opens.
         in_notebook = self.isNotebook
-        want_browser = open_browser if open_browser is not None else True
-        want_iframe = open_iframe if open_iframe is not None else in_notebook
+        if open_browser is not None or open_iframe is not None:
+            want_browser = open_browser if open_browser is not None else not open_iframe
+            want_iframe = open_iframe if open_iframe is not None else not open_browser
+        else:
+            # Auto: iframe in notebooks, browser otherwise
+            want_iframe = in_notebook
+            want_browser = not in_notebook
 
         # Open viewer — environment-specific URL construction
         if IS_COLAB:
@@ -1520,11 +1615,39 @@ class mapper:
 
         Calls ``getMapId(viz)`` on every ee object added via ``addLayer`` or
         ``addTimeLapse``.  This catches bad band names, invalid viz params,
-        missing properties, and computation errors — without launching a
+        missing properties, and computation errors -- without launching a
         browser.  Runs all requests in parallel via ``ThreadPoolExecutor``.
 
+        When ``autoViz: True`` is set in a layer's viz params, the method also
+        validates that the image carries the class properties the viewer
+        expects: ``<bandName>_class_values``, ``<bandName>_class_names``, and
+        ``<bandName>_class_palette`` for at least one band.
+
         Returns:
-            dict: ``{"pass": bool, "layers": [{"name": str, "status": "ok"|"error", "error": str|None}, ...]}``
+            dict: Structure::
+
+                {
+                    "pass": bool,          # True only if every layer has status "ok"
+                    "layers": [
+                        {
+                            "name": str,
+                            "status": "ok" | "error",
+                            "error": str | None,
+                            "warnings": list[str] | None  # present only when non-empty
+                        },
+                        ...
+                    ]
+                }
+
+            Error vs warning distinction:
+
+            - **Error** (``status="error"``): ``autoViz: True`` but *no* band
+              has any matching class properties, so the viewer will break.
+              Also raised when class properties exist but are keyed to band
+              names that don't exist on the image (orphaned properties).
+            - **Warning** (``status="ok"`` with ``warnings``): A band has
+              *partial* class properties (e.g. ``_class_values`` is present
+              but ``_class_palette`` is missing). Rendering may be incorrect.
 
         Example:
             >>> Map.clearMap()
@@ -1551,11 +1674,95 @@ class mapper:
             for k in ("bands", "min", "max", "gain", "bias", "gamma", "palette", "opacity", "format"):
                 if k in viz:
                     map_viz[k] = viz[k]
+            warnings = []
             try:
                 ee_obj.getMapId(map_viz)
-                return {"name": name, "status": "ok", "error": None}
             except Exception as e:
                 return {"name": name, "status": "error", "error": str(e)}
+
+            # --- autoViz validation: check class properties exist for band names ---
+            # When autoViz is True, the viewer expects <bandName>_class_values,
+            # <bandName>_class_names, <bandName>_class_palette properties on the
+            # image. If these are missing, the viewer fails silently or shows a
+            # cryptic JS error like "Cannot read properties of undefined".
+            try:
+                if viz.get("autoViz"):
+                    # Get the ee object to check — for ImageCollection, use .first()
+                    check_obj = ee_obj
+                    obj_type = ee_obj.__class__.__name__
+                    if obj_type == "ImageCollection":
+                        check_obj = ee_obj.first()
+
+                    if hasattr(check_obj, "bandNames") and hasattr(check_obj, "toDictionary"):
+                        band_names = check_obj.bandNames().getInfo()
+                        prop_keys = set(check_obj.toDictionary().keys().getInfo())
+
+                        for bn in band_names:
+                            cv_key = f"{bn}_class_values"
+                            cn_key = f"{bn}_class_names"
+                            cp_key = f"{bn}_class_palette"
+                            has_cv = cv_key in prop_keys
+                            has_cn = cn_key in prop_keys
+                            has_cp = cp_key in prop_keys
+
+                            if has_cv or has_cn or has_cp:
+                                # At least one exists — check all three are present
+                                missing = []
+                                if not has_cv:
+                                    missing.append(cv_key)
+                                if not has_cn:
+                                    missing.append(cn_key)
+                                if not has_cp:
+                                    missing.append(cp_key)
+                                if missing:
+                                    warnings.append(
+                                        f"Band '{bn}' has partial class properties "
+                                        f"(missing: {', '.join(missing)}). "
+                                        f"autoViz may not render correctly."
+                                    )
+                            # If none exist for this band, that's fine — autoViz
+                            # will use continuous viz for that band.
+
+                        # Check if NO band has any class properties at all
+                        has_any_class_props = any(
+                            f"{bn}_class_values" in prop_keys for bn in band_names
+                        )
+                        if not has_any_class_props:
+                            # This is an error — the map will break
+                            # Check if class props exist for OTHER names (wrong band names)
+                            orphan_prefixes = set()
+                            for pk in prop_keys:
+                                if pk.endswith("_class_values"):
+                                    prefix = pk[: -len("_class_values")]
+                                    if prefix not in band_names:
+                                        orphan_prefixes.add(prefix)
+
+                            if orphan_prefixes:
+                                err_msg = (
+                                    f"autoViz is True but class properties are set for "
+                                    f"bands that don't exist in this image "
+                                    f"({', '.join(sorted(orphan_prefixes)[:3])}). "
+                                    f"Actual bands: {', '.join(band_names[:5])}. "
+                                    f"Rename the properties to match the band names "
+                                    f"(e.g. {band_names[0]}_class_values)."
+                                )
+                            else:
+                                err_msg = (
+                                    f"autoViz is True but no band has class properties "
+                                    f"({', '.join(bn + '_class_values' for bn in band_names[:3])}... not found). "
+                                    f"The viewer needs <bandName>_class_values, "
+                                    f"<bandName>_class_names, and <bandName>_class_palette "
+                                    f"properties for thematic rendering."
+                                )
+                            return {"name": name, "status": "error", "error": err_msg}
+            except Exception as e:
+                # Don't let validation failure block the test
+                warnings.append(f"autoViz check failed: {e}")
+
+            result = {"name": name, "status": "ok", "error": None}
+            if warnings:
+                result["warnings"] = warnings
+            return result
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             for idx, idDict in enumerate(self.idDictList):

@@ -286,86 +286,60 @@ from geeViz.outputLib._templates import (
 )
 
 
-_PLOTLY_CDN_URL = "https://cdnjs.cloudflare.com/ajax/libs/plotly.js/1.33.1/plotly.min.js"
+_PLOTLY_CDN_URL = "cdn"
 
 
-def save_chart_html(fig, filename, include_plotlyjs=_PLOTLY_CDN_URL, sankey=False,
-                    theme="dark", bg_color=None, font_color=None, **kwargs):
+def save_chart_html(fig, filename, include_plotlyjs=_PLOTLY_CDN_URL, **kwargs):
     """Save a chart to an HTML file.
 
     Accepts either a Plotly ``Figure`` or an HTML string (from
-    ``summarize_and_chart(chart_type='sankey')``).  Applies a theme so
-    all chart types have a consistent look.  Works both inside and
-    outside the MCP sandbox.
+    ``summarize_and_chart(chart_type='sankey')``).
 
     Args:
-        fig: ``plotly.graph_objects.Figure`` or ``str`` (D3 sankey HTML
-            from ``summarize_and_chart(chart_type='sankey')``).
-        filename (str): Output filename (e.g. ``"chart.html"``). In the
-            MCP sandbox, files are saved to ``generated_outputs/``.
+        fig: ``plotly.graph_objects.Figure`` or ``str`` (D3 sankey HTML).
+        filename (str): Output filename (e.g. ``"chart.html"``).
         include_plotlyjs: How to include Plotly.js. Default ``"cdn"``.
-        sankey (bool): Deprecated — ignored.  Sankey charts are now
-            returned as HTML strings and detected automatically.
-        theme: Theme preset name, :class:`~geeViz.outputLib.themes.Theme`
-            instance, or color string. Default ``"dark"``.
-        bg_color: Background color override.
-        font_color: Font/text color override.
 
     Returns:
         str: Path to the saved file.
-
-    Examples:
-        >>> path = cl.save_chart_html(fig, "ndvi_trend.html")
-        >>> path = cl.save_chart_html(sankey_html, "sankey.html")
-        >>> path = cl.save_chart_html(fig, "chart.html", theme="light")
     """
-    _t = _themes.get_theme(theme, bg_color=bg_color, font_color=font_color)
-    # If fig is already an HTML string (from chart_sankey_d3), save directly
+    import os as _os
+
+    # If filename is already an absolute path, use it directly.
+    # Otherwise, try MCP sandbox save_file to resolve to generated_outputs/.
+    if _os.path.isabs(filename):
+        full_path = filename
+    else:
+        # Look for MCP sandbox save_file in caller's namespace
+        _save_fn = None
+        import builtins as _builtins
+        if hasattr(_builtins, "__dict__"):
+            _save_fn = _builtins.__dict__.get("save_file")
+        if _save_fn is None:
+            import inspect
+            frame = inspect.currentframe()
+            try:
+                caller_globals = frame.f_back.f_globals if frame.f_back else {}
+                _save_fn = caller_globals.get("save_file")
+            finally:
+                del frame
+        if _save_fn is not None:
+            # Use save_file to get the resolved path, then overwrite with write_html
+            full_path = _save_fn(_os.path.basename(filename), "")
+        else:
+            full_path = filename
+
+    _os.makedirs(_os.path.dirname(full_path) or ".", exist_ok=True)
+
     if isinstance(fig, str):
-        html = fig
+        # Sankey or pre-built HTML string
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write(fig)
     else:
-        # Apply theme to a copy so we don't mutate the caller's figure
-        import copy
-        themed_fig = copy.deepcopy(fig)
-        _themes.apply_plotly_theme(themed_fig, _t)
-        # Build download filename from the output filename (e.g. "lcms_donut.html"
-        # -> download as "lcms_donut.png"). Falls back to the figure title.
-        import os as _os
-        _stem = _os.path.splitext(_os.path.basename(filename))[0]
-        _cfg = _plotly_download_config(themed_fig)
-        if _stem:
-            _cfg["toImageButtonOptions"]["filename"] = _stem
-        html = themed_fig.to_html(
-            full_html=True, include_plotlyjs=include_plotlyjs,
-            config=_cfg,
-        )
-        # Inject body background style
-        _chart_style = _render_chart_style(_t)
-        if "</head>" in html:
-            html = html.replace("</head>", _chart_style + "</head>")
-        elif "<body>" in html:
-            html = html.replace("<body>", "<body>" + _chart_style)
+        # Plotly figure — write_html directly, no transformation
+        fig.write_html(full_path, include_plotlyjs=include_plotlyjs)
 
-    # Try MCP sandbox save_file first, fall back to direct write
-    import builtins as _builtins
-    _save_fn = _builtins.__dict__.get("save_file") if hasattr(_builtins, "__dict__") else None
-    if _save_fn is None:
-        # Check if save_file is in the caller's globals (MCP REPL injects it)
-        import inspect
-        frame = inspect.currentframe()
-        try:
-            caller_globals = frame.f_back.f_globals if frame.f_back else {}
-            _save_fn = caller_globals.get("save_file")
-        finally:
-            del frame
-
-    if _save_fn is not None:
-        return _save_fn(filename, html)
-    else:
-        # Outside MCP sandbox — direct file write
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(html)
-        return filename
+    return full_path
 
 
 def _find_browser():
