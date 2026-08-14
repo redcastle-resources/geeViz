@@ -31,10 +31,51 @@ for _arg in sys.argv[1:]:
 # ---------------------------------------------------------------------------
 if _SANDBOX_ENABLED:
     _AUDIT_BLOCKED_IMPORTS = frozenset({
-        "os", "subprocess", "shutil", "pathlib", "socket", "http",
-        "urllib", "requests", "ctypes", "signal", "threading",
-        "multiprocessing", "webbrowser", "tempfile", "code", "codeop",
-        "pty", "pipes", "resource", "pickle", "shelve", "xmlrpc",
+        # ── Filesystem / process control ──
+        "os", "subprocess", "shutil", "pathlib", "tempfile", "glob",
+        "mmap", "fcntl", "msvcrt", "resource", "signal",
+        # ── Networking (any form) ──
+        "socket", "http", "urllib", "requests", "ssl", "asyncio",
+        "select", "selectors", "smtplib", "ftplib", "poplib", "imaplib",
+        "telnetlib", "nntplib", "xmlrpc",
+        # ── Concurrency (indirect subprocess vectors) ──
+        "threading", "multiprocessing",
+        # ── Code execution / dynamic import bypasses ──
+        # importlib.import_module("os") would sidestep static import checks;
+        # marshal.loads on untrusted bytecode = arbitrary code exec;
+        # runpy runs a module as __main__; zipimport imports from a zip
+        # blob the attacker can construct via base64 → tempfile → import.
+        "importlib", "marshal", "runpy", "zipimport", "builtins",
+        "code", "codeop", "compileall", "py_compile",
+        # ── Introspection (secret discovery in memory) ──
+        # gc.get_objects() enumerates every live Python object — API keys,
+        # session cookies, DB connection strings.  inspect.getsource on a
+        # trusted-lib function could reveal internal secrets or an admin
+        # code path the attacker hasn't discovered yet.
+        "gc", "inspect", "dis", "traceback",
+        # ── Archive libraries — file-extraction path traversal (zip slip) ──
+        "zipfile", "tarfile", "gzip", "bz2", "lzma",
+        # ── Serialization — unpickling can execute arbitrary code ──
+        "pickle", "shelve", "dbm", "sqlite3",
+        # ── Misc high-risk ──
+        "pty", "pipes", "webbrowser", "getpass",
+    })
+    # Safe dotted submodules under otherwise-blocked top-levels. These are
+    # stdlib housekeeping imports (locks, cleanup callbacks, event contexts)
+    # that PIL / numpy / matplotlib / kaleido lazy-import as side effects of
+    # legitimate library use. They don't spawn processes, open sockets, or
+    # write files — blocking them breaks any user code that renders/saves
+    # imagery. Dangerous surfaces (multiprocessing.Process, .Pool, .spawn,
+    # os.system, subprocess.Popen) are still blocked because they require
+    # the parent top-level import or a syscall audit event.
+    _AUDIT_ALLOWED_SUBMODULES = frozenset({
+        "multiprocessing.resource_tracker",
+        "multiprocessing.util",
+        "multiprocessing.context",
+        "multiprocessing.reduction",
+        "multiprocessing.synchronize",
+        "urllib.parse",  # PIL and pandas parse URLs to sniff schemes
+        "http.client",   # transient in some SSL init paths
     })
     # Track whether we're inside the server's own init (allow) or user code (block)
     _audit_user_code_active = False
@@ -53,12 +94,63 @@ if _SANDBOX_ENABLED:
         callback's user frame would be above the trusted frame, so it's denied.
         """
         import inspect as _ins
-        _trusted_substrings = ("geeViz\\outputLib", "geeViz/outputLib", "kaleido", "plotly")
+        # Substrings identifying trusted callers. User code lives in
+        # ``<mcp>`` frames (compiled by the sandbox with that filename),
+        # so anything installed as a third-party package under
+        # ``site-packages`` is by definition NOT user code. Broad match
+        # on ``site-packages`` covers numpy / pandas / matplotlib /
+        # scikit-learn / any legit dep the tenant installs — their
+        # internal marshal.loads / socket / etc. calls at import time
+        # aren't attacker-controlled. Named entries left for clarity.
+        _trusted_substrings = (
+            "site-packages",
+            # Frozen stdlib bootstrap frames — importlib itself loads cached
+            # .pyc bytecode via marshal.loads, so any legitimate ``import X``
+            # triggers this audit event with importlib._bootstrap on top.
+            # Attacker can't write to disk (open is blocked) so can't seed a
+            # bad .pyc — the bytecode is only whatever's already in the
+            # sandbox's file system.
+            "<frozen ",
+            # Whole geeViz package tree is trusted — googleMapsLib, esriLib,
+            # getImagesLib, changeDetectionLib, outputLib, all of it. These
+            # modules legitimately open sockets / call urllib / spawn kaleido
+            # to fulfill their documented tool contract (Street View HTTPS,
+            # ESRI Feature Service HTTPS, EE tile fetches, chart export).
+            # Matching just ``geeViz\outputLib`` (as before) broke every
+            # other library. User code is still blocked FIRST at line 123
+            # via the ``<mcp>`` check, so trusting the geeViz tree does NOT
+            # let user code smuggle syscalls in — a ``<mcp>`` frame ABOVE
+            # the geeViz frame denies the call before this list is consulted.
+            "geeviz\\", "geeviz/",
+            "kaleido", "plotly",
+        )
+        # server.py's OWN frames are neither user code nor a trusted lib —
+        # they're the sandbox itself. Must be skipped in the walk, otherwise
+        # the ``geeviz\`` trusted substring would match server.py and every
+        # audit call would appear to originate from a trusted frame. Match
+        # by exact filename (case-insensitive) since __file__ is stable.
+        _self_fname_lower = (__file__ or "").lower()
+        # Also skip anything under ``geeviz/mcp/`` — helper modules that
+        # ship with the server (e.g. workload_tags helpers) are part of
+        # the sandbox, not the trusted library surface. This is defined
+        # by path substring so it works whether we're running from a
+        # dev checkout, a pip install, or a container.
+        _sandbox_dir_marker_bwd = "geeviz\\mcp\\"
+        _sandbox_dir_marker_fwd = "geeviz/mcp/"
         try:
             f = _ins.currentframe()
             while f is not None:
                 fname = (f.f_code.co_filename or "")
                 fname_lower = fname.lower()
+                # Skip the sandbox's own frames — they're neither user code
+                # nor trusted library code; they're the enforcer.
+                if (
+                    fname_lower == _self_fname_lower
+                    or _sandbox_dir_marker_bwd in fname_lower
+                    or _sandbox_dir_marker_fwd in fname_lower
+                ):
+                    f = f.f_back
+                    continue
                 # User code lives in '<mcp>' frames (from exec(compile(..., '<mcp>')))
                 if "<mcp>" in fname or "<string>" in fname:
                     return False  # User code is closer than any trusted lib → deny
@@ -67,7 +159,17 @@ if _SANDBOX_ENABLED:
                 f = f.f_back
         except Exception:
             pass
-        return False
+        # Walked the whole stack with no '<mcp>' user frame anywhere → this
+        # call chain isn't user-initiated (it's the server itself invoking
+        # compile()/marshal.load()/etc. to *set up* running user code, or
+        # a thread-bootstrap frame we haven't marked trusted). Trust it.
+        # Any real user code path would put '<mcp>' on the stack before
+        # any syscall audit fires. This is what lets ``run_code``'s own
+        # ``compile(code, '<mcp>', 'exec')`` inside the sandbox thread
+        # succeed — without this default-allow, the compile audit hook
+        # blocks the SERVER's compile and silently kills every run_code
+        # (empty stdout, no namespace mutation, no file writes).
+        return True
 
     def _sandbox_audit_hook(event, args):
         if not _audit_user_code_active:
@@ -75,6 +177,11 @@ if _SANDBOX_ENABLED:
         if event == "import":
             mod_name = args[0].split(".")[0] if args[0] else ""
             if mod_name in _AUDIT_BLOCKED_IMPORTS:
+                # Safe stdlib housekeeping submodules — see comment on
+                # _AUDIT_ALLOWED_SUBMODULES. These are triggered as side
+                # effects of PIL/numpy/matplotlib work, not user intent.
+                if args[0] in _AUDIT_ALLOWED_SUBMODULES:
+                    return
                 # Allow trusted library code (e.g. kaleido inside cl.save_chart_png)
                 if _called_from_trusted_lib():
                     return
@@ -94,8 +201,264 @@ if _SANDBOX_ENABLED:
             if _called_from_trusted_lib():
                 return
             raise PermissionError(f"Sandbox: {event} is blocked.")
+        elif event == "socket.connect":
+            # Outbound network. Belt-and-suspenders over the module-level
+            # block on ``socket`` — if user code somehow reaches a connect
+            # via a trusted-lib import chain that shouldn't have leaked
+            # sockets through, fail loud rather than silently exfiltrate.
+            if _called_from_trusted_lib():
+                return
+            raise PermissionError("Sandbox: socket.connect is blocked.")
+        elif event == "socket.gethostbyname":
+            # DNS lookups by themselves are info leaks (attacker learns
+            # what hostnames resolve from the tenant's egress) even
+            # without a subsequent connect.
+            if _called_from_trusted_lib():
+                return
+            raise PermissionError("Sandbox: socket.gethostbyname is blocked.")
+        elif event == "urllib.Request":
+            # Any urllib construction — the module is import-blocked but
+            # this is a defense-in-depth catch in case a trusted lib
+            # accidentally exposes a factory.
+            if _called_from_trusted_lib():
+                return
+            raise PermissionError("Sandbox: urllib.Request is blocked.")
+        elif event == "compile":
+            # Dynamic bytecode compilation. The builtin ``compile`` is
+            # already removed from the exec namespace, but a trusted-lib
+            # chain that offers it would let user code craft arbitrary
+            # code objects (and then hand them to a trusted eval).
+            if _called_from_trusted_lib():
+                return
+            raise PermissionError("Sandbox: compile() is blocked.")
+        elif event in ("marshal.load", "marshal.loads"):
+            # Deserializing an untrusted marshal payload constructs
+            # arbitrary Python code objects — full RCE. Module is import-
+            # blocked but hook this event anyway.
+            if _called_from_trusted_lib():
+                return
+            raise PermissionError(f"Sandbox: {event} is blocked.")
+        elif event == "open":
+            # Path-scoped file access. Original design: block deny-listed
+            # paths REGARDLESS of caller so attackers couldn't smuggle
+            # sensitive paths into trusted-lib helpers. But that broke a
+            # legit path — ``google.auth`` reads ADC from
+            # ``~/.config/gcloud/application_default_credentials.json``
+            # during ``ee.Initialize()``, and on Cloud Run + Windows dev
+            # boxes the ADC path matches ``/.gcloud/`` / ``/root/`` /
+            # ``AppData\Roaming\gcloud\`` (the last only in local dev).
+            # Blocking it turns EE init into a hard failure every session.
+            #
+            # Compromise: allow trusted-lib callers to read anything (they
+            # need ADC, cert bundles, metadata files, tzdata, etc), but
+            # keep the deny-list for user-initiated calls. Attackers that
+            # tried ``pd.read_csv('/proc/self/environ')`` still get caught
+            # because the walker sees the user's ``<mcp>`` frame above
+            # pandas. Attackers that call ``open('/etc/shadow')`` directly
+            # still get caught because <mcp> is the immediate caller.
+            try:
+                _p = args[0] if args else None
+                _mode = args[1] if len(args) > 1 else None
+                # Integer file descriptors (dup, fdopen) — allow.
+                if isinstance(_p, int):
+                    return
+                if _p is None:
+                    return
+                # Trusted callers (google.auth reading ADC, ee reading
+                # tzdata, plotly reading templates, etc.) bypass path
+                # checks. The trust check already excludes user (<mcp>)
+                # frames — so a user chain smuggling a bad path INTO a
+                # trusted helper still trips the deny-list because the
+                # walker returns False on the <mcp> frame it finds first.
+                if _called_from_trusted_lib():
+                    return
+                # Normalize to a plain string for comparison.
+                if isinstance(_p, bytes):
+                    _p = _p.decode("utf-8", errors="replace")
+                else:
+                    _p = str(_p)
+                _plow = _p.replace("\\", "/").lower()
+                # ── DENY: sensitive files that no legit user code should
+                # touch. We deliberately DO NOT list ``/.gcloud/`` /
+                # ``/.config/gcloud/`` / ``/root/`` here — ADC lives
+                # under those and google-auth is a trusted caller
+                # (handled by the ``_called_from_trusted_lib`` skip
+                # above). User code that tries to open ADC directly
+                # would come in via ``<mcp>`` and get caught by the
+                # trust walker returning False, then would fall through
+                # to the deny-list below — but we don't need path-level
+                # coverage since trust already blocks the user chain.
+                _DENY_SUBSTRINGS = (
+                    "/proc/self/environ", "/proc/self/status",
+                    "/sys/kernel/", "/dev/mem", "/dev/kmem",
+                    "/etc/shadow", "/etc/gshadow", "/etc/sudoers",
+                    "/etc/ssh/", "/.ssh/", "/.gnupg/", "/.aws/",
+                    "/.docker/config.json", "/.netrc", ".pgpass",
+                    "/.env", ".env.local", ".env.prod", ".env.test",
+                    "service-account",
+                )
+                for _bad in _DENY_SUBSTRINGS:
+                    if _bad in _plow:
+                        raise PermissionError(
+                            f"Sandbox: file access to '{_p}' is blocked "
+                            f"(sensitive path)."
+                        )
+                # ── Everything else — allow. Read-only access to arbitrary
+                # paths is a data-leak surface but the module blocks on
+                # net/socket/subprocess prevent exfiltration. Write access
+                # is bounded by container filesystem perms (Cloud Run
+                # runs unprivileged; can only write /tmp and its own
+                # workspace). Tightening further (allowlist by session
+                # output_dir) would break legit imports of encodings,
+                # tzdata, cert bundles, plotly templates, etc.
+            except PermissionError:
+                raise
+            except Exception:
+                # Never let a broken check silently allow — but never
+                # crash the audit hook either. Default to allow so
+                # library imports don't break on odd path types.
+                return
 
     sys.addaudithook(_sandbox_audit_hook)
+
+
+# ---------------------------------------------------------------------------
+# Tool-response credential scrubber — last line of defense before returning
+# any tool output to the model. The sandbox blocks the DANGEROUS operations
+# through os / socket / subprocess, but pure reads like ``os.environ`` /
+# ``getenv`` don't fire audit events, so a determined caller could still
+# dump env values into stdout, an exception message, or a returned dict.
+# The scrubber intercepts those before they enter the model's context —
+# once a secret is in the LLM turn, it lives in the events DB and gets
+# replayed to Gemini on every subsequent call.
+#
+# Two-layer detection:
+#   1. Literal replace on values of every "secret-shaped" os.environ var
+#      (KEY / TOKEN / SECRET / PASSWORD / B64 / CREDENTIALS / DSN /
+#      DATABASE_URL / SESSION_SIGNING_KEY, etc). Snapshotted once on
+#      first call; matches even if the secret is embedded in JSON,
+#      concatenated with other text, or repr()'d.
+#   2. Regex for well-known credential shapes: Google API keys
+#      (``AIza…``), PEM private-key blocks, service-account JSON
+#      fields, JWTs, Stripe/OpenAI/GitHub/AWS token prefixes.
+# ---------------------------------------------------------------------------
+import re as _scrub_re
+
+_SECRET_ENV_HINTS = (
+    "KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "B64",
+    "CREDENTIAL", "DSN", "DATABASE_URL", "SIGNING",
+)
+_SECRET_ENV_ALLOW = frozenset({
+    # Named vars whose "value" is a public identifier, not a secret.
+    "GEE_PROJECT", "GOOGLE_CLOUD_PROJECT", "GCP_PROJECT",
+    "MODEL_ARMOR_PROJECT", "MODEL_ARMOR_LOCATION", "MODEL_ARMOR_TEMPLATE",
+    "MCP_TRANSPORT", "MCP_HOST", "MCP_PORT", "MCP_PATH",
+})
+
+def _snapshot_env_secrets() -> list[tuple[str, str]]:
+    """Return [(env_name, value), ...] for every env var that looks secret.
+
+    Sorted longest-value-first so a replace of a container value doesn't
+    leave a substring of a shorter, contained secret un-redacted. Values
+    shorter than 8 chars are dropped — too high a false-positive rate on
+    common short strings like ``true`` / ``0`` / ``dev``.
+    """
+    out: list[tuple[str, str]] = []
+    for name, val in os.environ.items():
+        if not val or len(val) < 8:
+            continue
+        upper = name.upper()
+        if upper in _SECRET_ENV_ALLOW:
+            continue
+        if not any(h in upper for h in _SECRET_ENV_HINTS):
+            continue
+        out.append((name, val))
+    out.sort(key=lambda kv: len(kv[1]), reverse=True)
+    return out
+
+# Snapshotted lazily on first scrub call — env may still be loading at
+# module import time (dotenv, secret manager fetches, etc).
+_ENV_SECRETS_CACHE: list[tuple[str, str]] | None = None
+_ENV_SECRETS_LOADED_AT: float = 0.0
+
+_CREDENTIAL_PATTERNS = (
+    # Google API keys — AIzaSy prefix + 33 URL-safe chars = 39 total.
+    (_scrub_re.compile(r"AIza[0-9A-Za-z_\-]{35}"), "[REDACTED-GOOGLE-API-KEY]"),
+    # PEM private-key blocks (RSA / EC / DSA / ENCRYPTED / OPENSSH / plain).
+    (_scrub_re.compile(
+        r"-----BEGIN (?:RSA |EC |DSA |ENCRYPTED |OPENSSH )?PRIVATE KEY-----"
+        r"[\s\S]*?"
+        r"-----END (?:RSA |EC |DSA |ENCRYPTED |OPENSSH )?PRIVATE KEY-----"
+    ), "[REDACTED-PEM-PRIVATE-KEY]"),
+    # Service-account JSON field.
+    (_scrub_re.compile(r'"private_key"\s*:\s*"[^"]+"'),
+     '"private_key": "[REDACTED-SA-PRIVATE-KEY]"'),
+    (_scrub_re.compile(
+        r'"private_key_id"\s*:\s*"[0-9a-f]{20,}"'
+    ), '"private_key_id": "[REDACTED-SA-KEY-ID]"'),
+    # JWT (header.payload.sig) — three base64url chunks joined by dots.
+    (_scrub_re.compile(
+        r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"
+    ), "[REDACTED-JWT]"),
+    # Common third-party token prefixes.
+    (_scrub_re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b"), "[REDACTED-OPENAI-KEY]"),
+    (_scrub_re.compile(r"\bsk_(?:test|live)_[A-Za-z0-9]{16,}\b"),
+     "[REDACTED-STRIPE-KEY]"),
+    (_scrub_re.compile(r"\bghp_[A-Za-z0-9]{36}\b"), "[REDACTED-GITHUB-PAT]"),
+    (_scrub_re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
+     "[REDACTED-SLACK-TOKEN]"),
+    (_scrub_re.compile(r"\bAKIA[A-Z0-9]{16}\b"), "[REDACTED-AWS-KEY-ID]"),
+)
+
+def _scrub_credentials(text: str) -> str:
+    """Redact env-var values and known credential shapes from ``text``.
+
+    Safe to call on ``None`` / non-strings — returns input unchanged.
+    Runs before any tool response is returned to the model. Cheap: literal
+    replace + a handful of compiled regex; O(n * secrets) on the text
+    length. For the 50k-char cap we already apply to stdout, worst case
+    is ~sub-millisecond.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    global _ENV_SECRETS_CACHE, _ENV_SECRETS_LOADED_AT
+    # Refresh the snapshot every 60s — tenants can rotate a secret via
+    # Secret Manager and Cloud Run reloads env without a process restart.
+    import time as _time
+    now = _time.time()
+    if _ENV_SECRETS_CACHE is None or (now - _ENV_SECRETS_LOADED_AT) > 60:
+        _ENV_SECRETS_CACHE = _snapshot_env_secrets()
+        _ENV_SECRETS_LOADED_AT = now
+    scrubbed = text
+    for name, val in _ENV_SECRETS_CACHE:
+        if val in scrubbed:
+            scrubbed = scrubbed.replace(val, f"[REDACTED-{name}]")
+    for pat, repl in _CREDENTIAL_PATTERNS:
+        scrubbed = pat.sub(repl, scrubbed)
+    return scrubbed
+
+
+def _scrub_json_response(payload) -> str:
+    """Recursively scrub every string in a dict / list / scalar, then dump.
+
+    Convenience wrapper used at every ``return json.dumps({...})`` site
+    in the MCP tools so no field escapes the sanitizer (stdout, stderr,
+    result, error, message, output_markdown, nested tool payloads, etc).
+    """
+    import json as _json
+
+    def _walk(o):
+        if isinstance(o, str):
+            return _scrub_credentials(o)
+        if isinstance(o, list):
+            return [_walk(x) for x in o]
+        if isinstance(o, tuple):
+            return tuple(_walk(x) for x in o)
+        if isinstance(o, dict):
+            return {k: _walk(v) for k, v in o.items()}
+        return o
+
+    return _json.dumps(_walk(payload))
 
 
 if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
@@ -117,18 +480,17 @@ Environment (optional):
   MCP_PORT        Port for HTTP (default: 8000)
   MCP_PATH        Path for HTTP (default: /mcp)
 
-Tools (12):
+Tools:
   run_code                 Execute Python/GEE code in a persistent REPL namespace
   inspect_asset            Get metadata for any GEE asset (with optional collection filters)
-  search_geeviz            Search geeViz modules, functions, classes, dicts, variables, examples, and REPL modules
+  search_codebase          Search geeViz + any REPL module (ee, pandas, numpy, ...) by name, query, or module
   map_control              View, export, preview, list layers, clear, or test the geeView map (action=view|export|preview|layers|clear|test_layers)
   save_session             Save run_code history to a .py file or .ipynb notebook
   env_info                 Get versions, REPL namespace, or project info (action=version|namespace|project)
+  view_output              Return a saved raster (PNG/GIF/JPEG/WebP) as an inline image (does NOT work on HTML)
   export_image             Export ee.Image to asset, Drive, or Cloud Storage (destination=asset|drive|cloud)
   search_datasets          Search the GEE dataset catalog by keyword
   manage_asset             Delete, copy, move, create folder, or update ACL (action=delete|copy|move|create|update_acl)
-  get_streetview           Get Google Street View imagery at a location for ground-truthing
-  geeviz_search_places     Search for places, landmarks, or businesses using Google Places API
 
 Examples:
   python -m geeViz.mcp.server                   # stdio, no sandbox (default)
@@ -187,17 +549,31 @@ class _StubFastMCP:
         pass
 
     def tool(self, **kwargs):
-        """Return identity decorator -- the function is unchanged."""
+        """Identity decorator so ``@app.tool(...)`` compiles at import time.
+
+        Real FastMCP registers the function into the MCP tool registry;
+        the stub just returns the function unchanged so ``help()`` and
+        ``inspect.signature()`` still work.
+        """
         def _identity(fn):
             return fn
         return _identity
 
     def resource(self, *args, **kwargs):
+        """Identity decorator for ``@app.resource(...)`` — see ``tool()``."""
         def _identity(fn):
             return fn
         return _identity
 
     def run(self, **kwargs):
+        """Raise a clear error when the MCP server is asked to actually run.
+
+        The stub exists only to keep imports working; running requires the
+        real ``mcp`` package.
+
+        Raises:
+            RuntimeError: Always — install ``mcp`` to run the server.
+        """
         raise RuntimeError("mcp SDK not installed; install with: pip install mcp")
 
 
@@ -210,6 +586,12 @@ try:
 except ImportError:
     # Stub if mcp SDK not installed
     class ToolAnnotations:
+        """Fallback ``ToolAnnotations`` when the ``mcp`` package is absent.
+
+        Accepts any kwargs (readOnlyHint, destructiveHint, etc.) and stores
+        nothing — the real class ships hints to MCP clients, this one just
+        keeps decorator calls valid at import time.
+        """
         def __init__(self, **kwargs): pass
 
 # Pre-built annotation sets
@@ -295,7 +677,38 @@ _INSTRUCTIONS_FILE = os.path.join(_THIS_DIR, "agent-instructions.md")
 try:
     with open(_INSTRUCTIONS_FILE, "r", encoding="utf-8") as _f:
         _SERVER_INSTRUCTIONS = _f.read()
-    print(f"[geeViz MCP] Loaded instructions: {len(_SERVER_INSTRUCTIONS)} chars, {len(_SERVER_INSTRUCTIONS.split())} words")
+    # Substitute the AI-powered gmaps status marker based on the same env
+    # var the runtime uses to gate the tools. This subprocess inherits
+    # GEEVIZ_GMAPS_AI_ENABLED from its parent (run_ui.py sets it from the
+    # tenant flag). Standalone use (no parent env) defaults to ENABLED,
+    # matching googleMapsLib._check_gmaps_ai_enabled's default.
+    _ai_val = str(os.environ.get("GEEVIZ_GMAPS_AI_ENABLED", "1")).strip().lower()
+    _ai_on = _ai_val not in ("0", "false", "no", "off", "disabled")
+    if _ai_on:
+        _ai_block = (
+            "**AI-powered gmaps tools — ENABLED.** In addition to the helpers above, "
+            "`gm.interpret_image` (modes: streetview / satellite-map / hybrid-map / roadmap / "
+            "terrain), `gm.label_image` (same modes), `gm.segment_image` (modes: streetview / "
+            "aerial-urban / aerial-landcover / aerial-mixed / buildings / trees), and "
+            "`gm.inventory_area` (design-based image inventory over a polygon/points/bounds "
+            "with Wilson + bootstrap CIs) are available in the `gm` REPL alias — use them "
+            "inside `run_code`. These issue Gemini calls and cost separately from your own "
+            "model spend, so prefer them when the analysis genuinely needs them."
+        )
+    else:
+        _ai_block = (
+            "**AI-powered gmaps tools — DISABLED for this deployment.** Do NOT call "
+            "`gm.interpret_image`, `gm.label_image`, `gm.segment_image`, or "
+            "`gm.inventory_area` — they will raise `RuntimeError` at runtime. If the user "
+            "asks for scene interpretation, labeling, segmentation, or design-based "
+            "inventory over imagery, say the feature is disabled and offer Earth Engine "
+            "alternatives (Landsat/Sentinel-2/NAIP inspection via `view_output`, "
+            "`inspect_asset`, or a `simpleMask` + charting pipeline). The other `gm.*` "
+            "helpers (geocode, search_places, streetview_*, static_map, elevation, air "
+            "quality, solar, timezone, roads) remain available."
+        )
+    _SERVER_INSTRUCTIONS = _SERVER_INSTRUCTIONS.replace("<!--GMAPS_AI_STATUS-->", _ai_block)
+    print(f"[geeViz MCP] Loaded instructions: {len(_SERVER_INSTRUCTIONS)} chars, {len(_SERVER_INSTRUCTIONS.split())} words (gmaps AI: {'ENABLED' if _ai_on else 'DISABLED'})")
 except Exception:
     _SERVER_INSTRUCTIONS = None
     print("[geeViz MCP] WARNING: No agent instructions loaded")
@@ -410,6 +823,8 @@ async def _tool_manager_call_tool_with_workload_tag(
 ):
     tag = None
     tenant = ""
+    explicit_user = ""
+    explicit_session = ""
     if isinstance(arguments, dict):
         raw = arguments.pop("_workload_tag", None)
         if raw:
@@ -419,6 +834,16 @@ async def _tool_manager_call_tool_with_workload_tag(
         raw_tenant = arguments.pop("_tenant", None)
         if raw_tenant:
             tenant = str(raw_tenant).strip().lower()
+        # Explicit identity slots — the v2 short-hash tag (``wl_<16hex>``)
+        # doesn't embed user/session the way the old long-form tag did,
+        # so agent.py plumbs them alongside. Fall back to tag-parsing
+        # only for legacy long-form tags.
+        raw_user = arguments.pop("_agent_user_email", None)
+        if raw_user:
+            explicit_user = str(raw_user).strip()
+        raw_session = arguments.pop("_agent_session_id", None)
+        if raw_session:
+            explicit_session = str(raw_session).strip()
 
     # ContextVar for tenant: TenantAwareHttp reads it on every outbound
     # EE request and stamps the routing header.
@@ -432,7 +857,14 @@ async def _tool_manager_call_tool_with_workload_tag(
     # gif, chart, zonal stats). Prior to this, all those calls
     # tagged as ``anonymous`` in Cloud Monitoring and were invisible
     # in per-user cost attribution.
-    _user, _session = _extract_user_and_session_from_tag(tag)
+    # Prefer explicit slots (v2 short-hash tag path); fall back to parsing
+    # a legacy long-form tag for backward compat.
+    _user = explicit_user
+    _session = explicit_session
+    if not _user or not _session:
+        _p_user, _p_session = _extract_user_and_session_from_tag(tag)
+        _user = _user or _p_user
+        _session = _session or _p_session
     user_token = _CURRENT_USER_EMAIL_CV.set(_user) if _user else None
     session_token = _CURRENT_SESSION_ID_CV.set(_session) if _session else None
 
@@ -473,7 +905,95 @@ async def _tool_manager_call_tool_with_workload_tag(
             _CURRENT_SESSION_ID_CV.reset(session_token)
 
 
-app._tool_manager.call_tool = _tool_manager_call_tool_with_workload_tag
+def _scrub_tool_result(result):
+    """Redact credentials in any string field of a FastMCP tool result.
+
+    FastMCP tools return either a ``ToolResult`` (newer SDKs) with a
+    ``.content`` list, or a bare list of ``Content`` items (older SDKs).
+    ``TextContent`` items carry a ``.text`` attribute; other content
+    types (ImageContent / EmbeddedResource) don't. We walk both shapes
+    and scrub every ``.text`` in place — this is the single chokepoint
+    that catches secrets escaping via ANY tool, not just ``run_code``
+    (where we already scrub at each return site as belt-and-suspenders).
+    """
+    if result is None:
+        return result
+    # Iterable of Content items (list / tuple).
+    if isinstance(result, (list, tuple)):
+        for item in result:
+            _scrub_content_item(item)
+        return result
+    # ToolResult with .content list.
+    content = getattr(result, "content", None)
+    if isinstance(content, (list, tuple)):
+        for item in content:
+            _scrub_content_item(item)
+    # Some SDKs also carry a .structuredContent dict — scrub it too.
+    structured = getattr(result, "structuredContent", None) or getattr(
+        result, "structured_content", None
+    )
+    if isinstance(structured, dict):
+        _scrub_dict_inplace(structured)
+    return result
+
+
+def _scrub_content_item(item) -> None:
+    """Scrub a single Content item's textual payload in place."""
+    if item is None:
+        return
+    text = getattr(item, "text", None)
+    if isinstance(text, str) and text:
+        try:
+            setattr(item, "text", _scrub_credentials(text))
+        except Exception:
+            # Some Content types are frozen (pydantic v2 frozen models).
+            # Fall back to mutating a __dict__ attribute directly if we can.
+            try:
+                item.__dict__["text"] = _scrub_credentials(text)
+            except Exception:
+                pass
+
+
+def _scrub_dict_inplace(d: dict) -> None:
+    """Recursively scrub every string value in a nested dict / list."""
+    for k, v in list(d.items()):
+        if isinstance(v, str):
+            d[k] = _scrub_credentials(v)
+        elif isinstance(v, dict):
+            _scrub_dict_inplace(v)
+        elif isinstance(v, list):
+            for i, item in enumerate(v):
+                if isinstance(item, str):
+                    v[i] = _scrub_credentials(item)
+                elif isinstance(item, dict):
+                    _scrub_dict_inplace(item)
+
+
+_pre_scrub_call_tool = _tool_manager_call_tool_with_workload_tag
+
+
+async def _tool_manager_call_tool_with_scrub(
+    name, arguments, context=None, convert_result=False
+):
+    """Post-process every tool response through the credential scrubber.
+
+    Wraps the workload-tag layer — that layer handles EE routing /
+    ContextVar plumbing and returns the FastMCP tool result unchanged;
+    this wrapper walks the result and redacts any secret shape or
+    exact env-var value before FastMCP serializes it back to the model.
+    """
+    result = await _pre_scrub_call_tool(
+        name, arguments, context=context, convert_result=convert_result
+    )
+    try:
+        return _scrub_tool_result(result)
+    except Exception:
+        # Fail-open on scrub crashes rather than break every tool call.
+        # The per-return-site scrubs in run_code still catch its output.
+        return result
+
+
+app._tool_manager.call_tool = _tool_manager_call_tool_with_scrub
 
 # Wrap app.tool() to auto-log every tool invocation
 _original_app_tool = app.tool
@@ -721,7 +1241,7 @@ def _build_module_tree():
     No modules are imported. Populates ``_MODULE_TREE`` with module paths
     and pre-parsed member indices (names, types, signatures, docstrings).
     Modules are only imported on-demand when live values are needed
-    (e.g. dict contents via ``search_geeviz(name=...)``).
+    (e.g. dict contents via ``search_codebase(name=...)``).
     """
     global _MODULE_TREE, _MODULE_MAP
     import pkgutil
@@ -916,6 +1436,22 @@ class _SessionState:
         self.session_id = session_id
         self.namespace: dict = {}
         self.code_history: list[str] = []
+        # Per-block dependency metadata parallel to ``code_history``.
+        # Each entry is a dict:
+        #   {
+        #     "source": str,          # exact block text (mirror of code_history[i])
+        #     "names_bound": set[str], # names this block DEFINED
+        #     "names_read": set[str],  # names this block READ before binding
+        #     "names_touched": set[str], # names mutated via subscript/attribute store
+        #     "is_import": bool,      # block contains at least one Import/ImportFrom
+        #     "wildcard_import": bool,# block has `from X import *` (opaque bindings)
+        #     "succeeded": bool,      # block ran to completion without error
+        #   }
+        # Populated in run_code after each successful (or failed) exec.
+        # Consumed by _slice_history() at save-session time to build a
+        # minimal script — only blocks whose bindings are transitively
+        # read by the final successful block are kept.
+        self.code_history_meta: list[dict] = []
         self.current_script_path: str | None = None
         self.active_report = None
         self.initialized = False
@@ -1068,17 +1604,53 @@ def _init_ee_credentials():
 
 
 def _ensure_ee_initialized():
-    """Initialize EE credentials once (global, not per-session)."""
-    global _initialized
+    """Initialize EE credentials once (global, not per-session).
+
+    EE init runs with the sandbox audit hook FORCED OFF for its duration,
+    regardless of what the exec thread has set the module-global flag to.
+    Rationale: ``ee.Initialize()`` legitimately reads ADC files, hits the
+    GCE metadata server, opens cert bundles, imports helper modules — all
+    of these are server-side infrastructure, not user code, and MUST NOT
+    trip any deny rule. Prior to this saved/restored context, a race with
+    a concurrent ``_exec`` thread that had flipped ``_audit_user_code_active``
+    to True caused ADC-read PermissionErrors that left ``_initialized``
+    False and made every subsequent tool call retry-and-fail the same way
+    (austin_geo test 2026-08-04). Any audit fire during EE init is a bug
+    — this wrapper guarantees the window is safe.
+    """
+    global _initialized, _audit_user_code_active
     if _initialized:
         return
     with _init_lock:
         if _initialized:
             return
-        _init_ee_credentials()
-        # Import geeViz to trigger ee.Initialize
-        import geeViz.geeView  # noqa: F401
-        _initialized = True
+        _saved_audit = _audit_user_code_active
+        _audit_user_code_active = False
+        try:
+            _init_ee_credentials()
+            # Import geeViz to trigger ee.Initialize
+            import geeViz.geeView  # noqa: F401
+            _initialized = True
+            # Neutralize ee.Initialize() so agent-generated code that
+            # re-initializes (a common mistake — the REPL already
+            # initialized EE via the parent's /ee-api proxy) doesn't blow
+            # up with "no project found". Bare ``ee.Initialize()`` reads
+            # only local credentials + falls back to a quota project the
+            # runtime SA may not have permission on, killing the session.
+            # We keep the original around under ``_geeviz_original_Initialize``
+            # in case anything ever needs to re-init deliberately.
+            # Evidence: austin_geo test 2026-08-04 demo session, first
+            # run_code block generated by the agent contained
+            # ``import ee; ee.Initialize()`` and 503'd the whole session.
+            import ee as _ee_mod
+            if not hasattr(_ee_mod, "_geeviz_original_Initialize"):
+                _ee_mod._geeviz_original_Initialize = _ee_mod.Initialize
+                def _noop_ee_initialize(*_args, **_kwargs):
+                    # Silent no-op; the REPL initialized EE via proxy.
+                    return None
+                _ee_mod.Initialize = _noop_ee_initialize
+        finally:
+            _audit_user_code_active = _saved_audit
 
 
 def _ensure_initialized(session_id: str | None = None):
@@ -1106,15 +1678,25 @@ def _ensure_initialized_locked(session_id: str | None = None):
     import geeViz.getImagesLib as gil
     import geeViz.getSummaryAreasLib as sal
     import geeViz.edwLib as edw
-    import geeViz.googleMapsLib as gm
     import geeViz.geePalettes as palettes
     from geeViz.outputLib import charts as cl
     from geeViz.outputLib import thumbs as tl
     from geeViz.outputLib import reports as rl
     import ee
+    # googleMapsLib is optional — it depends on requests + (for
+    # interpret_image / label_image) google-genai + Pillow. If any of
+    # those aren't installed, or if the module itself errors on import,
+    # the MCP still starts and `gm` simply isn't in the REPL namespace.
+    try:
+        import geeViz.googleMapsLib as gm
+    except Exception as _gm_err:
+        gm = None
+        _GM_IMPORT_ERROR = repr(_gm_err)
+    else:
+        _GM_IMPORT_ERROR = None
     # pandas and numpy are de-facto standard helpers the agent reaches for
-    # constantly; pre-load them so `search_geeviz(name="pd.DataFrame.to_markdown")`
-    # and `search_geeviz(module="pd", query="...")` resolve without requiring
+    # constantly; pre-load them so `search_codebase(name="pd.DataFrame.to_markdown")`
+    # and `search_codebase(module="pd", query="...")` resolve without requiring
     # the agent to `import pandas` inside run_code first. Both are already
     # geeViz dependencies (setup.py) and on the sandbox allowlist.
     import pandas as _pd_mod
@@ -1145,19 +1727,18 @@ def _ensure_initialized_locked(session_id: str | None = None):
         _raise.__name__ = tool_name
         return _raise
 
-    sess.namespace.update({
+    _ns_update = {
         "ee": ee,
         "Map": session_map,
         "gv": gv,
         "gil": gil,
         "sal": sal,
         "edw": edw,
-        "gm": gm,
         "palettes": palettes,
         "cl": cl,
         "tl": tl,
         "rl": rl,
-        # Both aliases for each lib so search_geeviz finds them either way.
+        # Both aliases for each lib so search_codebase finds them either way.
         "pandas": _pd_mod,
         "pd": _pd_mod,
         "numpy": _np_mod,
@@ -1166,12 +1747,8 @@ def _ensure_initialized_locked(session_id: str | None = None):
         # Clear-error stubs for MCP tool names the agent sometimes calls
         # from inside run_code as if they were Python functions.
         "search_datasets": _mcp_tool_stub("search_datasets"),
-        "search_geeviz": _mcp_tool_stub("search_geeviz"),
+        "search_codebase": _mcp_tool_stub("search_codebase"),
         "inspect_asset": _mcp_tool_stub("inspect_asset"),
-        "geeviz_search_places": _mcp_tool_stub("geeviz_search_places"),
-        "search_places": _mcp_tool_stub("search_places"),
-        "lookup_weather": _mcp_tool_stub("lookup_weather"),
-        "compute_routes": _mcp_tool_stub("compute_routes"),
         "map_control": _mcp_tool_stub("map_control"),
         "env_info": _mcp_tool_stub("env_info"),
         "view_output": _mcp_tool_stub("view_output"),
@@ -1179,7 +1756,56 @@ def _ensure_initialized_locked(session_id: str | None = None):
         "export_image": _mcp_tool_stub("export_image"),
         "save_session": _mcp_tool_stub("save_session"),
         "__builtins__": _make_safe_builtins(),
-    })
+    }
+    # Only expose gm when googleMapsLib actually loaded — otherwise
+    # `gm.geocode(...)` would AttributeError on None, which is worse than
+    # a plain NameError telling the user the module isn't installed.
+    if gm is not None:
+        _ns_update["gm"] = gm
+
+    # inventoryLib.inventory_area writes reports only when ``output_dir``
+    # is passed. Without the wrapper below, an agent that forgets the
+    # kwarg gets DataFrames but no HTML/JSON/MD files, and then when the
+    # user asks "show me the report" the agent has to either re-run the
+    # whole (expensive) inventory or work from the return dict manually.
+    # Default output_dir to the session's isolated output dir so reports
+    # are always on disk, viewable via the run_code output_markdown scan.
+    # Also RESOLVE any relative ``output_dir`` against ``sess.output_dir``
+    # so `output_dir='generated_outputs'` lands under the session dir
+    # instead of process cwd (where the file-scanner wouldn't see it).
+    # An explicit ``output_dir=None`` from the caller still opts out.
+    # The wrapper is applied to BOTH ``inventoryLib.inventory_area``
+    # (bare name in the REPL) AND ``googleMapsLib.inventory_area``
+    # (agent's usual ``gm.inventory_area`` call path). Without patching
+    # both, callers picking the ``gm.`` route silently bypass the auto-
+    # default and their reports vanish into process cwd.
+    try:
+        import geeViz.inventoryLib as _inv_mod
+        import geeViz.googleMapsLib as _gm_mod
+        import functools as _ft
+        import os as _os_wrap
+        _orig_inventory_area = _inv_mod.inventory_area
+        _INV_UNSET = object()
+        @_ft.wraps(_orig_inventory_area)
+        def _session_inventory_area(*args, output_dir=_INV_UNSET, **kwargs):
+            if output_dir is _INV_UNSET:
+                output_dir = sess.output_dir
+            elif isinstance(output_dir, str) and output_dir and not _os_wrap.path.isabs(output_dir):
+                output_dir = _os_wrap.path.join(sess.output_dir, output_dir)
+            return _orig_inventory_area(*args, output_dir=output_dir, **kwargs)
+        _ns_update["inventory_area"] = _session_inventory_area
+        # Patch the re-export in googleMapsLib too so ``gm.inventory_area``
+        # (the agent's usual entry point) picks up the same default.
+        # Preserve the original for tests/restore.
+        _gm_mod._orig_inventory_area = getattr(_gm_mod, "inventory_area", None)
+        _gm_mod.inventory_area = _session_inventory_area
+    except Exception:
+        # Any import/wrap failure falls back to the un-injected name —
+        # agent can still ``from geeViz.inventoryLib import inventory_area``
+        # inside run_code and pass output_dir explicitly.
+        pass
+
+    sess.namespace.update(_ns_update)
     sess.initialized = True
     return sess
 
@@ -1189,9 +1815,362 @@ def _reset_namespace(session_id: str | None = None):
     sess = _get_session(session_id)
     sess.namespace.clear()
     sess.code_history.clear()
+    sess.code_history_meta.clear()
     sess.current_script_path = None
     sess.initialized = False
     _ensure_initialized(session_id)
+
+
+# ---------------------------------------------------------------------------
+# Per-block dependency analysis + backward-slicing helpers.
+#
+# Purpose: the "download session as script" flow used to concatenate every
+# successful run_code block, exploratory noise and all — heavy, hard to
+# reproduce, hard for a user to hand to a colleague. The tracker below
+# records what each block BINDS and READS as it executes; the slicer walks
+# the resulting DAG backward from the last successful block, keeping only
+# ancestors whose bindings the final state actually depends on. Import
+# blocks and blocks containing wildcard imports are always kept because
+# their effects can't be traced by name-binding alone.
+#
+# This is the Level 2 approach from the design discussion — AST analysis
+# for reads/writes plus a namespace snapshot diff for ground-truth
+# bindings, no IPython kernel or ipyflow dependency required. Overhead is
+# a few milliseconds per block; the exact-name accuracy comes from
+# reading the namespace after exec, not from static guessing.
+# ---------------------------------------------------------------------------
+
+
+def _analyze_block_ast(source: str) -> dict:
+    """Static AST analysis of a single code block.
+
+    Returns a dict with:
+      - ``read``: names read as ``ast.Load`` context (approximate; may
+        include names later bound in the same block — the caller can
+        subtract those out).
+      - ``bound_static``: names in ``ast.Store`` context, function/class
+        defs, import aliases, function params. Used as a fallback when
+        the runtime snapshot-diff isn't available (e.g. failed blocks).
+      - ``touched``: names on the LHS of subscript-store (``x[k] = v``)
+        or attribute-store (``x.a = v``). These are mutations that
+        static Store-name analysis alone would miss because they don't
+        (re)bind ``x`` itself.
+      - ``is_import``: True if the block contains any Import / ImportFrom.
+        Import blocks are ALWAYS kept in the slice — their side effects
+        (loading modules, registering hooks, etc.) don't appear as name
+        reads downstream but the script won't run without them.
+      - ``wildcard_import``: True if the block does ``from X import *``.
+        Wildcard imports bind an unknowable set of names, so slicing
+        past them is unsafe — always keep them.
+      - ``parse_error``: True if the source didn't parse at all. The
+        caller should treat unparseable blocks as opaque (always-kept).
+
+    Best-effort: if AST parsing fails, returns a conservative "keep me"
+    dict rather than raising.
+    """
+    result = {
+        "read": set(),
+        "bound_static": set(),
+        "touched": set(),
+        "is_import": False,
+        "wildcard_import": False,
+        "parse_error": False,
+    }
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        result["parse_error"] = True
+        return result
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            result["is_import"] = True
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                result["bound_static"].add(bound)
+        elif isinstance(node, ast.ImportFrom):
+            result["is_import"] = True
+            for alias in node.names:
+                if alias.name == "*":
+                    result["wildcard_import"] = True
+                else:
+                    bound = alias.asname or alias.name
+                    result["bound_static"].add(bound)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            result["bound_static"].add(node.name)
+        elif isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Store):
+                result["bound_static"].add(node.id)
+            elif isinstance(node.ctx, ast.Load):
+                result["read"].add(node.id)
+        elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store):
+            # ``df["x"] = 5`` — record the ROOT name as touched (df).
+            root = node.value
+            while isinstance(root, ast.Subscript):
+                root = root.value
+            if isinstance(root, ast.Name):
+                result["touched"].add(root.id)
+            elif isinstance(root, ast.Attribute):
+                # ``df.iloc[0] = 5`` — walk attributes back to the root Name.
+                while isinstance(root, ast.Attribute):
+                    root = root.value
+                if isinstance(root, ast.Name):
+                    result["touched"].add(root.id)
+        elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
+            # ``model.data = X`` — record ``model`` as touched.
+            root = node.value
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name):
+                result["touched"].add(root.id)
+
+    # Subtract bound-in-this-block from read: a name defined earlier in
+    # the block is not a "free variable" of the block. We don't do full
+    # flow analysis (which would need to track scope-order), so this is
+    # an over-approximation — a name defined LATER in the block that's
+    # also read EARLIER stays in read. That's fine; slicing conservatively
+    # over-keeps rather than under-keeps.
+    result["read"] -= result["bound_static"]
+    # Also don't count a name as read if it's ONLY in the touched set
+    # (touched implies read as well, so this is redundant to keep both).
+    # ``touched`` remains its own set so the slicer can distinguish
+    # "b reads a" (only ancestors that BIND a matter) from "b touches a"
+    # (also every ancestor that touched a AFTER the last binder matters).
+    return result
+
+
+def _snapshot_namespace_ids(ns: dict) -> dict:
+    """Snapshot ``{name: id(obj)}`` for user-facing names in a namespace.
+
+    Skips dunder names and callables that came from the REPL bootstrap so
+    the diff doesn't drown in framework noise. Cheap — one dict comprehension.
+    """
+    return {
+        name: id(obj)
+        for name, obj in ns.items()
+        if not name.startswith("_")
+    }
+
+
+def _diff_namespace(before: dict, after: dict, skip_names: set = None) -> set:
+    """Names in ``after`` that are new OR rebound relative to ``before``.
+
+    ``skip_names`` filters out framework-bootstrap names so we don't count
+    (e.g.) ``ee``, ``Map`` as newly bound every block. The caller
+    typically passes the REPL bootstrap set.
+    """
+    skip_names = skip_names or set()
+    bound = set()
+    for name, obj_id in after.items():
+        if name in skip_names:
+            continue
+        if name not in before or before[name] != obj_id:
+            bound.add(name)
+    return bound
+
+
+# Names pre-populated by the REPL bootstrap. Excluded from
+# ``names_bound`` diffs so they don't appear to be "defined" by every
+# block that happens to reference them.
+_REPL_BOOTSTRAP_NAMES = {
+    "ee", "Map", "gv", "gil", "sal", "cl", "tl", "rl", "gm",
+    "palettes", "save_file", "__builtins__",
+}
+
+
+def _slice_history(sess: "_SessionState") -> list[int]:
+    """Return the list of ``code_history`` indexes to keep in the slice.
+
+    Anchor: the LAST block with ``succeeded=True``. Every earlier block
+    that binds or touches a name transitively read/touched by the anchor
+    is included. Import blocks and wildcard-import blocks are always
+    included. Unparseable blocks (``parse_error=True``) are always
+    included (we can't tell what they do statically).
+
+    Returns indexes in original chronological order. If the metadata is
+    missing (e.g. legacy session before the tracker was added), falls
+    back to "keep everything" so no data is lost.
+    """
+    meta = sess.code_history_meta
+    if not meta or len(meta) != len(sess.code_history):
+        return list(range(len(sess.code_history)))
+
+    # Anchor = last succeeded block. If none, no slice — return the whole
+    # history (nothing "worked" so the user gets everything they tried).
+    anchor_idx = None
+    for i in range(len(meta) - 1, -1, -1):
+        if meta[i].get("succeeded"):
+            anchor_idx = i
+            break
+    if anchor_idx is None:
+        return list(range(len(sess.code_history)))
+
+    keep = set()
+    # Frontier: names we still need to explain. Start with the anchor's
+    # reads + touches. Blocks reachable from any of these names get
+    # walked and their own reads/touches added to the frontier.
+    frontier = set(meta[anchor_idx].get("names_read", set())) | set(
+        meta[anchor_idx].get("names_touched", set())
+    )
+    keep.add(anchor_idx)
+
+    # Walk backward. For each earlier block, add it to the slice if it
+    # (a) binds a name currently in the frontier — that block PRODUCES a
+    # value the future depends on, OR (b) touches a name in the frontier
+    # after it was last bound (its mutation is part of the state the
+    # future observes), OR (c) is an import block, OR (d) has a
+    # wildcard import, OR (e) failed to parse. Each newly-included block
+    # extends the frontier with its own reads and touches.
+    for i in range(anchor_idx - 1, -1, -1):
+        m = meta[i]
+        include = False
+        if m.get("is_import") or m.get("wildcard_import") or m.get("parse_error"):
+            include = True
+        else:
+            bound = set(m.get("names_bound", set()))
+            touched = set(m.get("names_touched", set()))
+            if bound & frontier or touched & frontier:
+                include = True
+        if include:
+            keep.add(i)
+            frontier |= set(m.get("names_read", set()))
+            frontier |= set(m.get("names_touched", set()))
+            # A block that binds a name removes it from the frontier
+            # for even-earlier ancestors: something UPSTREAM only
+            # matters if the current block DOESN'T fully define what
+            # downstream needs. This is the standard slicing rule.
+            frontier -= set(m.get("names_bound", set()))
+
+    return sorted(keep)
+
+
+def _save_history_to_file_sliced(sess: "_SessionState") -> str:
+    """Write the SLICED code history to a timestamped .py file.
+
+    Same header as ``_save_history_to_file`` but only emits the blocks
+    that contribute to the final successful state. Sets
+    ``sess.current_script_path`` so subsequent saves overwrite the same
+    file (mirrors the legacy behavior).
+    """
+    import datetime
+    os.makedirs(sess.script_dir, exist_ok=True)
+    if sess.current_script_path is None:
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        sess.current_script_path = os.path.join(
+            sess.script_dir, f"session_{ts}.py",
+        )
+
+    keep_idxs = _slice_history(sess)
+    total = len(sess.code_history)
+    dropped = total - len(keep_idxs)
+
+    header = (
+        "# Auto-generated by geeViz MCP server (sliced export).\n"
+        f"# Retained {len(keep_idxs)} of {total} run_code blocks; "
+        f"{dropped} exploratory/dead block(s) dropped.\n"
+        "# Backward-slice anchor: the last successful block.\n\n"
+        "import geeViz.geeView as gv\n"
+        "import geeViz.getImagesLib as gil\n"
+        "import geeViz.getSummaryAreasLib as sal\n"
+        "import geeViz.edwLib as edw\n"
+        "import geeViz.googleMapsLib as gm\n"
+        "from geeViz.outputLib import charts as cl\n"
+        "from geeViz.outputLib import thumbs as tl\n"
+        "from geeViz.outputLib import reports as rl\n"
+        "ee = gv.ee\n"
+        "Map = gv.Map\n\n"
+    )
+    body_parts = []
+    for out_i, orig_i in enumerate(keep_idxs, 1):
+        block = sess.code_history[orig_i]
+        body_parts.append(
+            f"# --- block {out_i} (originally call #{orig_i + 1}) ---\n{block}"
+        )
+    with open(sess.current_script_path, "w", encoding="utf-8") as f:
+        f.write(header + "\n\n".join(body_parts) + "\n")
+    return sess.current_script_path
+
+
+def _save_history_to_notebook_sliced(sess: "_SessionState",
+                                       nb_path: str) -> str:
+    """Emit the sliced code history as an .ipynb notebook.
+
+    Same notebook structure as the legacy save_session ipynb path (one
+    markdown header cell, one setup cell with the pre-populated imports,
+    one code cell per surviving block) but only surviving blocks are
+    emitted. Retention count is written into the header cell so the
+    user knows what was pruned.
+
+    Uses ``nbformat`` (already a hard dep of the framework) for the file
+    write.
+    """
+    import datetime
+    import sys as _sys
+    keep_idxs = _slice_history(sess)
+    total = len(sess.code_history)
+    dropped = total - len(keep_idxs)
+
+    cells: list[dict] = []
+    cells.append({
+        "cell_type": "markdown",
+        "metadata": {},
+        "source": [
+            "# geeViz MCP Session (sliced export)\n",
+            "\n",
+            f"Auto-generated on {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}.\n",
+            f"Retained **{len(keep_idxs)}** of **{total}** run_code blocks; "
+            f"**{dropped}** exploratory/dead block(s) dropped.\n",
+        ],
+    })
+    cells.append({
+        "cell_type": "code",
+        "metadata": {},
+        "source": [
+            "import geeViz.geeView as gv\n",
+            "import geeViz.getImagesLib as gil\n",
+            "import geeViz.getSummaryAreasLib as sal\n",
+            "from geeViz.outputLib import charts as cl\n",
+            "from geeViz.outputLib import thumbs as tl\n",
+            "from geeViz.outputLib import reports as rl\n",
+            "ee = gv.ee\n",
+            "Map = gv.Map",
+        ],
+        "execution_count": None,
+        "outputs": [],
+    })
+    for out_i, orig_i in enumerate(keep_idxs, 1):
+        block = sess.code_history[orig_i]
+        lines = block.splitlines(True)
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        cells.append({
+            "cell_type": "code",
+            "metadata": {"originally_call": orig_i + 1, "slice_index": out_i},
+            "source": lines,
+            "execution_count": None,
+            "outputs": [],
+        })
+
+    notebook = {
+        "nbformat": 4,
+        "nbformat_minor": 5,
+        "metadata": {
+            "kernelspec": {
+                "display_name": "Python 3",
+                "language": "python",
+                "name": "python3",
+            },
+            "language_info": {
+                "name": "python",
+                "version": _sys.version.split()[0],
+            },
+        },
+        "cells": cells,
+    }
+    os.makedirs(os.path.dirname(nb_path) or ".", exist_ok=True)
+    with open(nb_path, "w", encoding="utf-8") as f:
+        json.dump(notebook, f, indent=1, ensure_ascii=False)
+    return nb_path
 
 
 def _save_history_to_file(sess: _SessionState) -> str:
@@ -1245,10 +2224,29 @@ _COLLECTION_NAMES = {"ImageCollection", "FeatureCollection"}
 # access that is unnecessary for Earth Engine workflows and dangerous if the server
 # is exposed remotely.
 _BLOCKED_MODULES = frozenset({
-    "os", "sys", "subprocess", "socket", "shutil", "ctypes", "signal",
-    "multiprocessing", "threading", "http", "urllib", "requests",
-    "pathlib", "tempfile", "glob", "importlib", "code", "codeop",
-    "pickle", "shelve", "marshal", "builtins",
+    # Kept in sync with _AUDIT_BLOCKED_IMPORTS in the audit-hook block
+    # near the top of this file. If you add here, add there too — the
+    # two layers are defense-in-depth and MUST agree, otherwise an
+    # attacker who bypasses one still hits the other.
+    # ── Filesystem / process ──
+    "os", "sys", "subprocess", "shutil", "pathlib", "tempfile", "glob",
+    "mmap", "fcntl", "msvcrt", "resource", "signal", "ctypes",
+    # ── Network ──
+    "socket", "http", "urllib", "requests", "ssl", "asyncio",
+    "select", "selectors", "smtplib", "ftplib", "poplib", "imaplib",
+    "telnetlib", "nntplib", "xmlrpc",
+    # ── Concurrency ──
+    "threading", "multiprocessing",
+    # ── Dynamic import / code exec ──
+    "importlib", "marshal", "runpy", "zipimport", "builtins",
+    "code", "codeop", "compileall", "py_compile",
+    # ── Introspection ──
+    "gc", "inspect", "dis", "traceback",
+    # ── Archives / serialization ──
+    "zipfile", "tarfile", "gzip", "bz2", "lzma",
+    "pickle", "shelve", "dbm", "sqlite3",
+    # ── Misc ──
+    "pty", "pipes", "webbrowser", "getpass",
 })
 # Note: ``io`` is NOT blocked. ``io.BytesIO`` / ``io.StringIO`` are
 # essential for the matplotlib → PIL → ``save_file`` flow and are pure
@@ -1287,6 +2285,34 @@ _BLOCKED_BUILTINS = frozenset({
     "breakpoint", "exit", "quit",
     "globals", "locals", "vars",
     "getattr", "setattr", "delattr",
+})
+
+# Attribute accesses (``.__class__``, ``.__bases__``, ``.__subclasses__``,
+# etc.) that enable the classic ``().__class__.__bases__[0].__subclasses__()``
+# pyjail escape — an attacker walks from any literal up to ``object`` then
+# enumerates every live subclass to find one that shells out (usually
+# ``os._wrap_close`` or similar). Blocking ANY link in that chain kills
+# the attack. We block the whole set — none of these are needed for
+# legitimate geospatial analysis code. Frame introspection (``f_globals``
+# / ``f_back``) is added because it's a second escape vector: get a
+# frame, read its globals, find the trusted ``os`` reference the tool
+# server itself imported.
+_BLOCKED_DUNDER_ATTRS = frozenset({
+    # Object model walk
+    "__class__", "__bases__", "__subclasses__", "__mro__",
+    # Function / code object introspection (can extract bytecode,
+    # closures, source, module globals of any function)
+    "__globals__", "__builtins__", "__code__", "__closure__",
+    "__wrapped__", "__self__", "__func__",
+    # Import / loader introspection
+    "__loader__", "__spec__", "__import__",
+    # Frame introspection — reachable via sys._getframe() (sys is
+    # module-blocked but a trusted lib could accidentally expose a
+    # frame object)
+    "f_globals", "f_back", "f_locals", "f_builtins", "f_code", "f_trace",
+    # Generic escape roots
+    "__reduce__", "__reduce_ex__",   # pickle protocol → arbitrary construct
+    "__getattribute__",              # bypass __getattr__ hooks
 })
 
 
@@ -1363,6 +2389,31 @@ def _check_code_patterns(code: str) -> list[str]:
     except SyntaxError:
         return warnings  # let the executor report syntax errors
 
+    # Per-module remediation hints — every one of these is a wrong path the
+    # agent has tried in a real session, so tell it what to do instead
+    # instead of just saying "no". Prevents the "try requests → try urllib
+    # → try httpx → try pandas.read_json" thrash cycle when a bare
+    # "blocked" message isn't enough of a nudge.
+    _BLOCKED_MODULE_HINTS = {
+        "requests":   "HTTP libraries are unavailable in the sandbox. Use the domain wrapper: esriLib.addEsriFeatureService(url) for ArcGIS / AGOL / .arcgis.com URLs, edwLib for USFS EDW, sal.* for census/counties/parks, ee.FeatureCollection.runBigQuery(sql, geometryColumn='geom') for BigQuery. Do NOT retry with urllib / httpx / aiohttp / pandas.read_json — same block.",
+        "urllib":     "HTTP libraries are unavailable in the sandbox. See esriLib / edwLib / sal / ee.FeatureCollection.runBigQuery. Trying a different HTTP library will not work — the block is intentional.",
+        "httpx":      "HTTP libraries are unavailable in the sandbox. Use the domain wrapper for the data source (esriLib, edwLib, sal, ee.FeatureCollection.runBigQuery).",
+        "aiohttp":    "HTTP libraries are unavailable in the sandbox. Use the domain wrapper for the data source (esriLib, edwLib, sal, ee.FeatureCollection.runBigQuery).",
+        "os":         "os is blocked. Use save_file(path, bytes) for output, and let geeViz/EE handle any filesystem or environment access.",
+        "subprocess": "subprocess is blocked. Use geeViz helpers instead of shelling out.",
+        "socket":     "Raw sockets are blocked. Route network access through a domain wrapper (esriLib, edwLib, sal, gm, ee).",
+        "shutil":     "shutil is blocked. If you need to save a file, use save_file(path, bytes).",
+        "pathlib":    "pathlib is blocked. Filesystem work goes through save_file / view_output; you don't need to build paths manually.",
+        "inspect":    "inspect is blocked. To check a function's signature or whether it exists, call the MCP tool search_codebase(module='<lib>', name='<fn>') from the model layer — do NOT try to introspect via Python. Same for pydoc / dis / types.",
+        "pydoc":      "pydoc is blocked. Use the MCP tool search_codebase(module='<lib>', name='<fn>') to look up functions and docstrings.",
+        "dis":        "dis is blocked. Bytecode introspection isn't available in the sandbox — use search_codebase to read source.",
+        "importlib":  "importlib is blocked (dynamic import escape). All modules must be imported statically via a top-level `import` statement; if the module isn't in the allowed list, no runtime import path will unblock it.",
+    }
+    def _hint_for(name: str) -> str:
+        top = name.split(".")[0]
+        return _BLOCKED_MODULE_HINTS.get(top,
+            "Only Earth Engine, geeViz, and standard data libraries are permitted.")
+
     for node in ast.walk(tree):
         if _SANDBOX_ENABLED:
             # --- Security: check imports (sandbox only) ---
@@ -1372,7 +2423,7 @@ def _check_code_patterns(code: str) -> list[str]:
                     if top in _BLOCKED_MODULES:
                         warnings.append(
                             f"BLOCKED: import of '{alias.name}' is not allowed. "
-                            f"Only Earth Engine, geeViz, and standard data libraries are permitted."
+                            f"{_hint_for(alias.name)}"
                         )
             elif isinstance(node, ast.ImportFrom):
                 if node.module:
@@ -1380,7 +2431,7 @@ def _check_code_patterns(code: str) -> list[str]:
                     if top in _BLOCKED_MODULES:
                         warnings.append(
                             f"BLOCKED: import from '{node.module}' is not allowed. "
-                            f"Only Earth Engine, geeViz, and standard data libraries are permitted."
+                            f"{_hint_for(node.module)}"
                         )
 
             # --- Security: check for dangerous builtin calls (sandbox only) ---
@@ -1389,6 +2440,16 @@ def _check_code_patterns(code: str) -> list[str]:
                     warnings.append(
                         f"BLOCKED: call to '{node.func.id}()' is not allowed for security."
                     )
+            # --- Security: block dunder-attribute escape chains (sandbox only) ---
+            # Covers ``().__class__.__bases__[0].__subclasses__()`` and
+            # every variant that walks the object model to reach ``os`` or
+            # any trusted-lib global. See _BLOCKED_DUNDER_ATTRS for the
+            # full list + rationale.
+            if isinstance(node, ast.Attribute) and node.attr in _BLOCKED_DUNDER_ATTRS:
+                warnings.append(
+                    f"BLOCKED: attribute access '.{node.attr}' is not allowed. "
+                    f"This dunder is a common sandbox-escape vector."
+                )
 
         # --- Batch export blocking (sandbox only): block .start() and task.start() ---
         # Export wrapper functions are allowed (they support start=False),
@@ -1543,12 +2604,19 @@ def _save_and_clean_result(result_val):
 
 
 class _StreamingStdout(io.StringIO):
-    """StringIO that also appends output to a file for cross-process polling."""
+    """StringIO that also appends output to a file for cross-process polling.
+
+    Used by ``run_code`` so a separate reader (usually the agent's UI
+    poller) can tail the file to watch a long-running script produce
+    output in real time, while the in-memory StringIO still captures
+    the full output for the tool's final response.
+    """
     def __init__(self, stream_file: str):
         super().__init__()
         self._stream_file = stream_file
 
     def write(self, s):
+        """Append ``s`` to the stream file AND to the in-memory buffer."""
         try:
             with open(self._stream_file, "a", encoding="utf-8") as f:
                 f.write(s)
@@ -1749,9 +2817,17 @@ class _ThreadLocalStreamProxy:
         self._by_thread: dict[int, object] = {}
 
     def register(self, target) -> None:
+        """Route the calling thread's writes to ``target`` until unregistered.
+
+        Args:
+            target: File-like sink (typically a ``StringIO``) that will
+                receive every ``print()`` from THIS thread. Other threads
+                are unaffected.
+        """
         self._by_thread[threading.get_ident()] = target
 
     def unregister(self) -> None:
+        """Stop routing this thread's writes. Falls back to ``sys.__stderr__``."""
         self._by_thread.pop(threading.get_ident(), None)
 
     def _resolve(self):
@@ -1760,18 +2836,21 @@ class _ThreadLocalStreamProxy:
         return self._by_thread.get(threading.get_ident(), sys.__stderr__)
 
     def write(self, s):
+        """Route ``s`` to this thread's registered sink (or ``sys.__stderr__``)."""
         try:
             return self._resolve().write(s)
         except Exception:
             return 0
 
     def flush(self):
+        """Flush this thread's routed sink; swallows any error from the sink."""
         try:
             return self._resolve().flush()
         except Exception:
             return None
 
     def isatty(self):
+        """Always False — the proxy is never a TTY regardless of the underlying stream."""
         return False
 
     # Forward anything else (encoding, fileno, buffer, etc.) to the real
@@ -1930,6 +3009,14 @@ async def run_code(code: str, timeout: int = 120, reset: bool = False,
     }
     _files_before = set(_mtimes_before.keys())
 
+    # --- Dependency-tracking snapshot (Level 2) ---
+    # Take a namespace-id snapshot BEFORE exec so we can diff after and
+    # compute the exact set of names this block bound (new keys +
+    # rebound keys). AST analysis runs alongside for reads/touches.
+    # Cheap: ~1 ms per block for a few hundred names.
+    _block_ast = _analyze_block_ast(code)
+    _ns_before_ids = _snapshot_namespace_ids(sess.namespace)
+
     _ns = sess.namespace  # capture for closure
 
     def _exec():
@@ -2031,7 +3118,7 @@ async def run_code(code: str, timeout: int = 120, reset: bool = False,
                 "\nHint: the call ran for over 60s with no output. If this was a .getInfo() call, "
                 "consider using inspect_asset with filters, or reduce scale/region size."
             )
-        return json.dumps({
+        return _scrub_json_response({
             "success": False,
             "code": code,
             "stdout": stdout_buf.getvalue(),
@@ -2041,7 +3128,7 @@ async def run_code(code: str, timeout: int = 120, reset: bool = False,
         })
 
     if error_holder[0]:
-        return json.dumps({
+        return _scrub_json_response({
             "success": False,
             "code": code,
             "stdout": stdout_buf.getvalue(),
@@ -2051,8 +3138,27 @@ async def run_code(code: str, timeout: int = 120, reset: bool = False,
             "script_path": None,
         })
 
-    # Success -- record in history and save to file
+    # Success -- record in history AND record per-block metadata (Level 2
+    # tracker). ``names_bound`` uses the runtime namespace diff — that's
+    # ground-truth for what this block actually created or rebound. Merge
+    # with static-AST bound names so wildcard-import-side-effects or dynamic
+    # bindings (setattr, updating globals()) that appeared as new keys
+    # get counted. Reads and touches come from the AST walker.
     sess.code_history.append(code)
+    _ns_after_ids = _snapshot_namespace_ids(sess.namespace)
+    _bound_runtime = _diff_namespace(
+        _ns_before_ids, _ns_after_ids, skip_names=_REPL_BOOTSTRAP_NAMES,
+    )
+    sess.code_history_meta.append({
+        "source": code,
+        "names_bound": _bound_runtime | _block_ast["bound_static"],
+        "names_read": set(_block_ast["read"]),
+        "names_touched": set(_block_ast["touched"]),
+        "is_import": _block_ast["is_import"],
+        "wildcard_import": _block_ast["wildcard_import"],
+        "parse_error": _block_ast["parse_error"],
+        "succeeded": True,
+    })
     script_path = _save_history_to_file(sess)
 
     result_val = result_holder[0]
@@ -2116,7 +3222,7 @@ async def run_code(code: str, timeout: int = 120, reset: bool = False,
     if len(stdout_val) > 50000:
         stdout_val = stdout_val[:50000] + "\n... (truncated)"
 
-    return json.dumps({
+    return _scrub_json_response({
         "success": True,
         "code": code,
         "stdout": stdout_val,
@@ -2145,10 +3251,18 @@ def inspect_asset(
     Returns band names/types, CRS, scale, date range, size, columns, and
     properties. Uses ee.data.getInfo for fast catalog metadata, then fetches
     live details with a 10-second timeout per query to avoid hangs on large
-    collections.
+    collections. Also handles BigQuery-backed FeatureCollections — when the
+    standard catalog lookup returns "not found" and the id looks BQ-shaped
+    (``project.dataset.table``), retries via
+    ``ee.FeatureCollection.loadBigQueryTable`` so tables like
+    ``bigquery-public-data.overture_maps.place`` describe cleanly.
 
     Args:
-        asset_id: Full Earth Engine asset ID (e.g. "COPERNICUS/S2_SR_HARMONIZED").
+        asset_id: Full Earth Engine asset ID (e.g.
+                  ``"COPERNICUS/S2_SR_HARMONIZED"``) OR a BigQuery table
+                  path in the form ``project.dataset.table`` (e.g.
+                  ``"bigquery-public-data.overture_maps.place"``). EE
+                  catalog is tried first; BQ is the fallback.
         start_date: Optional start date filter for ImageCollections (YYYY-MM-DD).
         end_date: Optional end date filter for ImageCollections (YYYY-MM-DD).
         region_var: Optional name of an ee.Geometry or ee.FeatureCollection
@@ -2156,7 +3270,9 @@ def inspect_asset(
                     (ImageCollections only).
 
     Returns:
-        JSON with asset metadata.
+        JSON with asset metadata. For BQ-backed hits, ``source=bigquery``
+        is set so the caller knows to use ``ee.FeatureCollection.loadBigQueryTable``
+        (not ``ee.FeatureCollection``) when constructing the FC.
     """
     import concurrent.futures
     import datetime as _dt
@@ -2166,13 +3282,88 @@ def inspect_asset(
     sess = _ensure_initialized(session_id)
     ee = sess.namespace["ee"]
 
+    def _looks_like_bq(aid: str) -> bool:
+        """Heuristic: BigQuery table paths are ``project.dataset.table`` —
+        at least two dots, no slashes (EE catalog IDs use slashes)."""
+        return aid.count(".") >= 2 and "/" not in aid
+
+    def _try_bigquery_fallback(aid: str) -> str | None:
+        """Try to describe ``aid`` as a BigQuery-backed FeatureCollection.
+        Returns a JSON string on success, or None if this path isn't
+        applicable / doesn't work. Best-effort — errors are captured in
+        the returned JSON so the caller sees WHY the fallback didn't
+        salvage the lookup."""
+        try:
+            fc = ee.FeatureCollection.loadBigQueryTable(aid)
+        except Exception as _bq_exc:
+            return json.dumps({
+                "error": f"Not in EE catalog and BigQuery fallback failed: {_bq_exc}",
+                "asset_id": aid,
+            })
+        # Validate + pull schema with the same 10s guard the EE path uses.
+        schema, err = _getinfo_with_timeout(fc.limit(1))
+        if err:
+            return json.dumps({
+                "error": (f"Not in EE catalog. BigQuery loadBigQueryTable "
+                          f"accepted the id but getInfo failed: {err}. "
+                          f"Verify the caller has BigQuery read access and "
+                          f"the table exists as {aid!r}."),
+                "asset_id": aid,
+                "source": "bigquery",
+            })
+        out = {
+            "asset_id": aid,
+            "type": "FEATURE_COLLECTION",
+            "source": "bigquery",
+            "note": ("Loaded via ee.FeatureCollection.loadBigQueryTable — "
+                     "use loadBigQueryTable when constructing this FC in "
+                     "run_code, not ee.FeatureCollection(...)."),
+        }
+        if isinstance(schema, dict):
+            feats = schema.get("features") or []
+            if feats:
+                sample_props = feats[0].get("properties") or {}
+                if sample_props:
+                    out["columns"] = sorted(sample_props.keys())
+                    out["sample_row"] = sample_props
+        return json.dumps(out)
+
+    # Local wrapper so the BQ fallback closure can use it before the main
+    # definition below. Same body — kept here for scoping simplicity.
+    def _getinfo_with_timeout(ee_obj, timeout=_TIMEOUT):
+        import threading
+        _result_box = [None, None]
+        def _run():
+            try:
+                _result_box[0] = ee_obj.getInfo()
+            except Exception as _exc:
+                _result_box[1] = str(_exc)
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout=timeout)
+        if t.is_alive():
+            return None, "timeout"
+        return _result_box[0], _result_box[1]
+
     # --- Step 1: Fast catalog metadata (no compute, never hangs) ---
     try:
         info = ee.data.getInfo(asset_id)
     except Exception as exc:
+        # EE catalog raised (auth failure, malformed id, etc.). If the id
+        # looks BQ-shaped, still worth trying the BQ path — the exception
+        # from the EE side isn't proof BQ can't answer.
+        if _looks_like_bq(asset_id):
+            bq_result = _try_bigquery_fallback(asset_id)
+            if bq_result is not None:
+                return bq_result
         return json.dumps({"error": str(exc), "asset_id": asset_id})
 
     if info is None:
+        # Not in EE catalog. Try BigQuery if the id shape suggests it.
+        if _looks_like_bq(asset_id):
+            bq_result = _try_bigquery_fallback(asset_id)
+            if bq_result is not None:
+                return bq_result
         return json.dumps({"error": f"Asset not found: {asset_id}", "asset_id": asset_id})
 
     asset_type = info.get("type", "UNKNOWN")
@@ -2198,22 +3389,6 @@ def inspect_asset(
         # Include column info for FeatureCollections
         if "columns" in info:
             result["columns"] = info["columns"]
-
-    def _getinfo_with_timeout(ee_obj, timeout=_TIMEOUT):
-        """Run ee_obj.getInfo() in a daemon thread with timeout. Returns (result, error)."""
-        import threading
-        _result_box = [None, None]  # [value, error]
-        def _run():
-            try:
-                _result_box[0] = ee_obj.getInfo()
-            except Exception as exc:
-                _result_box[1] = str(exc)
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
-        t.join(timeout=timeout)
-        if t.is_alive():
-            return None, "timeout"
-        return _result_box[0], _result_box[1]
 
     try:
         if asset_type in ("IMAGE", "Image"):
@@ -2472,6 +3647,11 @@ def _resolve_module(name, session_ns=None):
 
     Accepts:
     - A geeViz module short name in ``_MODULE_TREE`` (``"getImagesLib"``).
+    - A REPL alias for a geeViz module (``"sal"`` → ``getSummaryAreasLib``,
+      ``"gil"`` → ``getImagesLib``, ``"cl"`` → ``outputLib.charts``, etc).
+      Agents routinely guess the alias or invent alternative long-names
+      (``"studyAreasLib"``, ``"chartingLib"``) — the alias map catches
+      both.
     - A top-level REPL name that points to a module (``"ee"``, ``"pd"``).
     - A dotted path that traverses attributes from a top-level REPL name
       (``"ee.ImageCollection"``, ``"ee.Reducer"``, ``"pd.DataFrame"``).
@@ -2480,6 +3660,62 @@ def _resolve_module(name, session_ns=None):
 
     Returns ``(short_name, container)`` or ``(None, None)``.
     """
+    # REPL aliases + common misnomers → real geeViz module short-name.
+    # Kept in one place so future renames surface here, not in prompts.
+    # Values MUST match _MODULE_TREE's short-name keys (charts, thumbs,
+    # reports, getSummaryAreasLib, etc). Full paths like outputLib.charts
+    # ARE in the tree but the tree indexer stores them separately; short
+    # names are what the search_codebase docs promise, so map to those.
+    _ALIASES = {
+        "sal":            "getSummaryAreasLib",
+        "studyareaslib":  "getSummaryAreasLib",   # common mis-guess
+        "summarylib":     "getSummaryAreasLib",
+        "gil":            "getImagesLib",
+        "imageslib":      "getImagesLib",
+        "cl":               "charts",
+        "chartinglib":      "charts",
+        "chartlib":         "charts",
+        "outputlib.charts": "charts",
+        "tl":               "thumbs",
+        "thumbslib":        "thumbs",
+        "outputlib.thumbs": "thumbs",
+        "rl":               "reports",
+        "reportslib":       "reports",
+        "outputlib.reports": "reports",
+        "gm":             "googleMapsLib",
+        "gmapslib":       "googleMapsLib",
+        "edw":            "edwLib",
+        "esri":           "esriLib",
+        "gv":               "geeView",
+        "eeauth":           "eeAuth",
+        "eeauth.client":    "client",
+        "eeauth.eecreds":   "eeCreds",
+        "eeauth.registry":  "registry",
+        "eeauth.server":    "server",
+        "eeauth.tags":      "tags",
+        "cd":               "changeDetectionLib",
+        "cdl":              "changeDetectionLib",
+        "assetmgr":         "assetManagerLib",
+        "aml":              "assetManagerLib",
+        "taskmgr":          "taskManagerLib",
+        "tml":              "taskManagerLib",
+        "cloudstoragemgr":  "cloudStorageManagerLib",
+        "csml":             "cloudStorageManagerLib",
+        "csm":              "cloudStorageManagerLib",
+        "invl":             "inventoryLib",
+        "il":               "inventoryLib",
+        "gcpl":             "gcpLib",
+        "gml":              "googleMapsLib",
+        "edwl":             "edwLib",
+        "esril":            "esriLib",
+        "palettes":         "geePalettes",
+    }
+    aliased = _ALIASES.get(name.lower().strip())
+    if aliased and aliased in _MODULE_TREE:
+        mod = _get_module(_MODULE_TREE[aliased])
+        if mod is not None:
+            return aliased, mod
+
     # Exact match in the geeViz module tree
     entry = _MODULE_TREE.get(name)
     if entry:
@@ -2552,25 +3788,67 @@ def _iter_module_members(mod, query="", include_non_callable=True):
         yield attr_name, obj, kind, first_line, sig
 
 
-@app.tool(annotations=_READ_ONLY)
-def search_geeviz(query: str = "", name: str = "", module: str = "", session_id: str = None) -> str:
-    """Search geeViz modules, functions, classes, variables, and any REPL module.
+# Dataset-name keywords for the search_codebase → search_datasets fallback.
+# Only used when search_codebase returns 0 hits — the agent very often calls
+# search_codebase("modis") when they actually want search_datasets("modis").
+_DATASET_KEYWORDS = frozenset([
+    "modis", "landsat", "sentinel", "viirs", "chirps", "gpm", "era5",
+    "worldcover", "nlcd", "lcms", "mtbs", "hansen", "gedi", "srtm", "aster",
+    "alos", "dynamic world", "alpha earth", "copernicus", "esa", "noaa",
+    "jaxa", "jrc", "prism", "daymet", "umd", "usda", "usgs", "planet",
+    "cams", "airs", "firms", "worldpop", "ghsl",
+])
 
-    A unified introspection tool — replaces search_functions and
-    get_reference_data. Can look up functions, classes, dicts, constants,
-    viz params, band mappings, palettes, and more.
+
+def _looks_like_dataset_query(q: str) -> bool:
+    """True when a query is more likely an EE asset / dataset name than
+    a Python identifier."""
+    if not q:
+        return False
+    q_lower = q.lower().strip()
+    if "/" in q_lower and len(q_lower) > 3:
+        return True
+    return any(kw in q_lower for kw in _DATASET_KEYWORDS)
+
+
+@app.tool(annotations=_READ_ONLY)
+def search_codebase(query: str = "", name: str = "", module: str = "", session_id: str = None) -> str:
+    """Search geeViz — plus any module in the REPL namespace (ee, pandas, numpy, etc.).
+
+    A unified introspection tool. Look up functions, classes, dicts,
+    constants, viz params, band mappings, palettes, method signatures,
+    example scripts — anything reachable by name.
+
+    **Modules it searches**
+
+    - Every geeViz module (``getImagesLib``, ``getSummaryAreasLib``,
+      ``geeView``, ``geePalettes``, ``edwLib``, ``googleMapsLib`` when
+      available, ``outputLib.charts`` / ``.thumbs`` / ``.reports``,
+      etc.) — indexed via AST at startup, so no imports fire until you
+      actually request a runtime value.
+    - Example scripts under ``geeViz/examples/`` — ``module="examples"``
+      lists them, ``name="<script_name>"`` returns source.
+    - Any module already loaded in the REPL namespace — that includes
+      Earth Engine (``ee``), pandas (``pd`` / ``pandas``), numpy
+      (``np`` / ``numpy``), and anything else prior ``run_code`` blocks
+      imported. Pass ``module="ee"`` / ``module="pd"`` / etc. to browse.
 
     Args:
         query: Search term (case-insensitive). Matches against names and
-               first-line docstrings across all geeViz modules.
-        name: Exact name to look up. Accepts bare names (``"vizParamsFalse"``,
-              ``"simpleMask"``) or dotted paths (``"getImagesLib.vizParamsFalse"``,
-              ``"mapper.addLayer"``). Returns full details: signature, docstring
-              for functions; keys/values for dicts; value for constants.
-        module: Module to search or list. Accepts short names (``"getImagesLib"``,
-                ``"charts"``, ``"thumbs"``), full paths (``"geeViz.outputLib.charts"``),
-                or legacy aliases (``"chartingLib"``). Also accepts any module in
-                the REPL namespace (``"ee"``) for on-the-fly lookups.
+               first-line docstrings across every indexed module.
+        name: Exact name to look up. Accepts bare names
+              (``"vizParamsFalse"``, ``"simpleMask"``,
+              ``"DataFrame.to_markdown"``) or dotted paths
+              (``"getImagesLib.vizParamsFalse"``, ``"mapper.addLayer"``,
+              ``"ee.Image.reduceRegion"``, ``"pd.DataFrame"``). Returns
+              full details — signature and docstring for functions;
+              keys / values for dicts; value for constants.
+        module: Module to search or list. Accepts short geeViz names
+                (``"getImagesLib"``, ``"charts"``, ``"thumbs"``), full
+                paths (``"geeViz.outputLib.charts"``), legacy aliases
+                (``"chartingLib"``), or any REPL-loaded module
+                (``"ee"``, ``"pandas"`` / ``"pd"``, ``"numpy"`` /
+                ``"np"``).
 
     Returns:
         JSON with results. Shape depends on the query:
@@ -2751,6 +4029,41 @@ def search_geeviz(query: str = "", name: str = "", module: str = "", session_id:
             if sig:
                 r["signature"] = sig
             results.append(r)
+        # When a query is given, also match METHODS on classes exposed by
+        # this module — surfaced as "ClassName.method". Without this,
+        # search_codebase(module="ee", query="getThumbURL") returns 0
+        # because getThumbURL lives on ee.Image (a class attribute), not
+        # on the ee module itself. Mirrors the geeViz-AST branch above
+        # (see the `class + methods` block in the AST path), so REPL
+        # modules and geeViz modules behave the same for method search.
+        if query:
+            q_lower = query.lower()
+            seen_names = {r["name"] for r in results}
+            for cls_name in dir(mod_obj):
+                if cls_name.startswith("_"):
+                    continue
+                cls = getattr(mod_obj, cls_name, None)
+                if not _inspect.isclass(cls):
+                    continue
+                for m_name in dir(cls):
+                    if m_name.startswith("_") or q_lower not in m_name.lower():
+                        continue
+                    m_obj = getattr(cls, m_name, None)
+                    if m_obj is None or not callable(m_obj):
+                        continue
+                    full = f"{cls_name}.{m_name}"
+                    if full in seen_names:
+                        continue
+                    seen_names.add(full)
+                    entry = {"name": full, "type": "method"}
+                    m_doc = _inspect.getdoc(m_obj) or ""
+                    first = m_doc.split("\n")[0].strip()
+                    entry["description"] = first if first else f"Method of {cls_name}"
+                    try:
+                        entry["signature"] = f"{m_name}{_inspect.signature(m_obj)}"
+                    except (ValueError, TypeError):
+                        pass
+                    results.append(entry)
         return json.dumps({"module": module, "count": len(results), "results": results})
 
     # --- Search across all modules (AST-based, no import) ---
@@ -2787,6 +4100,24 @@ def search_geeviz(query: str = "", name: str = "", module: str = "", session_id:
                             results.append({"module": mod_short, "name": f"{m['name']}.{meth}", "type": "method",
                                             "description": f"Method of {m['name']}"})
 
+        # Empty result + dataset-shaped query → transparently forward to
+        # search_datasets so the agent doesn't need a second tool call.
+        # A `routed_to` note tells the agent what happened.
+        if not results and _looks_like_dataset_query(query):
+            try:
+                ds_json = search_datasets(query=query)
+                ds = json.loads(ds_json) if isinstance(ds_json, str) else ds_json
+                if isinstance(ds, list):
+                    ds = {"results": ds}
+                ds["routed_to"] = "search_datasets"
+                ds["reason"] = (
+                    "search_codebase returned 0 code hits; query looked "
+                    "dataset-shaped, forwarded to search_datasets"
+                )
+                return json.dumps(ds)
+            except Exception:
+                pass
+
         return json.dumps({"query": query, "count": len(results), "results": results})
 
     # --- No args: list all modules (AST-based, no import) ---
@@ -2805,8 +4136,8 @@ def search_geeviz(query: str = "", name: str = "", module: str = "", session_id:
     })
 
 
-# Examples tool removed -- use search_geeviz(module="examples") to list,
-# search_geeviz(name="CCDCViz") to read source.
+# Examples tool removed -- use search_codebase(module="examples") to list,
+# search_codebase(name="CCDCViz") to read source.
 # ---------------------------------------------------------------------------
 # Map control (consolidated)
 # ---------------------------------------------------------------------------
@@ -3106,6 +4437,20 @@ def _map_control_inner(Map, act, sess, open_browser, filename, _mc_stdout):
                     lt = viz.get("layerType", "")
                     if "Vector" in lt or "vector" in lt:
                         desc_parts.append("vector")
+                    if lt == "tileMapService":
+                        # Includes Map.addTileLayer + esriLib.addEsri{Map,Image}Service
+                        # (cached tile path). Show the tile source so the user knows
+                        # it's an external XYZ layer, not an EE image.
+                        _tpl = idDict.get("_tile_url_template", "")
+                        _host = _tpl.split("/")[2] if "://" in _tpl else _tpl[:40]
+                        desc_parts.append(f"tile ({_host})")
+                    if lt == "dynamicMapService":
+                        # Map.addDynamicMapService (also the esriLib fallback for
+                        # dynamic MapServers like FEMA NFHL). Uses per-viewport
+                        # ArcGIS /export?f=image — cartography preserved from source.
+                        _bu = idDict.get("_dyn_base_url_1", "")
+                        _host = _bu.split("/")[2] if "://" in _bu else _bu[:40]
+                        desc_parts.append(f"dynamic Esri MapService ({_host})")
                     for vk in ("strokeColor", "color", "fillColor", "pointRadius", "width"):
                         if viz.get(vk) is not None:
                             desc_parts.append(f"{vk}={viz[vk]}")
@@ -3231,7 +4576,8 @@ def _map_control_inner(Map, act, sess, open_browser, filename, _mc_stdout):
 # ---------------------------------------------------------------------------
 
 @app.tool(annotations=_WRITE)
-def save_session(filename: str = "", format: str = "py", session_id: str = None) -> str:
+def save_session(filename: str = "", format: str = "py",
+                  sliced: bool = True, session_id: str = None) -> str:
     """Save the accumulated run_code history to a .py script or .ipynb notebook.
 
     Args:
@@ -3240,9 +4586,15 @@ def save_session(filename: str = "", format: str = "py", session_id: str = None)
                   is added automatically based on format.
         format: Output format -- "py" (default) for a standalone Python script,
                 "ipynb" for a Jupyter notebook.
+        sliced: When True (default), run backward program slicing anchored on
+                the last successful block and emit ONLY the surviving blocks —
+                exploratory dead code and superseded assignments are dropped.
+                When False, emit every successful block verbatim (legacy
+                behavior; useful when the slicer's judgment is wrong for a
+                specific session). See ``_slice_history`` for the rules.
 
     Returns:
-        JSON with the file path and number of code blocks/cells saved.
+        JSON with the file path, block-retention counts, and status.
     """
     sess = _get_session(session_id)
 
@@ -3256,6 +4608,10 @@ def save_session(filename: str = "", format: str = "py", session_id: str = None)
             "error": "No code has been executed yet. Use run_code first.",
         })
 
+    total_blocks = len(sess.code_history)
+    keep_idxs = _slice_history(sess) if sliced else list(range(total_blocks))
+    dropped = total_blocks - len(keep_idxs)
+
     if format == "py":
         if filename:
             if not filename.endswith(".py"):
@@ -3263,12 +4619,21 @@ def save_session(filename: str = "", format: str = "py", session_id: str = None)
             os.makedirs(sess.script_dir, exist_ok=True)
             sess.current_script_path = os.path.join(sess.script_dir, filename)
 
-        path = _save_history_to_file(sess)
+        if sliced:
+            path = _save_history_to_file_sliced(sess)
+        else:
+            path = _save_history_to_file(sess)
         return json.dumps({
             "success": True,
             "script_path": path,
-            "code_blocks": len(sess.code_history),
-            "message": f"Saved {len(sess.code_history)} code block(s) to {path}",
+            "code_blocks": len(keep_idxs),
+            "total_blocks": total_blocks,
+            "dropped": dropped,
+            "sliced": sliced,
+            "message": (
+                f"Saved {len(keep_idxs)} of {total_blocks} code block(s) "
+                f"to {path}" + (f" ({dropped} dropped by slicer)" if dropped else "")
+            ),
         })
 
     # format == "ipynb"
@@ -3282,6 +4647,21 @@ def save_session(filename: str = "", format: str = "py", session_id: str = None)
     else:
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         nb_path = os.path.join(sess.script_dir, f"session_{ts}.ipynb")
+
+    if sliced:
+        _save_history_to_notebook_sliced(sess, nb_path)
+        return json.dumps({
+            "success": True,
+            "notebook_path": nb_path,
+            "code_cells": len(keep_idxs),
+            "total_cells": total_blocks,
+            "dropped": dropped,
+            "sliced": True,
+            "message": (
+                f"Saved {len(keep_idxs)} of {total_blocks} code cell(s) "
+                f"to {nb_path}" + (f" ({dropped} dropped by slicer)" if dropped else "")
+            ),
+        })
 
     # Build notebook structure (nbformat 4.5)
     cells = []
@@ -3715,11 +5095,17 @@ _CACHE_TTL = 30 * 24 * 3600  # 30 days — STAC catalog barely changes; long TTL
 _CATALOG_FILES = {
     "official": "official_catalog.json",
     "community": "community_catalog.json",
+    # bigquery-public-data enumerated via BQ API (no URL — see
+    # _fetch_bigquery_catalog). Cached the same way as the EE catalogs.
+    "bigquery": "bigquery_catalog.json",
 }
 _CATALOG_URLS = {
     "official": "https://earthengine-stac.storage.googleapis.com/catalog/catalog.json",
     "community": "https://raw.githubusercontent.com/samapriya/awesome-gee-community-datasets/master/community_datasets.json",
 }
+# All catalog names known to the cache layer. Keep in sync with
+# _CATALOG_FILES; search_datasets validates ``source`` against this set.
+_CATALOG_NAMES = tuple(_CATALOG_FILES.keys())
 _cache_lock = threading.Lock()
 import time as _time
 
@@ -3798,6 +5184,128 @@ def _fetch_catalog(url: str, name: str) -> list[dict] | None:
     return None
 
 
+def _fetch_bigquery_catalog() -> list[dict] | None:
+    """Enumerate ``bigquery-public-data`` datasets + tables via the BQ API.
+
+    Returns a flat list of dicts that scores identically to the EE
+    catalogs inside ``search_datasets`` — one entry per DATASET and one
+    per TABLE, so a query like "overture places" can resolve directly to
+    ``bigquery-public-data.overture_maps.place`` without the caller
+    knowing which dataset the table lives in.
+
+    Auth: requires ADC (application-default credentials) for a project
+    that has the BigQuery API enabled — the caller only needs
+    ``bigquery.jobs.create`` on THEIR project; ``bigquery-public-data``
+    is world-readable. Returns ``None`` when the dep isn't installed or
+    auth fails, so ``search_datasets`` degrades cleanly to EE-only
+    without noise on operational error.
+
+    Cost: one ``list_datasets`` call (~1s) + one ``list_tables`` call per
+    dataset (parallelized across 20 threads → ~10-15s total for
+    bigquery-public-data). Cached to disk via the same
+    ``_get_cached_catalog`` stale-while-revalidate wrapper as the EE
+    catalogs, so day-2 lookups are instant.
+    """
+    try:
+        from google.cloud import bigquery
+        from google.auth import default as _adc_default
+    except ImportError:
+        print(
+            "[geeViz MCP] bigquery: google-cloud-bigquery not installed; "
+            "bigquery-public-data source will be empty",
+            file=sys.stderr, flush=True,
+        )
+        return None
+    try:
+        creds, project = _adc_default()
+    except Exception as _adc_err:
+        print(
+            f"[geeViz MCP] bigquery: ADC unavailable: {_adc_err!r}; "
+            f"bigquery-public-data source will be empty",
+            file=sys.stderr, flush=True,
+        )
+        return None
+    if not project:
+        print(
+            "[geeViz MCP] bigquery: ADC has no default project; "
+            "bigquery-public-data source will be empty",
+            file=sys.stderr, flush=True,
+        )
+        return None
+
+    try:
+        client = bigquery.Client(project=project, credentials=creds)
+        datasets = list(client.list_datasets(project="bigquery-public-data"))
+    except Exception as _ls_err:
+        print(
+            f"[geeViz MCP] bigquery: list_datasets failed: {_ls_err!r}",
+            file=sys.stderr, flush=True,
+        )
+        return None
+
+    entries: list[dict] = []
+
+    # Dataset-level rows first — coarse hits (e.g. a search for
+    # "overture" returns the dataset directly, useful when the user
+    # doesn't know which table they want yet).
+    for d in datasets:
+        entries.append({
+            "id": f"bigquery-public-data.{d.dataset_id}",
+            "title": d.friendly_name or d.dataset_id,
+            "type": "BIGQUERY_DATASET",
+            "provider": "BigQuery Public Data",
+            # ``tags`` doubles as free-text scored by search_datasets.
+            # Split the snake_case id so token queries like
+            # "overture places" match "overture_maps".
+            "tags": d.dataset_id.replace("_", " "),
+            "kind": "dataset",
+        })
+
+    # Table-level rows — parallelised list_tables per dataset. This is
+    # the slow phase (~15s wall-clock for ~357 datasets in a 20-thread
+    # pool) but it only runs once per 30-day cache cycle, and it's on a
+    # background thread inside a prewarm — never on the request path.
+    import concurrent.futures
+    def _list_one(dataset_ref):
+        try:
+            return dataset_ref.dataset_id, list(client.list_tables(dataset_ref.reference))
+        except Exception:
+            return dataset_ref.dataset_id, []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as pool:
+        for dataset_id, tables in pool.map(_list_one, datasets):
+            for t in tables:
+                entries.append({
+                    "id": f"bigquery-public-data.{dataset_id}.{t.table_id}",
+                    "title": f"{dataset_id}.{t.table_id}",
+                    "type": "BIGQUERY_TABLE",
+                    "provider": "BigQuery Public Data",
+                    "tags": f"{dataset_id} {t.table_id}".replace("_", " "),
+                    "kind": "table",
+                    "parent_dataset": f"bigquery-public-data.{dataset_id}",
+                })
+
+    print(
+        f"[geeViz MCP] bigquery: cached {len(entries)} entries "
+        f"({len(datasets)} datasets)",
+        file=sys.stderr, flush=True,
+    )
+    return entries
+
+
+def _fetch_catalog_by_name(name: str) -> list[dict] | None:
+    """Dispatch fetcher by catalog name. ``bigquery`` uses the BQ API;
+    everything else is a straight URL fetch. Returns ``None`` on any
+    failure — the caller (stale-while-revalidate wrapper) treats ``None``
+    as "keep whatever's on disk"."""
+    if name == "bigquery":
+        return _fetch_bigquery_catalog()
+    url = _CATALOG_URLS.get(name)
+    if not url:
+        return None
+    return _fetch_catalog(url, name)
+
+
 def _read_cache_meta() -> dict:
     """Read the cache timestamp metadata file."""
     if os.path.isfile(_CACHE_META_FILE):
@@ -3829,9 +5337,8 @@ def _background_refresh_catalog(name: str) -> None:
     the lock so concurrent reads of the existing (stale) cache aren't
     blocked. Any failure leaves the existing cache untouched.
     """
-    url = _CATALOG_URLS[name]
     try:
-        data = _fetch_catalog(url, name)
+        data = _fetch_catalog_by_name(name)
         if not data:
             return
         cache_file = os.path.join(_CACHE_DIR, _CATALOG_FILES[name])
@@ -3892,9 +5399,8 @@ def _get_cached_catalog(name: str) -> list[dict] | None:
                     return json.load(f)
             except Exception:
                 pass
-        url = _CATALOG_URLS[name]
         try:
-            data = _fetch_catalog(url, name)
+            data = _fetch_catalog_by_name(name)
             if data:
                 os.makedirs(_CACHE_DIR, exist_ok=True)
                 with open(cache_file, "w", encoding="utf-8") as f:
@@ -3912,30 +5418,46 @@ def _get_cached_catalog(name: str) -> list[dict] | None:
 
 @app.tool(annotations=_READ_ONLY)
 def search_datasets(query: str, source: str = "all", max_results: int = 50) -> str:
-    """Search the GEE dataset catalog by keyword.
+    """Search the GEE dataset catalog PLUS BigQuery public data by keyword.
 
-    Searches both the official Earth Engine catalog (~500+ datasets) and
-    the community catalog (~200+ datasets). Uses word-level matching
-    against title, tags, id, and provider fields with relevance scoring.
+    Searches three catalogs, all cached with 30-day stale-while-revalidate:
+
+    - **official** — Earth Engine STAC catalog (~500+ datasets).
+    - **community** — awesome-gee-community-datasets (~200+ datasets).
+    - **bigquery** — every dataset AND table under ``bigquery-public-data``
+      (~357 datasets, ~3000 tables). Table-level indexing means a query
+      like "overture places" resolves directly to
+      ``bigquery-public-data.overture_maps.place`` — no need to enumerate
+      tables yourself afterwards. Results have ``source=bigquery``, plus
+      ``kind`` set to ``"dataset"`` or ``"table"``. For a BQ table row,
+      construct the FeatureCollection with
+      ``ee.FeatureCollection.loadBigQueryTable(id)`` — NOT
+      ``ee.FeatureCollection(id)`` — because the id is a BQ path, not an
+      EE asset path. ``inspect_asset`` on a BQ id auto-falls back through
+      the same helper.
+
+    Uses word-level matching against title, tags, id, and provider fields
+    with relevance scoring.
 
     Args:
         query: Search terms (e.g. "landsat surface reflectance", "DEM",
-               "sentinel fire"). Case-insensitive.
-        source: Which catalog to search: "official", "community", or
-                "all" (default).
-        max_results: Maximum number of results to return (default 10).
+               "sentinel fire", "overture places"). Case-insensitive.
+        source: Which catalog to search: "official", "community",
+                "bigquery", or "all" (default — spans all three).
+        max_results: Maximum number of results to return (default 50).
 
     Returns:
         JSON list of matching datasets with id, title, type, provider,
         tags, source, and additional metadata.
     """
-    if source not in ("official", "community", "all"):
+    if source not in ("official", "community", "bigquery", "all"):
         return json.dumps({
-            "error": f"Invalid source: {source!r}. Must be 'official', 'community', or 'all'.",
+            "error": (f"Invalid source: {source!r}. Must be 'official', "
+                      f"'community', 'bigquery', or 'all'."),
         })
 
     sources_to_search = (
-        ["official", "community"] if source == "all"
+        ["official", "community", "bigquery"] if source == "all"
         else [source]
     )
 
@@ -4005,6 +5527,20 @@ def search_datasets(query: str, source: str = "all", max_results: int = 50) -> s
                     result_entry["stac_url"] = (
                         f"https://earthengine-stac.storage.googleapis.com/"
                         f"catalog/{stac_dir}/{stac_file}.json"
+                    )
+            elif src_name == "bigquery":
+                # BQ rows: kind distinguishes "dataset" (browse) from
+                # "table" (directly usable via loadBigQueryTable).
+                # parent_dataset lets the caller jump one level up when
+                # they picked a table but want to see siblings.
+                result_entry["kind"] = entry.get("kind", "")
+                if entry.get("parent_dataset"):
+                    result_entry["parent_dataset"] = entry["parent_dataset"]
+                # Nudge the agent to the right construction path — the id
+                # here is a BQ path, not an EE asset path.
+                if entry.get("kind") == "table":
+                    result_entry["construct_via"] = (
+                        "ee.FeatureCollection.loadBigQueryTable(id)"
                     )
             else:
                 # Community catalog fields
@@ -4186,151 +5722,14 @@ def _make_serializable(obj):
     return repr(obj)
 
 
-    # get_reference_data removed — use search_geeviz(name="vizParamsFalse") instead
+    # get_reference_data removed — use search_codebase(name="vizParamsFalse") instead
 
 
-# ---------------------------------------------------------------------------
-# USFS Enterprise Data Warehouse (EDW) (consolidated)
-# ---------------------------------------------------------------------------
-@app.tool(annotations=_READ_ONLY_OPEN)
-def get_streetview(
-    lon: float,
-    lat: float,
-    headings: str = "0,90,180,270",
-    pitch: float = 0,
-    fov: float = 90,
-    radius: int = 50,
-    source: str = "default",
-    session_id: str = None,
-) -> str:
-    """Get Google Street View imagery at a location for ground-truthing.
-
-    Checks if Street View coverage exists, then fetches static images
-    at the requested headings (compass directions). Returns images
-    inline for visual inspection.
-
-    Useful for ground-truthing remote sensing analysis — see what a
-    location actually looks like from the ground.
-
-    Args:
-        lon: Longitude in decimal degrees.
-        lat: Latitude in decimal degrees.
-        headings: Comma-separated compass headings in degrees
-                  (0=North, 90=East, 180=South, 270=West).
-                  Default "0,90,180,270" (all 4 cardinal directions).
-        pitch: Camera pitch (-90 to 90). 0=horizontal, positive=up.
-        fov: Field of view in degrees (1-120). Lower = more zoom.
-             Default 90.
-        radius: Search radius in meters for nearest panorama. Default 50.
-        source: "default" (all) or "outdoor" (outdoor only).
-
-    Returns:
-        Metadata (date, location, copyright) and Street View images.
-        Returns error if no imagery exists at the location.
-    """
-    sess = _ensure_initialized(session_id)
-    import geeViz.googleMapsLib as _gm
-
-    # Check metadata first (free)
-    try:
-        meta = _gm.streetview_metadata(lon, lat, radius=radius, source=source)
-    except Exception as exc:
-        return json.dumps({"error": f"Street View metadata request failed: {exc}"})
-
-    if meta.get("status") != "OK":
-        return json.dumps({
-            "status": meta.get("status", "UNKNOWN"),
-            "message": f"No Street View imagery at ({lat}, {lon}) within {radius}m.",
-            "tip": "Try increasing the radius or checking a nearby road/trail.",
-        })
-
-    # Parse headings
-    heading_list = [float(h.strip()) for h in headings.split(",") if h.strip()]
-
-    _direction_labels = {0: "N", 45: "NE", 90: "E", 135: "SE",
-                         180: "S", 225: "SW", 270: "W", 315: "NW"}
-
-    # Fetch images and save to files
-    os.makedirs(sess.output_dir, exist_ok=True)
-    saved_images = []
-    md_lines = []
-    for h in heading_list:
-        try:
-            img_bytes = _gm.streetview_image(
-                lon, lat, heading=h, pitch=pitch, fov=fov,
-                radius=radius, source=source,
-            )
-            if img_bytes:
-                label = _direction_labels.get(int(h) % 360, f"{h}deg")
-                fname = f"streetview_{label}.jpg"
-                fpath = os.path.join(sess.output_dir, fname).replace("\\", "/")
-                with open(fpath, "wb") as f:
-                    f.write(img_bytes)
-                saved_images.append({"heading": h, "label": label, "path": fpath, "size": len(img_bytes)})
-                md_lines.append(f"![Street View {label}]({fpath})")
-        except Exception:
-            pass
-
-    loc = meta.get("location", {})
-    return json.dumps({
-        "status": "OK",
-        "date": meta.get("date"),
-        "location": meta.get("location"),
-        "copyright": meta.get("copyright"),
-        "images_fetched": len(saved_images),
-        "images": saved_images,
-        "output_markdown": "\n".join(md_lines) if md_lines else None,
-    })
-
-
-@app.tool(annotations=_READ_ONLY_OPEN)
-def geeviz_search_places(
-    query: str,
-    lon: float = 0,
-    lat: float = 0,
-    radius: float = 5000,
-    max_results: int = 10,
-    session_id: str = None,
-) -> str:
-    """Search for places using the Google Places API.
-
-    Useful for finding landmarks, businesses, or points of interest near
-    a study area. Can also geocode addresses.
-
-    Args:
-        query: Search text (e.g. "fire station", "visitor center",
-               "100S 200 E, SLC, UT").
-        lon: Longitude for location bias (0 = no bias).
-        lat: Latitude for location bias (0 = no bias).
-        radius: Bias radius in meters. Default 5000.
-        max_results: Maximum results (1-20). Default 10.
-
-    Returns:
-        JSON with matching places (name, address, coordinates, rating, types).
-    """
-    _ensure_initialized(session_id)
-    import geeViz.googleMapsLib as _gm
-
-    kwargs: dict[str, Any] = {
-        "query": query,
-        "max_results": max_results,
-        "radius": radius,
-    }
-    if lat != 0 and lon != 0:
-        kwargs["lat"] = lat
-        kwargs["lon"] = lon
-
-    try:
-        places = _gm.search_places(**kwargs)
-    except Exception as exc:
-        return json.dumps({"error": f"Places search failed: {exc}"})
-
-    return json.dumps({
-        "count": len(places),
-        "places": places,
-    })
-
-
+# get_streetview and geeviz_search_places tools removed — use the
+# googleMapsLib helpers directly from run_code instead (e.g.
+# gm.streetview_image, gm.search_places, gm.geocode). googleMapsLib
+# is exposed as `gm` in the REPL namespace when the optional
+# `google-genai` / requests deps import successfully.
 
 
 
@@ -4345,13 +5744,67 @@ def geeviz_search_places(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    """CLI entry point — start the geeViz MCP server on stdio transport.
+
+    Reads config from the environment (EE_PROXY_URL, GEE_PROJECT,
+    GEE_SERVICE_ACCOUNT_B64, MCP_SANDBOX, MCP_STREAM_DIR), spawns a
+    background prewarm thread that eagerly initializes EE + imports the
+    heavy geeViz modules, then blocks in ``app.run()`` speaking JSON-RPC
+    over stdin/stdout for the MCP client (Claude Desktop, ADK, etc.).
+
+    Invoked as ``python -m geeViz.mcp`` or by an MCP client configured
+    with ``command: python -m geeViz.mcp``.
+    """
     global _SANDBOX_ENABLED
 
-    # Note: a background EE warmup used to live here but raced with the first
-    # tool-call thread inside _ensure_initialized (unguarded _MODULE_TREE
-    # build + cached-module reimport cascade), wedging the asyncio dispatcher
-    # for any tool that arrived before warmup completed. Removed deliberately
-    # — first tool call pays a one-time ~5-10s init cost; correctness wins.
+    # Prewarm EE + geeViz imports + module tree in a background thread so the
+    # first real tool call doesn't pay the full ~30-60s cold-start
+    # (ee.Initialize + geeView / getImagesLib / edwLib / outputLib imports).
+    # An earlier prewarm was removed because it raced with the first tool
+    # call — that race is now guarded by ``_init_lock`` inside
+    # ``_ensure_initialized``, so the prewarm thread and any concurrent tool
+    # call simply serialize on the lock (either finds work done or blocks
+    # briefly until it is). Falls back to the lazy path on error.
+    import threading, time
+    def _prewarm():
+        try:
+            _proxy = os.environ.get("EE_PROXY_URL", "").strip()
+            _project = os.environ.get("GEE_PROJECT", "").strip()
+            _sa = "yes" if os.environ.get("GEE_SERVICE_ACCOUNT_B64", "").strip() else "no"
+            print(f"[geeViz MCP] Env at prewarm: EE_PROXY_URL={'set' if _proxy else 'MISSING'} "
+                  f"GEE_PROJECT={_project or 'MISSING'} GEE_SERVICE_ACCOUNT_B64={_sa}",
+                  file=sys.stderr, flush=True)
+            print("[geeViz MCP] Prewarming EE + geeViz imports...", file=sys.stderr, flush=True)
+            _t0 = time.time()
+            _ensure_initialized()
+            print(f"[geeViz MCP] Prewarm complete in {time.time() - _t0:.1f}s", file=sys.stderr, flush=True)
+        except Exception as _pw_err:
+            # Full traceback WITH __cause__ chain — robust_init wraps the real
+            # ee.Initialize() error in a "non-interactively" RuntimeError with
+            # `raise ... from init_err`, and its verbose=False path never
+            # prints the cause. Only the traceback exposes what actually
+            # failed (metadata-server 403, PermissionError from sandbox,
+            # missing scope, etc). Log full chain so evidence is available.
+            import traceback as _tb
+            print(f"[geeViz MCP] Prewarm failed: {_pw_err!r} (first tool call will retry)", file=sys.stderr, flush=True)
+            print("[geeViz MCP] Prewarm failure traceback (with cause chain):", file=sys.stderr, flush=True)
+            _tb.print_exception(type(_pw_err), _pw_err, _pw_err.__traceback__, chain=True, file=sys.stderr)
+            sys.stderr.flush()
+    threading.Thread(target=_prewarm, daemon=True, name="geeviz-mcp-prewarm").start()
+
+    # Also prewarm the dataset catalogs (STAC + community + bigquery-public-data)
+    # in a separate background thread so the first ``search_datasets`` call
+    # doesn't pay a 15-60s catalog-build cost. ``_get_cached_catalog`` is
+    # already stale-while-revalidate — this just kicks the first-install path.
+    # bigquery is the expensive one (~15s of BQ API calls) and cleanly no-ops
+    # to None when BQ dep / auth is unavailable.
+    def _prewarm_catalogs():
+        for _cat in _CATALOG_NAMES:
+            try:
+                _get_cached_catalog(_cat)
+            except Exception as _cat_err:
+                print(f"[geeViz MCP] catalog {_cat!r} prewarm failed: {_cat_err!r}", file=sys.stderr, flush=True)
+    threading.Thread(target=_prewarm_catalogs, daemon=True, name="geeviz-mcp-catalog-prewarm").start()
 
     # stdio is standard for Cursor/IDE integration; use streamable-http for HTTP
     transport = os.environ.get("MCP_TRANSPORT", "stdio")

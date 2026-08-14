@@ -466,6 +466,13 @@ class _GeeVizRequestHandler(http.server.SimpleHTTPRequestHandler):
         super().__init__(*args, **kwargs)
 
     def log_message(self, format, *args):  # noqa: A002 - stdlib signature
+        """Silence per-request access logs.
+
+        stdlib's default handler writes one line per request to stderr,
+        which pollutes the notebook / terminal when the map fetches
+        dozens of tiles. Overriding to a no-op keeps ``Map.view()``
+        output focused on user prints.
+        """
         return
 
     def end_headers(self):  # noqa: D401 - stdlib API
@@ -592,32 +599,41 @@ class _GeeVizRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     # Override each HTTP verb so reverse-proxy fires for /ee-api/*; everything
     # else falls through to ``SimpleHTTPRequestHandler``'s static-file behavior.
+    # All six ``do_*`` methods share the same shape: if the request path is
+    # ``/ee-api/*`` proxy it upstream, otherwise (GET) serve static or (others)
+    # 405. Documenting once instead of six identical docstrings.
     def do_GET(self):  # noqa: N802 - stdlib API
+        """Static file for non-``/ee-api/*`` paths, proxy otherwise."""
         if self._is_ee_api():
             return self._proxy_ee_api()
         return super().do_GET()
 
     def do_POST(self):  # noqa: N802 - stdlib API
+        """Proxy ``/ee-api/*`` POSTs; anything else → 405."""
         if self._is_ee_api():
             return self._proxy_ee_api()
         self.send_error(405, "Method Not Allowed")
 
     def do_PUT(self):  # noqa: N802 - stdlib API
+        """Proxy ``/ee-api/*`` PUTs; anything else → 405."""
         if self._is_ee_api():
             return self._proxy_ee_api()
         self.send_error(405, "Method Not Allowed")
 
     def do_DELETE(self):  # noqa: N802 - stdlib API
+        """Proxy ``/ee-api/*`` DELETEs; anything else → 405."""
         if self._is_ee_api():
             return self._proxy_ee_api()
         self.send_error(405, "Method Not Allowed")
 
     def do_PATCH(self):  # noqa: N802 - stdlib API
+        """Proxy ``/ee-api/*`` PATCHes; anything else → 405."""
         if self._is_ee_api():
             return self._proxy_ee_api()
         self.send_error(405, "Method Not Allowed")
 
     def do_OPTIONS(self):  # noqa: N802 - stdlib API
+        """Proxy ``/ee-api/*`` OPTIONS preflight; anything else → 405."""
         if self._is_ee_api():
             return self._proxy_ee_api()
         # No CORS preflight needed for static files served same-origin.
@@ -835,10 +851,12 @@ def _ensure_server(port):
     actual = run_local_server(port)
     if actual is None:
         return None
+    # Only surface a message when the port had to be reassigned — the
+    # normal case is silent so the only URL a user sees is the actual
+    # geeView URL printed later by view(). Two URLs in the output was
+    # confusing users who thought they should click the server root.
     if actual != port:
         print("geeViz server bound to http://localhost:{}/{}/ (requested {})".format(actual, geeViewFolder, port))
-    else:
-        print("geeViz server at http://localhost:{}/{}/".format(actual, geeViewFolder))
     return actual
 
 
@@ -920,14 +938,34 @@ class mapper:
             on. Default is True to avoid confusing layer-order rendering
             when time lapses and non-time lapses are visible at the same
             time. Set to False if you want them visible simultaneously.
+            
+        showToolTipModal (bool, default False): Whether to show the tooltip modal when the map is loaded.
     """
 
     def __call__(self):
         """Allow ``gv.Map()`` to return the singleton instead of raising TypeError."""
         return self
 
-    def __init__(self, port: int = 8001):
-        self.port = port
+    @property
+    def port(self) -> int:
+        return self._port
+
+    @port.setter
+    def port(self, value: int) -> None:
+        # No warning here — Map.port IS honored in attached mode.
+        # If the user is on detached and the port ends up ignored,
+        # Map.view() prints a runtime hint after it knows the
+        # resolved mode.
+        self._port = int(value)
+
+    _DEFAULT_PORT = 8001
+
+    def __init__(self, port: int = _DEFAULT_PORT):
+        # Stored on ``_port`` so the deprecated public ``port`` setter
+        # (see property above) can log a warning without recursing into
+        # itself and so internal writes (``_ensure_server`` fallback
+        # port pick) can bypass the warning path.
+        self._port = int(port)
         self.layerNumber = 1
         self.idDictList = []
         self.mapCommandList = []
@@ -957,6 +995,36 @@ class mapper:
         self.queryWindowMode = "sidePane"
         self.project = ee.data._get_state().cloud_api_user_project
         self.turnOffLayersWhenTimeLapseIsOn = True
+        self.showToolTipModal = False
+
+        # eeAuth mode override for Map.view() — takes precedence over
+        # the ``GEEVIZ_EEAUTH_MODE`` env var. When None (default), the
+        # env var wins; when the env var is also unset, geeView picks
+        # ``auto`` on Colab and ``detached`` elsewhere. Set via
+        # ``Map.setAuthMode("attached"|"detached"|"legacy"|"attached_strict")`` when
+        # you want to be explicit without touching env.
+        self.eeAuthMode = None
+
+    ######################################################################
+    # Per-layer workload-tag capture.
+    #
+    # Every add* call snapshots ``ee.data.getWorkloadTag()`` at the moment
+    # of the call and stashes it in the layer's idDict. ``.view()``
+    # replays those tags in the emitted JS bootstrap — one
+    # ``ee.data.setWorkloadTag(<tag>)`` before each layer's addSerialized*
+    # call (and a reset at the top / between untagged layers) — so
+    # per-layer attribution survives to Cloud Monitoring even though the
+    # JS viewer's own ``setDefaultWorkloadTag("<mode>---viewer-exports")``
+    # would otherwise blanket every tile fetch. No JS changes required;
+    # the JS SDK's ``setWorkloadTag`` is a synchronous module-global read
+    # by each request as it builds, so the setter-then-add sequence
+    # captures the intended tag before the async fetch fires.
+    def _capture_workload_tag(self) -> str:
+        try:
+            import ee.data as _ee_data
+            return (_ee_data.getWorkloadTag() or "").strip()
+        except Exception:
+            return ""
 
     ######################################################################
     # Function for adding a layer to the map
@@ -1211,6 +1279,7 @@ class mapper:
         idDict["visible"] = str(visible).lower()
         idDict["viz"] = json.dumps(viz, sort_keys=False)
 
+        idDict["workloadTag"] = self._capture_workload_tag()
         self.idDictList.append(idDict)
 
     ######################################################################
@@ -1286,7 +1355,139 @@ class mapper:
                                "opacity": float(opacity),
                                "maxZoom": int(max_zoom)}),
         }
+        idDict["workloadTag"] = self._capture_workload_tag()
         self.idDictList.append(idDict)
+
+    ######################################################################
+    # Dynamic (non-cached) ArcGIS MapServer overlay.
+    # Bridges to the viewer's ``addDynamicToMap(baseUrl1, baseUrl2,
+    # ending1, ending2, minZoom1, minZoom2, name, visible, helpBox,
+    # whichLayerList)`` function — same code path the JS uses for a
+    # ``layerType: "dynamicMapService"`` layer. Google Maps requests a
+    # single GroundOverlay per viewport by exporting a bbox-sized PNG
+    # from ArcGIS's ``/export?f=image`` endpoint, then re-requests on
+    # pan/zoom. Preserves the server's cartographic styling — flood
+    # zones, legend, labels — instead of downloading raw vector
+    # geometries.
+    def addDynamicMapService(
+        self,
+        service_url: str,
+        name: str = "Dynamic MapService",
+        visible: bool = True,
+        layers: str = "",
+        transparent: bool = True,
+        dpi: int = 96,
+        min_zoom: int = 0,
+        token: str | None = None,
+    ):
+        """Add a dynamic (non-cached) ArcGIS MapServer as a re-rendered
+        overlay. Use this for services whose metadata reports
+        ``singleFusedMapCache: false`` — e.g. FEMA NFHL, USFS Forest
+        Roads, most authoritative government REST services. For CACHED
+        MapServers use ``addTileLayer`` or ``esriLib.addEsriMapService``
+        instead.
+
+        Args:
+            service_url (str): ArcGIS MapServer URL ending in
+                ``/MapServer`` (no ``/tile/...`` suffix).
+            name (str, optional): Layer name shown in the layer list.
+            visible (bool, optional): Initial visibility.
+            layers (str, optional): ArcGIS ``layers`` param value —
+                ``"show:2,3"``, ``"hide:1"``, or ``""`` for defaults.
+            transparent (bool, optional): PNG transparency for overlay
+                use. Defaults to True.
+            dpi (int, optional): Screen DPI for the export request.
+                96 is standard; bump to 192 for HiDPI displays.
+            min_zoom (int, optional): Below this zoom the overlay isn't
+                requested (blank tile). Defaults to 0 (always request).
+            token (str, optional): ArcGIS auth token appended to every
+                export request.
+        """
+        if not isinstance(service_url, str) or "MapServer" not in service_url:
+            raise ValueError(
+                f"service_url must be an ArcGIS MapServer URL. Got: {service_url!r}"
+            )
+        # Strip trailing slash + any /export suffix the caller may have
+        # already appended — we build the query string ourselves so the
+        # base is always the bare service URL.
+        _base = service_url.rstrip("/")
+        if _base.lower().endswith("/export"):
+            _base = _base[: -len("/export")]
+        # /export params fixed BEFORE bbox (baseURL) and AFTER bbox
+        # (ending). getGroundOverlay inserts
+        #    ``<west>,<south>,<east>,<north>&bboxSR=3857&imageSR=3857&size=<w>,<h>``
+        # between the two, so ``baseURL`` must end with ``bbox=`` and
+        # ``ending`` must start with ``&``.
+        _q = ["f=image", "format=png32"]
+        if transparent:
+            _q.append("transparent=true")
+        if layers:
+            _q.append(f"layers={layers}")
+        _q.append("bbox=")   # trailing "bbox=" so JS appends coords
+        _base_url = f"{_base}/export?" + "&".join(_q)
+        _ending_bits = [f"dpi={int(dpi)}"]
+        if token:
+            _ending_bits.append(f"token={token}")
+        _ending = "&" + "&".join(_ending_bits)
+        # ``addDynamicToMap`` picks item[1] when zoom > item[1].minZoom
+        # and item[0] otherwise. We use identical URLs for both — same
+        # export endpoint, no HiDPI split — with min_zoom as the floor
+        # so a user zoomed out beyond ``min_zoom`` gets a blank tile
+        # (matches getGroundOverlay's built-in gate).
+        idDict = {
+            "objectName": "",     # bare function call, not a method
+            "function": "addDynamicToMap",
+            "name": name,
+            "visible": str(visible).lower(),
+            "_is_dynamic_esri": True,
+            "_dyn_base_url_1": _base_url,
+            "_dyn_base_url_2": _base_url,
+            "_dyn_ending_1":   _ending,
+            "_dyn_ending_2":   _ending,
+            "_dyn_min_zoom_1": int(min_zoom),
+            "_dyn_min_zoom_2": int(min_zoom),
+            # Parallel item/viz so list-comprehension callers don't trip.
+            "item": "",
+            "viz": json.dumps({"layerType": "dynamicMapService"}),
+        }
+        idDict["workloadTag"] = self._capture_workload_tag()
+        self.idDictList.append(idDict)
+
+    ######################################################################
+    # Pass-through wrappers so ``Map.addEsri*`` mirrors ``esriLib.addEsri*``.
+    # Ergonomic win: the agent already uses ``Map.addLayer`` /
+    # ``Map.addTileLayer`` — having the ArcGIS helpers on the same object
+    # means one less import + better tab-completion + a single, uniform
+    # "how do I put a layer on the map" surface. The heavy lifting stays
+    # in ``esriLib`` (URL parsing, portal search, metadata preflight,
+    # feature count guardrails); this just delegates.
+    def addEsriImageService(self, url_or_result, viz_params=None, name=None, token=None):
+        """See ``geeViz.esriLib.addEsriImageService``. Delegates."""
+        from geeViz import esriLib as _el
+        return _el.addEsriImageService(url_or_result, viz_params=viz_params, name=name, token=token)
+
+    def addEsriMapService(self, url_or_result, name=None, token=None, viz_params=None):
+        """See ``geeViz.esriLib.addEsriMapService``. Delegates. If the
+        service is dynamic (non-cached), esriLib now falls back to
+        ``Map.addDynamicMapService`` internally instead of raising."""
+        from geeViz import esriLib as _el
+        return _el.addEsriMapService(url_or_result, name=name, token=token, viz_params=viz_params)
+
+    def addEsriFeatureService(self, url_or_result, viz_params=None, name=None,
+                              max_features=1000, where="1=1", token=None):
+        """See ``geeViz.esriLib.addEsriFeatureService``. Delegates."""
+        from geeViz import esriLib as _el
+        return _el.addEsriFeatureService(url_or_result, viz_params=viz_params, name=name,
+                                          max_features=max_features, where=where, token=token)
+
+    def addEsriService(self, url_or_result, viz_params=None, name=None, token=None,
+                       max_features=1000, where="1=1"):
+        """See ``geeViz.esriLib.addEsriService``. Auto-detects the
+        service type from URL / metadata and delegates to the right
+        add-helper."""
+        from geeViz import esriLib as _el
+        return _el.addEsriService(url_or_result, viz_params=viz_params, name=name, token=token,
+                                   max_features=max_features, where=where)
 
     ######################################################################
     # Function for adding a layer to the map
@@ -1503,6 +1704,7 @@ class mapper:
         idDict["visible"] = str(visible).lower()
         idDict["viz"] = json.dumps(viz, sort_keys=False)
         idDict["function"] = "addSerializedTimeLapse"
+        idDict["workloadTag"] = self._capture_workload_tag()
         self.idDictList.append(idDict)
 
     ######################################################################
@@ -1555,6 +1757,7 @@ class mapper:
         idDict["visible"] = str(False).lower()
         idDict["viz"] = json.dumps(viz, sort_keys=False)
         idDict["function"] = "addSerializedSelectLayer"
+        idDict["workloadTag"] = self._capture_workload_tag()
         self.idDictList.append(idDict)
 
     ######################################################################
@@ -1657,7 +1860,66 @@ class mapper:
                 f"'/ee-api/t/{t_enc}';}}catch(e){{}}"
             )
         lines = prefix + "var layerLoadErrorMessages=[];showMessage('Loading',staticTemplates.loadingModal[mode]);function runGeeViz(){"
+        # If the Python side has a DEFAULT workload tag installed (via
+        # ``ee.data.setDefaultWorkloadTag`` — including the sensible
+        # one eeCreds installs at proxy start, ``geeviz__<tenant>``),
+        # push it into the browser SDK so client-side compute (area
+        # chart, click-to-query, elevation ping, thumbnail preview)
+        # attributes the same way as the Python process. Read the
+        # actual DEFAULT, not ``getWorkloadTag()`` — which returns the
+        # CURRENT tag (typically whatever the user last set) and would
+        # install the wrong value as the browser fallback.
+        try:
+            import ee.data as _ee_data
+            _py_default = (_ee_data._get_state().workload_tag._default or "").strip()
+        except Exception:
+            _py_default = ""
+        if _py_default:
+            _pd_esc = _py_default.replace("\\", "\\\\").replace('"', '\\"')
+            lines += 'try{ee.data.setDefaultWorkloadTag("' + _pd_esc + '");}catch(e){}'
+        # Clean slate for per-layer workload tags. resetWorkloadTag()
+        # (no arg) resets CURRENT back to whichever default is now in
+        # effect — the Python one we just pushed, or the viewer JS's
+        # ``geeviz---viewer-exports`` if nothing was pushed.
+        lines += "try{ee.data.resetWorkloadTag();}catch(e){}"
         for idDict in self.idDictList:
+            # Per-layer workload tag replay. If addLayer was called under
+            # eeCreds.setWorkloadTag(<X>), emit an SDK setter here so the
+            # subsequent addSerializedLayer's synchronous getMapId call
+            # bakes <X> into that layer's tile URL. Emits reset when the
+            # layer was added under no explicit tag so a preceding layer
+            # doesn't leak its tag onto this one.
+            _wt = idDict.get("workloadTag", "")
+            if _wt:
+                _wt_esc = _wt.replace('\\', '\\\\').replace('"', '\\"')
+                lines += 'try{ee.data.setWorkloadTag("' + _wt_esc + '");}catch(e){}'
+            else:
+                lines += "try{ee.data.resetWorkloadTag();}catch(e){}"
+            if idDict.get("_is_dynamic_esri"):
+                # Dynamic (non-cached) ArcGIS MapServer overlay. Emit a
+                # bare ``addDynamicToMap(...)`` call — that JS function
+                # is a module-level function in lcms-viewer, NOT a
+                # method on Map, so no ``Map.`` prefix. Escapes match
+                # the addREST branch below: any backslash / double
+                # quote in the URLs is doubled for JS string safety.
+                def _jsstr(s):
+                    return (s or "").replace("\\", "\\\\").replace('"', '\\"')
+                lines += (
+                    'try{{addDynamicToMap("{b1}","{b2}","{e1}","{e2}",'
+                    '{z1},{z2},"{name}",{visible},"","layer-list");}}'
+                    'catch(e){{layerLoadErrorMessages.push('
+                    '"Dynamic MapService \\"{name}\\" failed: "+e.message);}}'
+                ).format(
+                    b1=_jsstr(idDict["_dyn_base_url_1"]),
+                    b2=_jsstr(idDict["_dyn_base_url_2"]),
+                    e1=_jsstr(idDict["_dyn_ending_1"]),
+                    e2=_jsstr(idDict["_dyn_ending_2"]),
+                    z1=int(idDict.get("_dyn_min_zoom_1", 0)),
+                    z2=int(idDict.get("_dyn_min_zoom_2", 0)),
+                    name=_jsstr(idDict["name"]),
+                    visible=str(idDict["visible"]).lower(),
+                )
+                continue
             if idDict.get("_is_tile_url"):
                 # External XYZ tile service — emit a Map.addREST(...) call
                 # with a JS function literal that substitutes {x}/{y}/{z}.
@@ -1693,6 +1955,11 @@ class mapper:
                 idDict["name"],
                 str(idDict["visible"]).lower(),
             )
+        # Reset back to the viewer's default fallback tag so anything
+        # fired AFTER the layer sequence (area chart, inspector clicks,
+        # dynamic recomputes) attributes to viewer-exports rather than
+        # inheriting the last layer's tag.
+        lines += "try{ee.data.resetWorkloadTag();}catch(e){}"
         lines += 'if(layerLoadErrorMessages.length>0){showMessage("Map.addLayer Error List",layerLoadErrorMessages.join("<br>"));};'
         lines += "setTimeout(function(){if(layerLoadErrorMessages.length===0){$('#close-modal-button').click();}}, 2500);"
         for mapCommand in self.mapCommandList:
@@ -1701,6 +1968,7 @@ class mapper:
         lines += "Map.turnOffLayersWhenTimeLapseIsOn = {};".format(
             str(self.turnOffLayersWhenTimeLapseIsOn).lower()
         )
+        lines+=f"localStorage['showToolTipModal-geeViz']={str(self.showToolTipModal).lower()};"
         lines += "};"
         return lines
 
@@ -1897,8 +2165,8 @@ class mapper:
         #    user opts out via ``GEEVIZ_EEAUTH_MODE=legacy``.
         #
         # Mode override:
-        #   - ``GEEVIZ_EEAUTH_MODE=auto`` (default): try proxy, fall back
-        #   - ``GEEVIZ_EEAUTH_MODE=proxy``: require proxy; raise if can't
+        #   - ``GEEVIZ_EEAUTH_MODE=attached`` (default): try proxy, fall back
+        #   - ``GEEVIZ_EEAUTH_MODE=attached_strict``: require proxy; raise if can't
         #   - ``GEEVIZ_EEAUTH_MODE=legacy``: skip proxy entirely
         ee_proxy_url = ""
         ee_proxy_tenant = ""
@@ -1907,7 +2175,7 @@ class mapper:
         # Default ``detached`` so multi-``Map.view()`` scripts use one
         # long-lived background process for both EE auth and /geeView
         # HTML — the script can exit cleanly and the browser tab keeps
-        # working. Override via ``GEEVIZ_EEAUTH_MODE=auto`` (inline
+        # working. Override via ``GEEVIZ_EEAUTH_MODE=attached`` (inline
         # daemon-thread proxy, dies with the script) or ``legacy``
         # (skip proxy entirely, mint tokens into the URL).
         #
@@ -1922,12 +2190,27 @@ class mapper:
         # ``sync_oauth_project`` after the prompt actually takes
         # effect. Users on Colab who want detached can opt in
         # explicitly with ``GEEVIZ_EEAUTH_MODE=detached``.
-        _default_mode = "auto" if IS_COLAB else "detached"
-        _auth_mode = os.environ.get("GEEVIZ_EEAUTH_MODE", _default_mode).lower()
+        _default_mode = "attached" if IS_COLAB else "detached"
+        # Precedence: Map.setAuthMode(...) > GEEVIZ_EEAUTH_MODE > default.
+        # Instance override wins so notebook users can pin the mode
+        # without touching env vars. Old names ("auto"/"proxy") still
+        # work as aliases — ensure_started normalizes them.
+        _auth_mode = (
+            self.eeAuthMode
+            or os.environ.get("GEEVIZ_EEAUTH_MODE")
+            or _default_mode
+        ).lower()
         if _auth_mode != "legacy":
             try:
                 from geeViz.eeAuth.eeCreds import eeCreds as _eeCreds
-                status = _eeCreds.ensure_started(mode=_auth_mode)
+                # Feed Map.port down so detached mode can spawn its
+                # subprocess on the user's requested port (matches the
+                # port-mismatch respawn check in _ensure_detached). Also
+                # gives attached mode a consistent preferred port —
+                # _find_free_port bumps if it's taken.
+                status = _eeCreds.ensure_started(
+                    mode=_auth_mode, proxy_port=int(self._port),
+                )
                 if status["proxy_url"]:
                     ee_proxy_url = status["proxy_url"]
                     ee_proxy_tenant = status["current"]
@@ -1959,7 +2242,10 @@ class mapper:
         if ee_proxy_mode != "detached":
             actual_port = _ensure_server(self.port)
             if actual_port is not None:
-                self.port = actual_port
+                # Bypass the public setter so this doesn't trigger the
+                # Map.port deprecation warning — we didn't pick this
+                # port, the port picker did.
+                self._port = actual_port
 
         # Build the viewer URL — proxy mode or legacy token mode.
         if ee_proxy_url:
@@ -1990,9 +2276,20 @@ class mapper:
             import time as _t_view
             _v = int(_t_view.time() * 1000)
             query = f"?v={_v}"
+            # Show the actual mode picked so the user knows whether the
+            # proxy is in-process (auto), a subprocess (detached), etc.
+            # Also flag WHERE the mode came from so users can trace how
+            # they ended up in a given lane without spelunking source.
+            if self.eeAuthMode:
+                _mode_src = "Map.setAuthMode"
+            elif os.environ.get("GEEVIZ_EEAUTH_MODE"):
+                _mode_src = "GEEVIZ_EEAUTH_MODE env"
+            else:
+                _mode_src = "default"
             print(
                 f"Using eeCreds proxy at {ee_proxy_url}"
-                f" (creds={ee_proxy_tenant or '<first registered>'})"
+                f" (creds={ee_proxy_tenant or '<first registered>'},"
+                f" mode={ee_proxy_mode or _auth_mode} via {_mode_src})"
             )
         else:
             # Legacy: direct token mint, baked into the URL.
@@ -2084,7 +2381,13 @@ class mapper:
             # sleep so the browser can fetch the initial HTML + static
             # assets before the script returns; daemon dies when the
             # script exits, so a refresh after exit will 404.
-            url = "http://localhost:{}/geeView/{}".format(self.port, query)
+            # Use 127.0.0.1 (not `localhost`) to match the detached-mode
+            # branch above and to sidestep the IPv6-first-resolver gotcha
+            # on some Windows setups where `localhost` resolves to `::1`
+            # first, the http.server only binds IPv4, and naive tools
+            # (older Python `requests`, curl without Happy Eyeballs)
+            # fail with "connection refused" even though 127.0.0.1 works.
+            url = "http://127.0.0.1:{}/geeView/{}".format(self.port, query)
             print("geeView URL:", url)
             if want_iframe:
                 self.IFrame = IFrame(src=url, width="100%", height="{}px".format(iframe_height))
@@ -2113,6 +2416,53 @@ class mapper:
         self.view(**self._last_view_kwargs)
 
     ######################################################################
+    def setAuthMode(self, mode: "str | None"):
+        """Set the eeAuth mode ``Map.view()`` uses when it starts / attaches
+        to the eeCreds proxy. Overrides the ``GEEVIZ_EEAUTH_MODE`` env var.
+
+        Args:
+            mode: One of the canonical modes, or ``None`` to fall back
+                to the env var / default.
+
+                * ``"attached"`` — in-process daemon-thread proxy; dies
+                  with the script but doesn't need a separate process.
+                  Default on Colab. Silent-fallback on failure — if the
+                  proxy can't start, ``Map.view()`` uses the legacy
+                  token-in-URL path.
+                * ``"attached_strict"`` — same as ``"attached"`` but
+                  raises when the proxy can't start (vs. silent fallback).
+                * ``"detached"`` — long-lived background subprocess proxy;
+                  survives script exit so multi-``Map.view()`` workflows
+                  and successive script runs share one proxy. **Default
+                  on non-Colab.**
+                * ``"legacy"`` — no proxy; mint tokens directly into the
+                  ``Map.view()`` URL. Deprecated — planned for removal.
+
+                Legacy aliases (soft-deprecated, still accepted):
+                ``"auto"`` → ``"attached"``, ``"proxy"`` → ``"attached_strict"``.
+
+        Precedence: ``Map.setAuthMode(...)`` > ``GEEVIZ_EEAUTH_MODE`` env
+        var > default (``"attached"`` on Colab, ``"detached"`` elsewhere).
+
+        >>> Map.setAuthMode("attached")   # force in-process proxy
+        >>> Map.view()
+        """
+        if mode is not None:
+            m = str(mode).strip().lower()
+            aliases = {"auto": "attached", "proxy": "attached_strict"}
+            canonical = {"attached", "attached_strict", "detached", "legacy"}
+            if m in aliases:
+                m = aliases[m]  # normalize; ensure_started will also log the deprecation
+            if m not in canonical:
+                raise ValueError(
+                    f"Map.setAuthMode: mode must be one of "
+                    f"{sorted(canonical)} (aliases {sorted(aliases)} "
+                    f"also accepted); got {mode!r}"
+                )
+            self.eeAuthMode = m
+        else:
+            self.eeAuthMode = None
+
     def clearMap(self):
         """
         Removes all map layers and commands - useful if running geeViz in a notebook and don't want layers/commands from a prior code block to still be included.
@@ -2476,6 +2826,54 @@ class mapper:
             ee_obj = idDict.get("_ee_obj")
             viz = idDict.get("_viz", {})
             name = idDict.get("name", f"Layer {idx}")
+            # ── Non-EE layer types: probe the service URL ──
+            # These layers don't have an EE object to getMapId on; the
+            # only meaningful test is "does the underlying service
+            # respond". A HEAD/GET on a single tile (or the dynamic
+            # service metadata endpoint) catches the common failure
+            # modes: URL typo, service moved / retired, 401/403 for
+            # tokenless secured services, DNS resolution failing.
+            if idDict.get("_is_tile_url"):
+                # Plug in z=1, x=0, y=0 — the "world tile" — for a
+                # dirt-cheap probe. Uses `requests` if present, urllib
+                # otherwise; short timeout so a slow tile server can't
+                # stall the whole export.
+                _tpl = idDict.get("_tile_url_template", "")
+                _probe = (_tpl.replace("{z}", "1")
+                              .replace("{x}", "0")
+                              .replace("{y}", "0"))
+                try:
+                    import urllib.request as _ur, urllib.error as _ue
+                    _req = _ur.Request(_probe, method="HEAD")
+                    with _ur.urlopen(_req, timeout=8) as _rsp:
+                        if _rsp.status >= 400:
+                            return {"name": name, "status": "error",
+                                    "error": f"tile URL returned HTTP {_rsp.status} — check the template"}
+                except _ue.HTTPError as _he:
+                    return {"name": name, "status": "error",
+                            "error": f"tile URL returned HTTP {_he.code} — check the template"}
+                except Exception as _te:
+                    return {"name": name, "status": "error",
+                            "error": f"tile URL unreachable: {_te}"}
+                return {"name": name, "status": "ok", "error": None}
+            if idDict.get("_is_dynamic_esri"):
+                # Dynamic Esri MapServer: probe the service metadata
+                # endpoint (strip the ``/export?...bbox=`` we appended).
+                _bu = idDict.get("_dyn_base_url_1", "")
+                _svc = _bu.split("/export?")[0]
+                try:
+                    import urllib.request as _ur, urllib.error as _ue
+                    with _ur.urlopen(f"{_svc}?f=json", timeout=8) as _rsp:
+                        if _rsp.status >= 400:
+                            return {"name": name, "status": "error",
+                                    "error": f"MapServer returned HTTP {_rsp.status}"}
+                except _ue.HTTPError as _he:
+                    return {"name": name, "status": "error",
+                            "error": f"MapServer returned HTTP {_he.code}"}
+                except Exception as _te:
+                    return {"name": name, "status": "error",
+                            "error": f"MapServer unreachable: {_te}"}
+                return {"name": name, "status": "ok", "error": None}
             if ee_obj is None:
                 # GeoJSON layers — no ee object to test
                 return {"name": name, "status": "ok", "error": None}
@@ -2543,7 +2941,13 @@ class mapper:
                         def _normalize_str_prop(v, as_int=False):
                             if not isinstance(v, str):
                                 return None  # already a list, no normalization needed
-                            parts = [p.strip() for p in v.split(",") if p.strip()]
+                            # LCMS convention: true delimiter is a bare comma;
+                            # intra-name commas always have a trailing space
+                            # ("Insect, Disease, or Drought Stress" is ONE
+                            # class name). Split on comma-not-followed-by-space
+                            # so that reconstitutes correctly.
+                            import re as _re
+                            parts = [p.strip() for p in _re.split(r",(?! )", v) if p.strip()]
                             if as_int:
                                 out = []
                                 for p in parts:
@@ -2639,11 +3043,11 @@ class mapper:
                                 )
                             else:
                                 err_msg = (
-                                    f"autoViz is True but no band has class properties "
-                                    f"({', '.join(bn + '_class_values' for bn in band_names[:3])}... not found). "
-                                    f"The viewer needs <bandName>_class_values, "
-                                    f"<bandName>_class_names, and <bandName>_class_palette "
-                                    f"properties for thematic rendering."
+                                    f"autoViz=True but no band has class properties "
+                                    f"({band_names[0]}_class_values... not found). "
+                                    f"If the image came from a reducer (.mosaic/.median/.reduce), "
+                                    f"those strip user properties — reattach with "
+                                    f"ee.Image(img.copyProperties(collection.first()))."
                                 )
                             return {"name": name, "status": "error", "error": err_msg}
             except Exception as e:
@@ -3088,6 +3492,16 @@ class mapper:
     ######################################################################
     # Functions to handle location of query outputs
     def setQueryWindowMode(self, mode):
+        """Set where inspector query results are rendered.
+
+        Low-level setter — prefer ``setQueryToInfoWindow()`` or
+        ``setQueryToSidePane()`` unless you know the exact mode string
+        the frontend expects.
+
+        Args:
+            mode (str): One of ``"infoWindow"`` (popup over the map) or
+                ``"sidePane"`` (dedicated results panel).
+        """
         self.queryWindowMode = mode
 
     def setQueryToInfoWindow(self):
@@ -3277,6 +3691,7 @@ class mapper:
         idDict["visible"] = str(shouldChart).lower()
         idDict["viz"] = json.dumps(params, sort_keys=False)
 
+        idDict["workloadTag"] = self._capture_workload_tag()
         self.idDictList.append(idDict)
 
     def populateAreaChartLayerSelect(self):

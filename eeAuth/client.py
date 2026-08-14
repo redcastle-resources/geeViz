@@ -83,8 +83,12 @@ def set_tenant(tenant: str):
 
 
 def reset_tenant(token) -> None:
-    """Restore the tenant to what it was before the matching ``set_tenant``
-    call."""
+    """Restore the tenant to what it was before the matching ``set_tenant`` call.
+
+    Args:
+        token: The token object returned by the paired ``set_tenant()`` call.
+            Passing a token from a different scope raises ``ValueError``.
+    """
     CURRENT_TENANT.reset(token)
 
 
@@ -153,6 +157,28 @@ class TenantAwareHttp:
                     return h
 
                 def request(self, uri, method="GET", body=None, headers=None, **kw):
+                    """Forward an EE SDK HTTP request through the proxy.
+
+                    Runs the actual HTTP via a per-thread ``httplib2.Http``
+                    to avoid the SDK's thread-unsafe connection cache.
+                    Rewrites the request to:
+
+                    * Strip any ``Authorization`` header the SDK added
+                      (proxy stamps its own).
+                    * Add the tenant header from the current ContextVar.
+                    * Add user + session workload-tag headers when set.
+
+                    Args:
+                        uri: Upstream URL the SDK wants to hit.
+                        method: HTTP verb. Default ``"GET"``.
+                        body: Request body bytes.
+                        headers: Dict of headers to forward (after rewrite).
+                        **kw: Passed through to ``httplib2.Http.request``.
+
+                    Returns:
+                        Same ``(response, content)`` tuple ``httplib2``
+                        normally returns.
+                    """
                     headers = dict(headers or {})
                     # Strip SDK-injected auth — proxy substitutes its own
                     headers.pop("Authorization", None)

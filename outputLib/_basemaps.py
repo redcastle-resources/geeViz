@@ -162,6 +162,9 @@ _BASEMAP_ALIASES = {
     "street": "esri-street",
 }
 
+def get_basemap_presets():
+    """Return the list of basemap presets."""
+    return list(BASEMAP_PRESETS.keys())
 
 def _resolve_basemap(basemap):
     """Resolve a basemap identifier to a normalised configuration dict.
@@ -306,25 +309,46 @@ def _fetch_arcgis_export(base_url, bounds, w, h, timeout=30, crs=None):
 
     xmin, ymin, xmax, ymax = bounds
 
-    # Determine spatial reference for the request
+    # Determine spatial reference for the request.
+    # ``crs`` may arrive as:
+    #   - None / "EPSG:4326" / "CRS:84" → default 4326, no reprojection
+    #   - "EPSG:<N>"                     → ArcGIS ``{"wkid":N}`` SR
+    #   - a raw WKT string (e.g. from ee.Image.projection().getInfo()['wkt']
+    #     when the source isn't identified by an EPSG code, like LCMS
+    #     which is stored in an ad-hoc "Albers Conical Equal Area" WKT)
+    #                                     → ArcGIS ``{"wkt":"..."}`` SR
     bbox_sr = "4326"
     image_sr = "4326"
     req_bbox = f"{xmin},{ymin},{xmax},{ymax}"
 
+    def _is_wkt(s: str) -> bool:
+        u = s.lstrip().upper()
+        return u.startswith(("PROJCS[", "PROJCRS[", "GEOGCS[", "GEOGCRS["))
+
     if crs is not None and crs.upper() not in ("EPSG:4326", "CRS:84"):
-        epsg = crs.upper().replace("EPSG:", "")
+        import json as _json
         try:
-            int(epsg)
             import ee as _ee
-            # Use EE to get the bounds in the target CRS
+            # Build an ArcGIS SR object: {"wkid":N} for EPSG codes,
+            # {"wkt":"..."} for raw WKT. ArcGIS server accepts both.
+            if _is_wkt(crs):
+                sr_obj = {"wkt": crs}
+            else:
+                # Assume "EPSG:<N>" or bare number; try to extract N.
+                epsg = crs.upper().replace("EPSG:", "")
+                int(epsg)  # raises if not numeric
+                sr_obj = {"wkid": int(epsg)}
+            # Reproject the ROI into the target CRS via EE (works for
+            # both EPSG codes and raw WKT — ee.Projection accepts both)
             roi = _ee.Geometry.Rectangle([xmin, ymin, xmax, ymax], "EPSG:4326", False)
             out_region = roi.bounds(100, _ee.Projection(crs))
             coords = out_region.coordinates().getInfo()[0]
             xs = [p[0] for p in coords]
             ys = [p[1] for p in coords]
             req_bbox = f"{min(xs)},{min(ys)},{max(xs)},{max(ys)}"
-            bbox_sr = f'{{"wkid":{epsg}}}'
-            image_sr = f'{{"wkid":{epsg}}}'
+            sr_json = _json.dumps(sr_obj)
+            bbox_sr = sr_json
+            image_sr = sr_json
         except Exception:
             pass  # fall back to 4326
 
@@ -738,15 +762,15 @@ def build_bottom_strip(width, bounds_4326, scalebar=True,
             Defaults to ``"metric"``.
         north_arrow (bool, optional): Whether to draw a north arrow on
             the right. Defaults to ``True``.
-        bg_color (tuple | str, optional): Background fill colour as an
-            RGBA tuple or a PIL colour name. Defaults to
+        bg_color (tuple | str, optional): Background fill color as an
+            RGBA tuple or a PIL color name. Defaults to
             ``(0, 0, 0, 255)`` (opaque black).
-        text_color (str, optional): Colour for text labels and the
+        text_color (str, optional): color for text labels and the
             primary scalebar / arrow fill. Defaults to ``"white"``.
-        outline_color (str, optional): Colour for outlines and the
+        outline_color (str, optional): color for outlines and the
             secondary scalebar / arrow fill. Defaults to ``"black"``.
         accent_color (str | tuple | None, optional): Override for the
-            secondary fill colour.  When ``None`` (the default),
+            secondary fill color.  When ``None`` (the default),
             *outline_color* is used instead.
 
     Returns:
@@ -886,13 +910,13 @@ def render_north_arrow(size, font_color=(255, 255, 255),
 
     Args:
         size (int): Width and height of the output image in pixels.
-        font_color (tuple, optional): Primary arrow fill colour as an
+        font_color (tuple, optional): Primary arrow fill color as an
             ``(R, G, B)`` tuple (0--255). Defaults to
             ``(255, 255, 255)`` (white).
-        accent (tuple, optional): Secondary fill colour for the
+        accent (tuple, optional): Secondary fill color for the
             ``"classic"`` and ``"outline"`` styles, as ``(R, G, B)``.
             Defaults to ``(180, 180, 180)`` (light grey).
-        contrast (tuple, optional): Outline colour as ``(R, G, B)``.
+        contrast (tuple, optional): Outline color as ``(R, G, B)``.
             Defaults to ``(0, 0, 0)`` (black).
         style (str, optional): Arrow style -- ``"solid"`` (single filled
             polygon, the default), ``"classic"`` (two-tone compass),
@@ -954,22 +978,32 @@ def render_north_arrow(size, font_color=(255, 255, 255),
 def build_inset_image(bounds_4326, size=None, ref_width=512,
                       inset_basemap=None, zoom_out_factor=8.0,
                       border_color="white", rect_color="red",
-                      rect_fill_color=None, rect_width=2, crs=None):
+                      rect_fill_color=None, rect_width=2, crs=None,
+                      _extra_bounds_list=None):
     """Build a small overview / locator-map inset image.
 
-    Fetches a basemap covering a zoomed-out extent centred on *bounds_4326*,
-    draws a coloured polygon showing the main view's extent, and adds a
-    thin border.  The result is a square RGBA image suitable for pasting
-    into a corner of a larger map thumbnail.
+    Fetches a basemap covering a zoomed-out extent, draws a colored
+    polygon showing the main view's extent, and adds a thin border. The
+    result is a square RGBA image suitable for pasting into a corner of
+    a larger map thumbnail.
 
-    When *crs* is a projected CRS (e.g. ``"EPSG:5070"``), the extent
+    ``bounds_4326`` accepts either a single ``(xmin, ymin, xmax, ymax)``
+    tuple **or a list of such tuples**. When a list is given
+    (multi-feature grid), the inset is centred and zoomed on the union
+    of all bounds and an outlined polygon is drawn for EACH bounds — so
+    viewers see the spatial distribution of every tile in the grid at a
+    glance. A single-tuple call is preserved for backwards compatibility
+    and behaves exactly as before.
+
+    When *crs* is a projected CRS (e.g. ``"EPSG:5070"``), each extent
     indicator is drawn as a projected polygon (potentially rotated)
     rather than an axis-aligned rectangle, so the inset accurately
     reflects the main map's projected footprint.
 
     Args:
-        bounds_4326 (tuple): ``(xmin, ymin, xmax, ymax)`` of the main map
-            view in EPSG:4326 decimal degrees.
+        bounds_4326 (tuple | list[tuple]): ``(xmin, ymin, xmax, ymax)``
+            in EPSG:4326 decimal degrees, OR a list of such tuples for
+            multi-feature overviews.
         size (int | None, optional): Side length of the inset in pixels.
             When ``None`` (the default), automatically computed as 25 %
             of *ref_width* (minimum 60 px).
@@ -983,11 +1017,11 @@ def build_inset_image(bounds_4326, size=None, ref_width=512,
             extent relative to the main view.  A value of ``8.0`` (the
             default) means the inset shows 8x the longitudinal /
             latitudinal span.
-        border_color (str, optional): Colour of the 2 px border around
+        border_color (str, optional): color of the 2 px border around
             the inset. Defaults to ``"white"``.
-        rect_color (str, optional): Colour of the rectangle outline
+        rect_color (str, optional): color of the rectangle outline
             indicating the main view extent. Defaults to ``"red"``.
-        rect_fill_color (str or tuple, optional): Fill colour for the
+        rect_fill_color (str or tuple, optional): Fill color for the
             extent rectangle.  Supports RGBA tuples for transparency,
             e.g. ``(255, 0, 0, 80)``.  Defaults to ``None`` (no fill).
         rect_width (int, optional): Line width of the extent rectangle
@@ -1017,11 +1051,25 @@ def build_inset_image(bounds_4326, size=None, ref_width=512,
     inset_size = size if size else max(60, int(ref_width * 0.25))
     border = 2
 
-    xmin, ymin, xmax, ymax = bounds_4326
-    cx = (xmin + xmax) / 2.0
-    cy = (ymin + ymax) / 2.0
-    half_lon = (xmax - xmin) * zoom_out_factor / 2.0
-    half_lat = (ymax - ymin) * zoom_out_factor / 2.0
+    # Normalize input: a single (xmin, ymin, xmax, ymax) tuple becomes a
+    # 1-element list so the rest of the function can treat both shapes
+    # uniformly. Then the union of all bounds is what we zoom the inset
+    # basemap to; each bounds still gets its own outlined polygon drawn.
+    if bounds_4326 and isinstance(bounds_4326[0], (int, float)):
+        bounds_list = [tuple(bounds_4326)]
+    else:
+        bounds_list = [tuple(b) for b in bounds_4326]
+    if not bounds_list:
+        return None
+
+    union_xmin = min(b[0] for b in bounds_list)
+    union_ymin = min(b[1] for b in bounds_list)
+    union_xmax = max(b[2] for b in bounds_list)
+    union_ymax = max(b[3] for b in bounds_list)
+    cx = (union_xmin + union_xmax) / 2.0
+    cy = (union_ymin + union_ymax) / 2.0
+    half_lon = (union_xmax - union_xmin) * zoom_out_factor / 2.0
+    half_lat = (union_ymax - union_ymin) * zoom_out_factor / 2.0
     inset_bounds = (
         max(-180, cx - half_lon), max(-85, cy - half_lat),
         min(180, cx + half_lon), min(85, cy + half_lat),
@@ -1044,26 +1092,26 @@ def build_inset_image(bounds_4326, size=None, ref_width=512,
         return (px, py)
 
     if ib_w > 0 and ib_h > 0:
-        # Determine extent polygon corners
-        extent_corners = _get_projected_extent_corners(
-            bounds_4326, crs
-        )
-
-        # Draw fill on a transparent overlay to support alpha
+        # Draw fill (bottom layer, transparent-composited) for every bounds
         if rect_fill_color is not None:
             overlay = Image.new("RGBA", inset_img.size, (0, 0, 0, 0))
-            px_points = [geo_to_px(lon, lat) for lon, lat in extent_corners]
-            ImageDraw.Draw(overlay).polygon(px_points, fill=rect_fill_color)
+            ov_draw = ImageDraw.Draw(overlay)
+            for b in bounds_list:
+                extent_corners = _get_projected_extent_corners(b, crs)
+                px_points = [geo_to_px(lon, lat) for lon, lat in extent_corners]
+                ov_draw.polygon(px_points, fill=rect_fill_color)
             inset_img = Image.alpha_composite(inset_img, overlay)
 
-        # Draw outline
-        px_points = [geo_to_px(lon, lat) for lon, lat in extent_corners]
+        # Draw outline for every bounds
         draw = ImageDraw.Draw(inset_img)
-        # Draw polygon outline (closed)
-        for i in range(len(px_points)):
-            p1 = px_points[i]
-            p2 = px_points[(i + 1) % len(px_points)]
-            draw.line([p1, p2], fill=rect_color, width=rect_width)
+        for b in bounds_list:
+            extent_corners = _get_projected_extent_corners(b, crs)
+            px_points = [geo_to_px(lon, lat) for lon, lat in extent_corners]
+            # Draw closed polygon outline
+            for i in range(len(px_points)):
+                p1 = px_points[i]
+                p2 = px_points[(i + 1) % len(px_points)]
+                draw.line([p1, p2], fill=rect_color, width=rect_width)
 
     # Add border
     bordered_size = inset_size + 2 * border
@@ -1127,32 +1175,95 @@ def _get_projected_extent_corners(bounds_4326, crs=None):
 # ---------------------------------------------------------------------------
 #  Title strip
 # ---------------------------------------------------------------------------
+def _wrap_text_to_width(text, font, max_width, tmp_draw, max_lines):
+    """Break ``text`` into lines that each fit within ``max_width`` px.
+
+    Word boundaries are preferred. When a single word is wider than
+    ``max_width`` (long path-like strings, no-space nonsense input),
+    that word is broken at character boundaries. Silently truncates
+    anything past ``max_lines`` so a pathological input can't blow up
+    the strip height.
+    """
+    words = text.split()
+    if not words:
+        return [text]
+
+    def _w(s):
+        return tmp_draw.textbbox((0, 0), s, font=font)[2]
+
+    lines = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}" if current else word
+        if _w(candidate) <= max_width:
+            current = candidate
+            continue
+
+        # Candidate overflowed. Flush what we have and try to place the
+        # word on its own line.
+        if current:
+            lines.append(current)
+            current = ""
+            if len(lines) >= max_lines:
+                return lines
+
+        # If the word itself fits on a fresh line, use it as the seed.
+        if _w(word) <= max_width:
+            current = word
+            continue
+
+        # Single-word overflow — break at character boundaries. This
+        # covers unbreakable strings like long file paths or the
+        # ``asdfsdfsddd…`` style bug-report input.
+        chunk = ""
+        for ch in word:
+            if _w(chunk + ch) <= max_width:
+                chunk += ch
+            else:
+                lines.append(chunk)
+                if len(lines) >= max_lines:
+                    return lines
+                chunk = ch
+        current = chunk
+
+    if current:
+        lines.append(current)
+    return lines[:max_lines]
+
+
 def build_title_strip(width, title, bg_color=(0, 0, 0, 255),
-                      text_color="white", margin=16):
-    """Build a horizontal title-bar image with centred text.
+                      text_color="white", margin=16, max_lines=4):
+    """Build a horizontal title-bar image with centred, wrapping text.
 
     Creates an RGBA strip intended to be placed above a map thumbnail.
-    The font size scales with *width* (``width // 30``, minimum 12 px)
-    and the text is horizontally centred.  Vertical padding is set to
-    *margin* on both top and bottom so that the title aligns with the
-    outer margin when the caller reduces the top gap to near-zero.
+    The font size scales with *width* (``width // 30``, minimum 12 px).
+    Long titles wrap onto multiple lines at word boundaries so the font
+    stays legible; single very long "words" (unbreakable input like a
+    path or a nonsense string) are broken at character boundaries as a
+    last resort. Each line is horizontally centred, and vertical
+    padding of *margin* is applied on the top and bottom so the title
+    aligns with the surrounding layout's outer margin.
 
     Args:
         width (int): Strip width in pixels (should match the image it
             will be composited with).
         title (str): Title text to render.
-        bg_color (tuple | str, optional): Background fill colour as an
-            RGBA tuple or a PIL colour name. Defaults to
+        bg_color (tuple | str, optional): Background fill color as an
+            RGBA tuple or a PIL color name. Defaults to
             ``(0, 0, 0, 255)`` (opaque black).
-        text_color (str, optional): Text colour. Defaults to
+        text_color (str, optional): Text color. Defaults to
             ``"white"``.
         margin (int, optional): Top and bottom padding in pixels, also
             used to align the title with the surrounding layout's outer
             margin. Defaults to ``16``.
+        max_lines (int, optional): Hard cap on the number of wrapped
+            lines. Anything past the cap is silently truncated so a
+            pathological input can't blow up the strip height. Defaults
+            to ``4``.
 
     Returns:
-        PIL.Image.Image: An RGBA strip image of size
-            ``(width, margin + glyph_height + margin)``.
+        PIL.Image.Image: An RGBA strip image tall enough to hold every
+            wrapped line plus the top/bottom margins.
 
     Example:
         >>> strip = build_title_strip(512, "My Map Title")
@@ -1164,53 +1275,39 @@ def build_title_strip(width, title, bg_color=(0, 0, 0, 255),
     font_size = max(12, width // 30)
     font = _get_bold_font(font_size)
 
-    # Measure text — bbox[1] is the internal top offset (ascent leading)
     tmp = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-    bbox = tmp.textbbox((0, 0), title, font=font)
-    text_w = bbox[2] - bbox[0]
-
-    # If the title is wider than the strip, the centring math below
-    # produces a negative ``tx`` and the glyphs overflow on both edges
-    # (leading 'D' clipped on the left, trailing 's' clipped on the
-    # right — reported bug). Shrink the font to fit inside
-    # ``width - 2*margin`` and re-measure. Floor at 8px so we don't
-    # render illegibly small labels on very narrow strips; if even 8px
-    # doesn't fit, we accept the overflow rather than dropping the
-    # title entirely.
     avail_w = max(1, width - 2 * margin)
-    if text_w > avail_w:
-        # Proportional first guess (font width ≈ linear in font size),
-        # then one verification pass to correct for glyph-metric slop.
-        # -1 gives us a small safety cushion so kerning at the edges
-        # doesn't push us back over.
-        font_size = max(8, int(font_size * avail_w / text_w) - 1)
-        font = _get_bold_font(font_size)
-        bbox = tmp.textbbox((0, 0), title, font=font)
-        text_w = bbox[2] - bbox[0]
-        # One more shrink if the first-pass estimate still overflows
-        # (rare, only when a single wide glyph dominated the estimate).
-        while text_w > avail_w and font_size > 8:
-            font_size -= 1
-            font = _get_bold_font(font_size)
-            bbox = tmp.textbbox((0, 0), title, font=font)
-            text_w = bbox[2] - bbox[0]
 
-    glyph_top = bbox[1]       # pixels from draw y to first glyph pixel
-    glyph_bottom = bbox[3]    # pixels from draw y to last glyph pixel
-    glyph_h = glyph_bottom - glyph_top
+    # Wrap on word boundaries at the natural font size; fall back to
+    # character-level breaking only when a single "word" itself doesn't
+    # fit. Long titles now grow the strip HEIGHT, not shrink the font
+    # — legibility is preserved instead of the previous "shrink to
+    # illegible 8-px text so it fits on one line" behavior.
+    lines = _wrap_text_to_width(title, font, avail_w, tmp, max_lines)
 
-    # We want the top of the glyphs at exactly y=margin
-    # draw.text places at (tx, ty) but glyphs start at ty + glyph_top
-    # So: ty + glyph_top = margin  =>  ty = margin - glyph_top
-    pad_bottom = margin
-    strip_h = margin + glyph_h + pad_bottom
+    # Per-line metrics; each line gets its own bbox so we know the
+    # exact ascent/descent contribution without assuming uniform glyph
+    # metrics across lines.
+    line_bboxes = [tmp.textbbox((0, 0), line, font=font) for line in lines]
+    line_heights = [b[3] - b[1] for b in line_bboxes]
+    line_gap = max(2, font_size // 6)
+    total_text_h = sum(line_heights) + line_gap * (len(lines) - 1)
 
+    strip_h = margin + total_text_h + margin
     strip = Image.new("RGBA", (width, strip_h), bg_color)
     draw = ImageDraw.Draw(strip)
 
-    tx = (width - text_w) // 2 - bbox[0]  # also correct for left offset
-    ty = margin - glyph_top
-    draw.text((tx, ty), title, fill=text_color, font=font)
+    # Draw each line horizontally centred. Baseline positioning: PIL
+    # renders relative to (tx, ty) but the glyph's first pixel starts
+    # at ty + bbox[1] (the ascent offset). Subtract bbox[1] so the top
+    # of the drawn glyphs actually sits at the intended y coordinate.
+    y = margin
+    for line, bbox, lh in zip(lines, line_bboxes, line_heights):
+        text_w = bbox[2] - bbox[0]
+        tx = (width - text_w) // 2 - bbox[0]
+        ty = y - bbox[1]
+        draw.text((tx, ty), line, fill=text_color, font=font)
+        y += lh + line_gap
 
     return strip
 

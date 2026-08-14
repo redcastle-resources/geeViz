@@ -52,6 +52,8 @@ from urllib.parse import parse_qsl, urlencode
 _PROCESS_STARTED_AT = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 from fastapi import APIRouter, FastAPI, Request, Response
+from fastapi.responses import HTMLResponse
+from html import escape as _html_escape
 from starlette.requests import ClientDisconnect
 
 from .registry import get_registry
@@ -100,12 +102,56 @@ def _default_tenant_resolver(
 def _default_workload_tag_builder(
     request: Request, tenant: str
 ) -> str:
-    """Build a simple workload tag from the tenant. Override for richer
-    attribution (e.g. include user / session from your own headers)."""
-    parts = ["ee-proxy"]
-    if tenant:
-        parts.append(tenant)
-    return build_workload_tag(*parts)
+    """Default workload-tag policy for the ee-proxy.
+
+    Rule: **if the client already set a tag** (via
+    ``ee.data.setWorkloadTag()`` on the Python side, or baked into a
+    tile URL returned by ``getMapId``), respect it. Otherwise mint a
+    reversible fallback tag that includes richer parts than plain
+    ``ee-proxy__<tenant>`` and store the mapping in the eeCreds
+    singleton's ``TagStore`` so ``eeCreds.lookupWorkloadTag(tag)`` can
+    recover the parts later.
+
+    Custom builders passed via ``workload_tag_builder=...`` skip this
+    entirely and own their own policy — see the agent's
+    ``TenantAwareHttp`` path for an example.
+    """
+    # 1. Client-set tag wins. Same rule applies to Python getInfo calls
+    #    (SDK puts workloadTag in the query) AND browser tile fetches
+    #    (URL from getMapId already includes it).
+    client_tag = request.query_params.get("workloadTag")
+    if client_tag:
+        return client_tag
+
+    # 2. Fallback — mint richer parts + persist mapping so the tag is
+    #    reversible. Pull the eeCreds singleton lazily to avoid a
+    #    circular import at module load.
+    try:
+        from geeViz.eeAuth.eeCreds import eeCreds as _singleton
+        from geeViz.eeAuth.tags import mint_workload_tag, _default_secret
+        parts = {
+            "tenant": tenant or "default",
+            "cred":   _singleton.current() or "unknown",
+            "pid":    os.getpid(),
+            "src":    "proxy-default",
+        }
+        secret = _singleton._resolve_tag_secret() if hasattr(
+            _singleton, "_resolve_tag_secret"
+        ) else _default_secret()
+        tag = mint_workload_tag(parts, secret=secret)
+        try:
+            _singleton.getTagStore().put(tag, parts)
+        except Exception:
+            logger.exception("ee-proxy: default builder store.put failed")
+        return tag
+    except Exception:
+        # Never let attribution failure break a live request. Fall back
+        # to the legacy shape.
+        logger.exception("ee-proxy: default builder minting failed; using legacy shape")
+        parts_list = ["ee-proxy"]
+        if tenant:
+            parts_list.append(tenant)
+        return build_workload_tag(*parts_list)
 
 
 def _rewrite_query_with_workload_tag(
@@ -205,8 +251,128 @@ def build_proxy_router(
 
     router = APIRouter()
 
+    @router.get("/", response_class=HTMLResponse, include_in_schema=False)
+    async def index(request: Request) -> HTMLResponse:
+        """Human-friendly landing page — served when someone visits
+        ``/ee-api/`` in a browser instead of an EE client.
+
+        Lists tenants, endpoints, health link, upstream URL, version.
+        No JS, no external assets — works over air-gapped networks and
+        renders identically in every browser."""
+        try:
+            from geeViz import __version__ as _ver
+        except Exception:
+            _ver = "(unknown)"
+
+        src = _resolve_creds()
+        tenants: list = []
+        try:
+            if hasattr(src, "list"):
+                tenants = list(src.list())
+            elif hasattr(src, "list_tenants"):
+                tenants = list(src.list_tenants())
+        except Exception:
+            tenants = []
+        tenants.sort()
+
+        base = str(request.url).rstrip("/")
+        health_url = f"{base}/health"
+        tenant_rows = (
+            "".join(f"<li><code>{_html_escape(t)}</code></li>" for t in tenants)
+            if tenants
+            else "<li><em>(no tenants registered)</em></li>"
+        )
+
+        html = f"""<!doctype html>
+<html><head><meta charset="utf-8">
+<title>geeViz eeAuth proxy</title>
+<style>
+  body {{ font: 15px/1.5 -apple-system, Segoe UI, Roboto, sans-serif;
+         max-width: 780px; margin: 2rem auto; padding: 0 1rem; color: #222; }}
+  h1 {{ border-bottom: 1px solid #ddd; padding-bottom: .4rem; }}
+  h2 {{ margin-top: 1.6rem; }}
+  code, pre {{ font-family: SFMono-Regular, Menlo, monospace; font-size: 13px; }}
+  pre {{ background: #f6f8fa; padding: .8rem 1rem; border-radius: 6px;
+         overflow-x: auto; }}
+  .grid {{ display: grid; grid-template-columns: 12rem 1fr; gap: .4rem 1rem; }}
+  .grid dt {{ font-weight: 600; }}
+  .muted {{ color: #666; }}
+  table {{ border-collapse: collapse; margin: .5rem 0 1rem; }}
+  th, td {{ text-align: left; padding: .3rem .8rem .3rem 0; }}
+  th {{ border-bottom: 1px solid #ddd; }}
+  a {{ color: #0969da; }}
+  @media (prefers-color-scheme: dark) {{
+    body {{ background: #0d1117; color: #c9d1d9; }}
+    h1 {{ border-color: #30363d; }}
+    pre {{ background: #161b22; }}
+    th {{ border-color: #30363d; }}
+    .muted {{ color: #8b949e; }}
+    a {{ color: #58a6ff; }}
+  }}
+</style>
+</head><body>
+<h1>geeViz eeAuth proxy</h1>
+<p class="muted">
+  This URL is a <strong>reverse proxy</strong> that forwards Earth Engine
+  REST calls to the upstream API, injecting per-tenant service-account
+  bearer tokens. Point your EE client at it instead of calling EE
+  directly — see below.
+</p>
+
+<h2>Status</h2>
+<dl class="grid">
+  <dt>Proxy base URL</dt><dd><code>{_html_escape(base)}</code></dd>
+  <dt>Upstream</dt><dd><code>{_html_escape(upstream)}</code></dd>
+  <dt>geeViz version</dt><dd><code>{_html_escape(_ver)}</code></dd>
+  <dt>Health probe</dt><dd><a href="{_html_escape(health_url)}"><code>{_html_escape(health_url)}</code></a></dd>
+  <dt>Tenant header</dt><dd><code>{_html_escape(tenant_header)}</code></dd>
+  <dt>Tenant query param</dt><dd><code>{_html_escape(tenant_query_param)}</code></dd>
+</dl>
+
+<h2>Registered tenants ({len(tenants)})</h2>
+<ul>{tenant_rows}</ul>
+
+<h2>Endpoints</h2>
+<table>
+  <tr><th>Method</th><th>Path</th><th>Purpose</th></tr>
+  <tr><td>GET</td><td><code>/</code></td><td>This page.</td></tr>
+  <tr><td>GET</td><td><code>/health</code></td><td>Liveness + tenant fingerprint (JSON).</td></tr>
+  <tr><td>ANY</td><td><code>/{{ee-api-path}}</code></td><td>Proxied to <code>{_html_escape(upstream)}/{{path}}</code> with the tenant's SA token.</td></tr>
+</table>
+
+<h2>Proxy modes</h2>
+<p class="muted">Which one this URL is running under depends on how you started it — set via <code>Map.setAuthMode(...)</code>, the <code>GEEVIZ_EEAUTH_MODE</code> env var, or the default.</p>
+<table>
+  <tr><th>Mode</th><th>Process</th><th>Failure behavior</th></tr>
+  <tr><td><code>attached</code></td><td>in-process daemon thread</td><td>silent fallback</td></tr>
+  <tr><td><code>attached_strict</code></td><td>in-process daemon thread</td><td>raises on failure</td></tr>
+  <tr><td><code>detached</code></td><td>subprocess (survives script exit)</td><td>silent fallback</td></tr>
+  <tr><td><code>legacy</code></td><td>none (tokens minted into URL)</td><td>deprecated</td></tr>
+</table>
+<p class="muted">Legacy aliases: <code>auto</code> → <code>attached</code>, <code>proxy</code> → <code>attached_strict</code>.</p>
+
+<h2>Use it from Python</h2>
+<pre>from geeViz.eeAuth import initialize_via_proxy
+initialize_via_proxy("{_html_escape(base)}")
+import ee
+ee.Number(1).getInfo()  # → routes through this proxy</pre>
+
+<h2>Use it from curl</h2>
+<pre>curl -H "{_html_escape(tenant_header)}: &lt;tenant-name&gt;" \\
+  {_html_escape(base)}/v1/projects/earthengine-legacy/algorithms</pre>
+
+<p class="muted" style="margin-top: 2rem; font-size: 12px;">
+  This page renders because the incoming request had no path after
+  <code>/</code>. Any real EE path (e.g.
+  <code>/v1/projects/…/value:compute</code>) is proxied through, not
+  rendered.
+</p>
+</body></html>
+"""
+        return HTMLResponse(content=html)
+
     @router.get("/health")
-    async def health() -> dict:
+    async def health() -> dict:  # noqa: F811 – see docstring for fields
         """Liveness + identity probe for detached-mode discovery.
 
         Returned fields:
@@ -256,6 +422,24 @@ def build_proxy_router(
         methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
     )
     async def ee_proxy(path: str, request: Request) -> Response:
+        """Forward an EE API request to the upstream, injecting the tenant's
+        Bearer token.
+
+        Tenant resolution order (first non-empty wins): path prefix
+        ``/t/<tenant>/`` → configured header (``X-EE-Tenant`` by default)
+        → configured query param (``tenant`` by default) → default tenant.
+
+        Args:
+            path: Everything after ``/ee-api/`` in the request URL.
+            request: FastAPI Request; body, headers, and query params are
+                forwarded as-is (Origin stripped for token / SSO paths so
+                EE doesn't reject).
+
+        Returns:
+            Response: Upstream response passed through with its status,
+            headers (minus hop-by-hop), and body. 204 for the tenant-ack
+            path (``/t/<tenant>`` with no trailing segment).
+        """
         import httpx
 
         # 1. Resolve tenant + mint a token from the credential source.
@@ -364,12 +548,40 @@ def build_proxy_router(
         # 4. Forward + retry once on 401 (token rotation). Uses the
         # shared ``upstream_client`` (keep-alive connection pool) — see
         # the construction above for why we don't create per-request.
-        try:
-            upstream_resp = await upstream_client.request(
+        async def _do_upstream():
+            return await upstream_client.request(
                 request.method, upstream_url,
                 content=body if body else None,
                 headers=fwd_headers,
             )
+
+        try:
+            upstream_resp = await _do_upstream()
+        except (httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+            # EE compute occasionally exceeds the 120s deadline. One
+            # retry with fresh connection buys the caller another shot
+            # before a hard 504. Compute requests are idempotent — the
+            # server-side operation may still complete, but retrying
+            # the read doesn't duplicate work.
+            logger.warning(
+                "ee-proxy: upstream timeout on %s %s — retrying once",
+                request.method, path,
+            )
+            try:
+                upstream_resp = await _do_upstream()
+            except (httpx.ReadTimeout, httpx.ConnectTimeout):
+                logger.warning(
+                    "ee-proxy: upstream timeout on %s %s — returning 504",
+                    request.method, path,
+                )
+                return Response(
+                    content=f"upstream timeout after retry: {e}",
+                    status_code=504,
+                )
+            except httpx.HTTPError as e2:
+                logger.exception("ee-proxy: upstream error on retry for %s %s",
+                                 request.method, path)
+                return Response(content=f"upstream error: {e2}", status_code=502)
         except httpx.HTTPError as e:
             logger.exception("ee-proxy: upstream error for %s %s",
                              request.method, path)

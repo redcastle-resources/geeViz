@@ -552,7 +552,45 @@ def addEsriMapService(
             name="ESRI World Imagery",
         )
     """
-    # Map Service tile URL is the same shape as ImageServer
+    # ── Preflight: cached or dynamic? Route accordingly. ──
+    # CACHED MapServers (``singleFusedMapCache: true``) expose
+    # ``/tile/{z}/{y}/{x}`` — same shape as an ImageServer, handled by
+    # addEsriImageService below.
+    # DYNAMIC MapServers (``singleFusedMapCache: false``) don't serve
+    # pre-rendered tiles; they respond to ``/export?bbox=…&f=image``.
+    # Route those through ``gv.Map.addDynamicMapService``, which
+    # bridges to the viewer's ``addDynamicToMap`` code path (Google
+    # Maps GroundOverlay per viewport). Real incident 2026-07-30: FEMA
+    # NFHL is dynamic; passing it to addEsriMapService without this
+    # branch broke the map silently.
+    import geeViz.geeView as _gv
+    url = _resolve_url(url_or_result)
+    try:
+        _meta = getServiceMetadata(url, token=token)
+    except Exception as _meta_err:
+        # Metadata fetch failed — could be a bad URL, an auth wall, or
+        # a transient network hiccup. Print a warning so the agent (and
+        # `testLayers` output) sees WHY we can't detect cached-vs-dynamic
+        # and can suggest a fix; still fall through to the tile path in
+        # case the caller knows the service IS cached.
+        print(
+            f"WARNING: addEsriMapService could not fetch service metadata for "
+            f"{url!r} ({_meta_err}). Proceeding as if cached; if the layer "
+            f"fails to render, verify the URL (a common issue is a wrong "
+            f"prefix like '/gis/...' vs '/arcgis/rest/services/...')."
+        )
+        _meta = None
+    if _meta is not None and _meta.get("singleFusedMapCache") is False:
+        _name = name or url.rstrip("/").split("/")[-2]
+        print(f"Adding Dynamic Esri Map Service: {_name}  ({url})")
+        _gv.Map.addDynamicMapService(
+            url,
+            name=_name,
+            visible=(viz_params or {}).get("visible", True),
+            token=token,
+        )
+        return
+    # Cached — same tile URL shape as ImageServer
     addEsriImageService(url_or_result, viz_params=viz_params, name=name, token=token)
 
 

@@ -154,7 +154,7 @@ Works with **Cursor**, **Claude Code**, **VS Code with GitHub Copilot**, **Winds
 
 ### Quick setup
 
-1. Add a config file for your editor (see [MCP Server docs](https://geeviz.org/mcp_server.html)):
+1. Add a config file for your editor (see [MCP Server docs](https://geeviz.org/mcp.html)):
     ```json
     {
       "mcpServers": {
@@ -169,22 +169,21 @@ Works with **Cursor**, **Claude Code**, **VS Code with GitHub Copilot**, **Winds
 
 ### What the MCP server can do
 
-The 12 tools are organized into categories:
+The tools are organized into categories:
 
 | Category | Tools |
 |----------|-------|
-| **Code Execution** | `run_code` — persistent REPL with `ee`, `Map`, `gv`, `gil`, `sal`, `tl`, `rl`, `cl`, `gm`, `edwLib` pre-loaded; `save_session` — export as `.py` or `.ipynb` |
-| **API Introspection** | `search_geeviz` — unified search across function signatures, module members, reference dictionaries, and example scripts (AST-indexed, zero import cost) |
+| **Code Execution** | `run_code` — persistent REPL with `ee`, `Map`, `gv`, `gil`, `sal`, `edw`, `tl`, `rl`, `cl`, `palettes`, `pd`/`pandas`, `np`/`numpy` pre-loaded (plus `gm` when the optional Google Maps dep is installed); `save_session` — export as `.py` or `.ipynb`, with backward slicing to drop dead code by default |
+| **API Introspection** | `search_codebase` — unified search across function signatures, module members, reference dictionaries, and example scripts (AST-indexed for geeViz, live for `ee` / `pandas` / `numpy` and anything else the REPL has loaded, zero import cost) |
 | **Dataset Discovery** | `search_datasets` — keyword search across official & community catalogs |
 | **Asset Inspection** | `inspect_asset` — bands, CRS, scale, date range, properties |
-| **Map Control** | `map_control` — view, list layers, or clear the interactive map |
+| **Map Control** | `map_control` — view, export, preview per-layer tiles, list layers, or clear the interactive map |
 | **Exports & Asset Management** | `export_image` — to asset / Drive / Cloud Storage; `manage_asset` — delete / copy / move / create / update ACL |
-| **Google Maps** | `get_streetview` — Street View imagery; `geeviz_search_places` — places / geocoding |
-| **Environment** | `env_info` — versions, namespace, project info; `view_output` — open generated files (charts, thumbs, reports, HTML) |
+| **Environment** | `env_info` — versions, namespace, project info; `view_output` — read back a saved raster (PNG/GIF/JPEG/WebP) as an inline image |
 
-Charting (`cl.summarize_and_chart()`), thumbnails (`tl.generate_thumbs()`), report generation (`rl.*`), EDW queries (`edwLib.*`), and geocoding (`gm.geocode()`) are accessed via `run_code` — one execution primitive plus a rich pre-loaded namespace beats a proliferation of narrow wrappers.
+Charting (`cl.summarize_and_chart()`), thumbnails (`tl.generate_thumbs()`), report generation (`rl.*`), EDW queries (`edwLib.*`), and Google Maps helpers (`gm.geocode()`, `gm.search_places()`, `gm.streetview_*`, `gm.interpret_image()`, `gm.label_image()`, etc.) are accessed via `run_code` — one execution primitive plus a rich pre-loaded namespace beats a proliferation of narrow wrappers.
 
-For the complete tool reference, architecture details, and usage examples, see the **[MCP Server README](mcp/README.md)** and the [online MCP Server guide](https://geeviz.org/mcp_server.html).
+For the complete tool reference, architecture details, and usage examples, see the **[MCP Server README](mcp/README.md)** and the [online MCP Server guide](https://geeviz.org/mcp.html).
 
 ---
 

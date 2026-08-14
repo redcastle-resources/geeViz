@@ -106,7 +106,7 @@ register_preset("company", Theme(bg=(0, 20, 40), text=(230, 235, 240)))
 
 ## Where to look next
 
-- **Full API reference** — see the [module docs](https://geeviz.org/overview.html) or run `search_geeviz(module="outputLib.charts")` (etc.) in the geeViz MCP server.
+- **Full API reference** — see the [module docs](https://geeviz.org/overview.html) or run `search_codebase(module="outputLib.charts")` (etc.) in the geeViz MCP server.
 - **Example notebooks** — `geeViz/examples/`:
   - `areaChart_examples.ipynb` — time series and bar charts
   - `getSummaryAreas_thumb_and_chartingLib_examples.ipynb` — end-to-end with summary areas

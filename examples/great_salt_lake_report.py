@@ -60,6 +60,7 @@ report = rl.Report(
     header_text="Comparing LCMS and NLCD land cover products from 1985-2024 over the Great Salt Lake region.",
     theme="dark",
     tone="neutral",
+    prompt="You are a poet. You are given data to write a poem about. Make it super engaging and interesting."
 )
 
 # Section 1: LCMS Land Cover - annual stacked chart + GIF
@@ -101,7 +102,7 @@ report.add_section(
     scale=30,
     thumb_format="gif",
     thumb_dimensions=400,
-    thumb_fps=4,
+    thumb_fps=1.5,
 )
 
 # Section 4: NLCD Land Cover Sankey - transitions at 1985, 2000, 2024

@@ -93,16 +93,22 @@ def _get_api_key() -> str:
     if _API_KEY:
         return _API_KEY
 
-    # Parse .env file first (env vars may have a different project's key)
+    # Parse .env file first (env vars may have a different project's key).
+    # The MCP sandbox blocks open() on .env paths, so tolerate PermissionError
+    # here: the MCP server pre-loads .env into os.environ at startup, so the
+    # fall-through to os.environ below still finds the key.
     env_keys: dict[str, str] = {}
     env_path = os.path.join(os.path.dirname(__file__), ".env")
-    if os.path.exists(env_path):
-        with open(env_path) as f:
-            for line in f:
-                line = line.strip()
-                if "=" in line and not line.startswith("#"):
-                    k, v = line.split("=", 1)
-                    env_keys[k.strip()] = v.strip().strip("'\"")
+    try:
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        env_keys[k.strip()] = v.strip().strip("'\"")
+    except (PermissionError, OSError):
+        pass
 
     # Check each key name in priority order across both sources
     for key_name in _KEY_NAMES:
@@ -636,26 +642,326 @@ def streetview_panorama(
     return buf.getvalue()
 
 
+# Prompt registry keyed by ``mode`` for :func:`interpret_image`.
+# Each entry is the full analysis prompt for that view type. Add new
+# modes here — no other code change needed.
+_INTERPRET_PROMPTS: dict[str, str] = {
+    "streetview": (
+        "This is a Google Street View image (ground-level, human-eye perspective). "
+        "Analyze it thoroughly.\n\n"
+        "1. **Description**: Describe the scene in 2-3 sentences — the setting, "
+        "land use, vegetation, infrastructure, and any notable features.\n\n"
+        "2. **Object Inventory**: List every distinct object or feature you can "
+        "identify with a count. Format as a markdown table with columns: "
+        "| Object | Count | Notes |\n"
+        "Include items like: buildings, houses, vehicles, trees, signs, driveways, "
+        "fences, utility poles, sidewalks, mailboxes, etc. Be specific "
+        "(e.g. 'brick ranch house' not just 'building').\n\n"
+        "3. **Land Cover Assessment**: Estimate the approximate percentage of the "
+        "visible area that is: impervious surface (road, driveway, roof), "
+        "vegetation (lawn, trees), bare soil, sky."
+    ),
+    "satellite-map": (
+        "This is a Google satellite image — a top-down (nadir) aerial view. Everything "
+        "is seen from directly above; there is no ground-level perspective. Analyze it "
+        "thoroughly.\n\n"
+        "1. **Description**: Describe the scene in 2-3 sentences — the dominant land "
+        "use (residential / commercial / agricultural / forest / water), road network "
+        "pattern, and any large features visible from above.\n\n"
+        "2. **Object Inventory**: List distinct features visible from above with a "
+        "count. Format as a markdown table with columns: | Object | Count | Notes |\n"
+        "Focus on roof-visible items: rooftops (by roughly-inferred building type — "
+        "house, warehouse, barn), swimming pools, driveways, parking lots, road "
+        "segments, cul-de-sacs, individual tree crowns (or grouped canopy patches), "
+        "cropland fields, water bodies. Do NOT try to identify small ground-level "
+        "objects (people, mailboxes, signs) — they aren't reliably resolvable at "
+        "this scale.\n\n"
+        "3. **Land Cover Assessment**: Estimate the approximate percentage of the "
+        "visible area that is: impervious surface (roofs, roads, parking), tree "
+        "canopy, grass/low vegetation, bare soil/agriculture, water."
+    ),
+    "hybrid-map": (
+        "This is a Google hybrid map — a satellite (nadir) aerial view with road "
+        "and place labels overlaid on top. Analyze it thoroughly.\n\n"
+        "1. **Description**: Describe the scene in 2-3 sentences — the dominant land "
+        "use, road network, and any labeled places (neighborhoods, businesses, "
+        "landmarks) visible in the label overlay.\n\n"
+        "2. **Object Inventory**: List distinct features with counts, treating the "
+        "label overlay as an additional layer of information (not a physical object). "
+        "Format as a markdown table with columns: | Object | Count | Notes |\n"
+        "Include: rooftops, road segments, parking lots, tree canopy patches, water. "
+        "Also include a row for each LABELED place name visible on the map with "
+        "Count=1 and the label text in Notes.\n\n"
+        "3. **Land Cover Assessment**: Estimate the approximate percentage of the "
+        "visible area (physical, not counting labels) that is: impervious surface, "
+        "tree canopy, grass/low vegetation, bare soil/agriculture, water."
+    ),
+    "roadmap": (
+        "This is a Google roadmap — a cartographic street map (top-down, no imagery). "
+        "It shows roads, place labels, and land-use tinting rather than real pixels. "
+        "Analyze it as a MAP, not a photograph.\n\n"
+        "1. **Description**: Describe the mapped area in 2-3 sentences — the dominant "
+        "land use (from the tinting: park green, water blue, built-up gray/tan), the "
+        "road hierarchy (highways vs. arterials vs. local streets), and any labeled "
+        "places.\n\n"
+        "2. **Feature Inventory**: List distinct MAP features with counts. Format as "
+        "a markdown table with columns: | Feature | Count | Notes |\n"
+        "Include: labeled highways, labeled arterials, labeled local streets, "
+        "intersections, cul-de-sacs, labeled parks, labeled water bodies, labeled "
+        "businesses or POIs, and any labeled neighborhood/district names.\n\n"
+        "3. **Coverage Assessment**: Estimate the approximate percentage of the map "
+        "area shown as: road right-of-way, park/green space, water, built-up "
+        "(residential/commercial), other."
+    ),
+    "terrain": (
+        "This is a Google terrain map — a topographic view (top-down) that shows "
+        "elevation via shaded relief and contour tinting, plus major roads and place "
+        "labels. Analyze it as a topographic map, not a photograph.\n\n"
+        "1. **Description**: Describe the terrain in 2-3 sentences — the dominant "
+        "landforms (mountain, valley, plateau, plain), the relief (steep vs. gentle), "
+        "and any drainage features (rivers, lakes) visible.\n\n"
+        "2. **Feature Inventory**: List distinct topographic and cultural features "
+        "with counts. Format as a markdown table with columns: "
+        "| Feature | Count | Notes |\n"
+        "Include: named peaks or ridges, named valleys or drainages, rivers, lakes, "
+        "labeled roads, labeled populated places.\n\n"
+        "3. **Relief Assessment**: Roughly estimate the relative elevation range "
+        "shown (low / moderate / high relief) and describe the dominant slope "
+        "orientation if apparent (north-facing, south-facing, mixed, flat)."
+    ),
+}
+
+
+# Per-mode detection body prompts for :func:`label_image`. The mode
+# picks an ``image_context`` header + a body prompt tuned for that view.
+# Consistent with :func:`interpret_image`'s ``_INTERPRET_PROMPTS``.
+_LABEL_PROMPTS: dict[str, dict[str, str]] = {
+    "streetview": {
+        "image_context": "a Google Street View panorama (ground-level, human-eye perspective)",
+        "body": (
+            "Detect and label the {max_labels} most noteworthy features and objects.\n"
+            "Be specific with labels (e.g. 'white SUV' not just 'car', "
+            "'brick ranch house' not 'building').\n"
+        ),
+    },
+    "satellite-map": {
+        "image_context": "a Google satellite image (nadir, top-down aerial view)",
+        "body": (
+            "Detect and label the {max_labels} most noteworthy ROOF-VISIBLE "
+            "features. Focus on things clearly resolvable from above: "
+            "rooftops (be specific — house / warehouse / commercial / "
+            "with-solar / with-pool), driveways, parking lots, road "
+            "segments, individual tree crowns (or grouped canopy patches), "
+            "swimming pools, cul-de-sacs, cropland fields, water bodies. "
+            "Do NOT try to identify small ground-level objects (people, "
+            "signs, mailboxes) — they aren't reliably resolvable at this "
+            "scale and any label would be a guess.\n"
+        ),
+    },
+    "hybrid-map": {
+        "image_context": "a Google hybrid map (nadir satellite view with road and place labels overlaid)",
+        "body": (
+            "Detect and label the {max_labels} most noteworthy features. "
+            "Include roof-visible physical features (rooftops by type, "
+            "parking, driveways, tree canopy patches, water) AND the "
+            "labeled place names visible on the label overlay. When "
+            "boxing a place label, use its text bounding box.\n"
+        ),
+    },
+    "roadmap": {
+        "image_context": "a Google roadmap (cartographic street map, top-down, no imagery)",
+        "body": (
+            "Detect and label the {max_labels} most noteworthy MAP "
+            "features — this is a cartographic map, not a photograph. "
+            "Focus on: labeled roads (highways / arterials / local), "
+            "labeled place names, labeled parks and water bodies, major "
+            "intersections. Treat text labels as their own bounding "
+            "boxes.\n"
+        ),
+    },
+    "terrain": {
+        "image_context": "a Google terrain map (topographic view with shaded relief, contours, and labels)",
+        "body": (
+            "Detect and label the {max_labels} most noteworthy features. "
+            "Focus on named topographic features (peaks, ridges, valleys, "
+            "drainages) and any labeled places or roads. Treat text "
+            "labels as their own bounding boxes.\n"
+        ),
+    },
+}
+
+
+def _parse_gemini_detections(text: str | None) -> tuple[list[dict], str | None]:
+    """Parse a Gemini bounding-box response.
+
+    Gemini's ``response_mime_type="application/json"`` mode is usually
+    but not always well-formed — it occasionally emits stray quotes
+    before object opens, unterminated strings, or wraps everything in
+    markdown fences. Fall back through progressively-more-lenient
+    strategies before giving up.
+
+    Returns ``(detections, parse_error)``. ``parse_error`` is ``None``
+    when a clean parse succeeded and a short string describing the
+    fallback path when repair was needed. Callers can surface this in
+    a ``metadata`` dict so silent zero-detection failures become
+    visible.
+    """
+    if not text or not text.strip():
+        return [], "empty response"
+
+    import json as _json
+    import re as _re
+
+    raw = text.strip()
+
+    # 1. Straight JSON parse — the happy path
+    try:
+        parsed = _json.loads(raw)
+        if isinstance(parsed, dict):
+            for key in ("detections", "objects", "labels", "features", "results"):
+                if key in parsed and isinstance(parsed[key], list):
+                    return parsed[key], None
+        elif isinstance(parsed, list):
+            # Gemini sometimes emits a bare list of detections
+            return parsed, None
+    except _json.JSONDecodeError:
+        pass
+
+    # 2. Strip markdown code fences — ``` or ```json wrappers
+    stripped = raw
+    if stripped.startswith("```"):
+        _lines = stripped.splitlines()
+        if len(_lines) >= 3 and _lines[-1].strip().startswith("```"):
+            stripped = "\n".join(_lines[1:-1])
+        try:
+            parsed = _json.loads(stripped)
+            if isinstance(parsed, dict):
+                for key in ("detections", "objects", "labels", "features", "results"):
+                    if key in parsed and isinstance(parsed[key], list):
+                        return parsed[key], "markdown-fence stripped"
+            elif isinstance(parsed, list):
+                return parsed, "markdown-fence stripped"
+        except _json.JSONDecodeError:
+            pass
+
+    # 3. Repair common Gemini malformations before parsing.
+    #    - Stray `"` before an object open: `, "{"label"` → `, {"label"`
+    #    - Trailing commas before `]` or `}`
+    repaired = _re.sub(r',\s*"\s*(\{\s*"label")', r', \1', stripped)
+    repaired = _re.sub(r',(\s*[\]\}])', r'\1', repaired)
+    try:
+        parsed = _json.loads(repaired)
+        if isinstance(parsed, dict):
+            for key in ("detections", "objects", "labels", "features", "results"):
+                if key in parsed and isinstance(parsed[key], list):
+                    return parsed[key], "repair rules applied"
+        elif isinstance(parsed, list):
+            return parsed, "repair rules applied"
+    except _json.JSONDecodeError:
+        pass
+
+    # 4. Regex fallback — extract each ``{"label": "...", "box_2d": [n,n,n,n]}``
+    #    object individually. Tolerates arbitrary garbage between them.
+    _OBJ_RE = _re.compile(
+        r'\{\s*"label"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*,'
+        r'\s*"box_2d"\s*:\s*\[\s*([\d.]+)\s*,\s*([\d.]+)\s*,'
+        r'\s*([\d.]+)\s*,\s*([\d.]+)\s*\]\s*\}'
+    )
+    dets = []
+    for m in _OBJ_RE.finditer(raw):
+        label = m.group(1)
+        try:
+            box = [float(m.group(2)), float(m.group(3)),
+                   float(m.group(4)), float(m.group(5))]
+        except ValueError:
+            continue
+        dets.append({"label": label, "box_2d": box})
+    if dets:
+        return dets, "regex-extracted objects (JSON was malformed)"
+
+    # 5. Give up — return an empty list and describe the failure.
+    return [], f"unparseable (starts with: {raw[:60]!r})"
+
+
+def _extract_gemini_metadata(response, model: str, temperature: float,
+                               mode: str | None, prompt_used: str) -> dict[str, Any]:
+    """Pull tokens / model / temp out of a Gemini ``GenerateContentResponse``.
+
+    Returns a stable metadata dict for the caller. All token fields
+    default to ``None`` when the SDK doesn't populate them (older
+    versions, streaming, or non-thinking models).
+    """
+    meta: dict[str, Any] = {
+        "model": model,
+        "temperature": temperature,
+        "mode": mode,
+        "prompt_used": prompt_used,
+    }
+
+    um = getattr(response, "usage_metadata", None)
+    if um is not None:
+        meta["input_tokens"] = getattr(um, "prompt_token_count", None)
+        meta["output_tokens"] = getattr(um, "candidates_token_count", None)
+        meta["thought_tokens"] = getattr(um, "thoughts_token_count", None)
+        meta["cached_tokens"] = getattr(um, "cached_content_token_count", None)
+        meta["total_tokens"] = getattr(um, "total_token_count", None)
+
+        # Modality breakdown: prompt_tokens_details is a list of
+        # PromptTokenCountDetails entries with (modality, token_count).
+        input_text = input_image = None
+        details = getattr(um, "prompt_tokens_details", None) or []
+        for d in details:
+            mod = getattr(d, "modality", None)
+            cnt = getattr(d, "token_count", None)
+            mod_str = str(mod).upper() if mod is not None else ""
+            if "TEXT" in mod_str:
+                input_text = (input_text or 0) + (cnt or 0)
+            elif "IMAGE" in mod_str:
+                input_image = (input_image or 0) + (cnt or 0)
+        meta["input_text_tokens"] = input_text
+        meta["input_image_tokens"] = input_image
+
+    # Finish reason from the first candidate, if present.
+    finish = None
+    try:
+        candidates = getattr(response, "candidates", None) or []
+        if candidates:
+            fr = getattr(candidates[0], "finish_reason", None)
+            finish = str(fr) if fr is not None else None
+    except Exception:
+        pass
+    meta["finish_reason"] = finish
+    return meta
+
+
 def interpret_image(
     image_bytes: bytes,
+    mode: str = "streetview",
     prompt: str | None = None,
-    model: str = "gemini-3-flash-preview",
+    model: str = "gemini-3.5-flash",
+    temperature: float = 0.3,
     context: str | None = None,
 ) -> dict[str, Any]:
-    """Interpret a Street View or satellite image using Google Gemini.
+    """Interpret a Street View or static-map image using Google Gemini.
 
     Sends the image to Gemini with instructions to identify and count
-    all notable features. Returns a structured description with a
-    tabular object inventory.
+    all notable features. The default prompt is chosen from
+    :data:`_INTERPRET_PROMPTS` by ``mode``, so the same function handles
+    ground-level Street View, top-down satellite, hybrid, roadmap, and
+    terrain views without the caller needing to write a prompt.
 
     Args:
         image_bytes (bytes): JPEG or PNG image bytes.
-        prompt (str, optional): Custom prompt to override the default.
-            When ``None``, uses a built-in prompt that asks for feature
-            identification and a tabular count.
+        mode (str, optional): View type — picks the default prompt.
+            One of ``"streetview"``, ``"satellite-map"``, ``"hybrid-map"``,
+            ``"roadmap"``, ``"terrain"``. Defaults to ``"streetview"``.
+        prompt (str, optional): Custom prompt to override the mode's
+            default. When ``None``, uses ``_INTERPRET_PROMPTS[mode]``.
         model (str, optional): Gemini model name. Defaults to
-            ``"gemini-3-flash-preview"``.
-        context (str, optional): Additional context to include in the
+            ``"gemini-3.5-flash"``.
+        temperature (float, optional): Sampling temperature. Defaults to
+            ``0.3``.
+        context (str, optional): Additional context prepended to the
             prompt (e.g. location, date, purpose). Defaults to ``None``.
 
     Returns:
@@ -664,13 +970,19 @@ def interpret_image(
         - ``description`` (str): Full text description of the image.
         - ``object_counts`` (str): Markdown table of object counts.
         - ``raw_response`` (str): Complete Gemini response text.
+        - ``metadata`` (dict): Token counts (``input_tokens``,
+          ``input_text_tokens``, ``input_image_tokens``,
+          ``output_tokens``, ``thought_tokens``, ``cached_tokens``,
+          ``total_tokens``), plus ``model``, ``temperature``, ``mode``,
+          ``prompt_used``, and ``finish_reason``.
 
     Example:
         >>> img = streetview_image(-111.80, 40.68, heading=0)
-        >>> result = interpret_image(img)
+        >>> result = interpret_image(img, mode="streetview")
         >>> print(result['description'])
-        >>> print(result['object_counts'])
+        >>> print(result['metadata']['total_tokens'])
     """
+    _check_gmaps_ai_enabled("interpret_image")
     from google import genai
     from google.genai import types
 
@@ -678,44 +990,34 @@ def interpret_image(
     client = genai.Client(api_key=api_key)
 
     if prompt is None:
-        prompt = (
-            "This is a Google Street View image. Analyze it thoroughly.\n\n"
-            "1. **Description**: Describe the scene in 2-3 sentences — "
-            "the setting, land use, vegetation, infrastructure, and any "
-            "notable features.\n\n"
-            "2. **Object Inventory**: List every distinct object or feature "
-            "you can identify with a count. Format as a markdown table with "
-            "columns: | Object | Count | Notes |\n"
-            "Include items like: buildings, houses, vehicles, trees, signs, "
-            "driveways, fences, utility poles, sidewalks, mailboxes, etc. "
-            "Be specific (e.g. 'brick ranch house' not just 'building').\n\n"
-            "3. **Land Cover Assessment**: Estimate the approximate percentage "
-            "of the visible area that is: impervious surface (road, driveway, "
-            "roof), vegetation (lawn, trees), bare soil, sky."
-        )
-        if context:
-            prompt = f"Location context: {context}\n\n{prompt}"
+        if mode not in _INTERPRET_PROMPTS:
+            raise ValueError(
+                f"Unknown mode {mode!r}. Valid modes: "
+                f"{sorted(_INTERPRET_PROMPTS)}"
+            )
+        prompt = _INTERPRET_PROMPTS[mode]
+    if context:
+        prompt = f"Additional context: {context}\n\n{prompt}"
 
     image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
 
     response = client.models.generate_content(
         model=model,
         contents=[prompt, image_part],
-        config=types.GenerateContentConfig(temperature=0.2),
+        config=types.GenerateContentConfig(temperature=temperature),
     )
 
     raw = response.text
 
     # Parse out sections
-    description = ""
-    object_counts = ""
     lines = raw.split("\n")
     in_table = False
     desc_lines = []
     table_lines = []
 
     for line in lines:
-        if "|" in line and ("Object" in line or "Count" in line or "---" in line):
+        if "|" in line and ("Object" in line or "Count" in line
+                              or "Feature" in line or "---" in line):
             in_table = True
         if in_table:
             if "|" in line:
@@ -735,20 +1037,58 @@ def interpret_image(
         "description": description,
         "object_counts": object_counts,
         "raw_response": raw,
+        "metadata": _extract_gemini_metadata(
+            response, model=model, temperature=temperature,
+            mode=mode, prompt_used=prompt,
+        ),
     }
+
+
+def _check_gmaps_ai_enabled(tool_name: str) -> None:
+    """Raise if the calling tenant has disabled Google-Maps AI tools.
+
+    The geeViz_agent tenant framework sets ``GEEVIZ_GMAPS_AI_ENABLED``
+    at startup from ``tenant.tools.enable_gmaps_ai_tools``. Any value
+    of ``0`` / ``false`` / ``no`` (case-insensitive) disables all four
+    AI-powered gmaps helpers (:func:`interpret_image`,
+    :func:`label_image`, :func:`segment_image`, and
+    :func:`geeViz.inventoryLib.inventory_area`). Absent / any other
+    value → enabled (the default when running outside the agent).
+
+    Called at the top of each protected function so the enforcement is
+    at call site — no matter how the caller reached the function
+    (direct import, ``run_code``, notebook), the tenant policy is
+    honoured.
+    """
+    val = str(os.environ.get("GEEVIZ_GMAPS_AI_ENABLED", "1")).strip().lower()
+    if val in ("0", "false", "no", "off", "disabled"):
+        raise RuntimeError(
+            f"Google Maps AI tool '{tool_name}' is disabled for this "
+            f"tenant. Set tenant.tools.enable_gmaps_ai_tools=True in "
+            f"tenants/<name>/tenant.yaml (or unset GEEVIZ_GMAPS_AI_ENABLED) "
+            f"to enable."
+        )
+
+
 
 
 def _get_gemini_key() -> str:
     """Get the Gemini API key, separate from Maps Platform key."""
+    # Sandbox tolerance: same rationale as _get_api_key — the MCP server
+    # pre-loads .env into os.environ at startup, so a blocked open() here
+    # falls through cleanly to the os.environ check below.
     _env = {}
     _env_path = os.path.join(os.path.dirname(__file__), ".env")
-    if os.path.exists(_env_path):
-        with open(_env_path) as _f:
-            for _line in _f:
-                _line = _line.strip()
-                if "=" in _line and not _line.startswith("#"):
-                    _k, _v = _line.split("=", 1)
-                    _env[_k.strip()] = _v.strip().strip("'\"")
+    try:
+        if os.path.exists(_env_path):
+            with open(_env_path) as _f:
+                for _line in _f:
+                    _line = _line.strip()
+                    if "=" in _line and not _line.startswith("#"):
+                        _k, _v = _line.split("=", 1)
+                        _env[_k.strip()] = _v.strip().strip("'\"")
+    except (PermissionError, OSError):
+        pass
     # Check Gemini-specific key first, then general Google key
     for key_name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
         for source in (_env, os.environ):
@@ -758,82 +1098,92 @@ def _get_gemini_key() -> str:
     return _get_api_key()  # last resort: use Maps Platform key
 
 
-def label_streetview(
-    lon: float,
-    lat: float,
+def label_image(
+    image_bytes: bytes,
+    mode: str = "streetview",
     prompt: str | None = None,
-    heading: float = 0,
-    fov: float = 360,
-    pitch: float = 0,
-    size: str = _SV_DEFAULT_SIZE,
-    radius: int = 50,
-    source: str = "default",
-    model: str = "gemini-3-flash-preview",
+    image_context: str | None = None,
+    location_str: str = "",
+    model: str = "gemini-3.5-flash",
+    temperature: float = 0.3,
     max_labels: int = 30,
     font_size: int = 12,
 ) -> dict[str, Any] | None:
-    """Fetch a Street View panorama and label detected objects with bounding boxes.
+    """Detect and label objects in an image using Gemini vision.
 
-    Uses Gemini's vision model to detect objects and return bounding
-    boxes, then draws labeled boxes on the panorama.
+    Sends ``image_bytes`` to Gemini, asks for JSON-formatted bounding
+    boxes, then draws labeled boxes on the image. Works for any image
+    Gemini can see — Street View panoramas, satellite/nadir tiles,
+    static maps, or arbitrary user-supplied photos.
+
+    ``mode`` picks a preset from :data:`_LABEL_PROMPTS` — same modes as
+    :func:`interpret_image` (``streetview`` / ``satellite-map`` /
+    ``hybrid-map`` / ``roadmap`` / ``terrain``). Each preset supplies
+    an ``image_context`` header (telling Gemini what kind of image
+    this is) and a detection prompt tuned for that view. Nadir modes
+    ask for roof-visible features and skip small ground-level objects
+    that aren't resolvable from above.
 
     Args:
-        lon (float): Longitude.
-        lat (float): Latitude.
-        prompt (str, optional): Custom detection prompt. The location
-            context header and JSON format footer are always included.
-        heading (float, optional): Center heading. Defaults to ``0``.
-        fov (float, optional): Field of view (1-360). Defaults to ``360``.
-        pitch (float, optional): Camera pitch. Defaults to ``0``.
-        size (str, optional): Per-frame size. Defaults to ``"640x480"``.
-        radius (int, optional): Search radius. Defaults to ``50``.
-        source (str, optional): ``"default"`` or ``"outdoor"``.
+        image_bytes (bytes): JPEG or PNG bytes.
+        mode (str, optional): View type. One of ``"streetview"``,
+            ``"satellite-map"``, ``"hybrid-map"``, ``"roadmap"``,
+            ``"terrain"``. Defaults to ``"streetview"``.
+        prompt (str, optional): Custom detection body prompt — overrides
+            the mode's body. Image context header and JSON-format
+            footer are still added around it.
+        image_context (str, optional): Override the mode's context
+            header. Falls back to the mode's default when None.
+        location_str (str, optional): "At X" location text for the
+            header. Empty string skips it.
         model (str, optional): Gemini model. Defaults to
-            ``"gemini-3-flash-preview"``.
+            ``"gemini-3.5-flash"``.
+        temperature (float, optional): Sampling temperature. Defaults
+            to ``0.3``.
         max_labels (int, optional): Maximum objects. Defaults to ``30``.
         font_size (int, optional): Label font size. Defaults to ``12``.
 
     Returns:
-        dict or None: Keys: ``image``, ``detections``, ``summary``,
-        ``original``, ``location``.
+        dict or None: Keys: ``image`` (labeled JPEG bytes),
+        ``detections`` (list), ``summary`` (markdown table),
+        ``original`` (input bytes), ``metadata`` (token counts + model
+        + temperature + finish_reason + ``parse_error`` if the JSON
+        response needed repair or couldn't be parsed). Returns ``None``
+        only if PIL can't decode the input.
 
     Example:
-        >>> result = label_streetview(-111.80, 40.68, fov=360)
-        >>> if result:
-        ...     with open("labeled.jpg", "wb") as f:
-        ...         f.write(result['image'])
-        ...     print(result['summary'])
+        >>> sat = get_static_map(-111.80, 40.68, maptype="satellite", zoom=18)
+        >>> r = label_image(sat, mode="satellite-map",
+        ...                  location_str="Salt Lake City")
+        >>> print(r['summary'])
+        >>> print(r['metadata']['total_tokens'])
     """
+    _check_gmaps_ai_enabled("label_image")
     from PIL import Image, ImageDraw, ImageFont
     import io as _io
     from google import genai
     from google.genai import types
 
-    # Fetch the panorama
-    pano_bytes = streetview_panorama(
-        lon, lat, heading=heading, fov=fov, pitch=pitch,
-        size=size, radius=radius, source=source,
-    )
-    if pano_bytes is None:
-        return None
-
-    pano_img = Image.open(_io.BytesIO(pano_bytes)).convert("RGB")
-    img_w, img_h = pano_img.size
-
-    # Get location info
-    meta = streetview_metadata(lon, lat, radius=radius, source=source)
-    location_str = ""
-    if meta.get("status") == "OK":
-        addr = reverse_geocode(lon, lat)
-        location_str = addr.get("formatted_address", "") if addr else f"({lat:.4f}, {lon:.4f})"
-
-    # Build prompt: header + body + footer
-    _header = f"This is a Google Street View panorama image at {location_str}.\n"
-    if prompt is None:
-        _body = (
-            f"Detect and label the {max_labels} most noteworthy features and objects.\n"
-            "Be specific with labels (e.g. 'white SUV' not just 'car').\n"
+    if mode not in _LABEL_PROMPTS:
+        raise ValueError(
+            f"Unknown mode {mode!r}. Valid modes: {sorted(_LABEL_PROMPTS)}"
         )
+    _preset = _LABEL_PROMPTS[mode]
+
+    try:
+        img = Image.open(_io.BytesIO(image_bytes)).convert("RGB")
+    except Exception:
+        return None
+    img_w, img_h = img.size
+
+    # Build prompt: header + body + footer.
+    # Mode's defaults fill in unless the caller overrode via image_context
+    # or prompt.
+    _what = image_context or _preset["image_context"]
+    _at = f" at {location_str}" if location_str else ""
+    _header = f"This is {_what}{_at}.\n"
+    if prompt is None:
+        _body = _preset["body"].format(max_labels=max_labels)
     else:
         _body = prompt + "\n"
     _footer = (
@@ -843,27 +1193,27 @@ def label_streetview(
         "Return ONLY valid JSON:\n"
         '{"detections": [{"label": "object name", "box_2d": [y_min, x_min, y_max, x_max]}]}\n'
     )
+    prompt_used = _header + _body + _footer
 
     # Call Gemini
     api_key = _get_gemini_key()
     client = genai.Client(api_key=api_key)
-    image_part = types.Part.from_bytes(data=pano_bytes, mime_type="image/jpeg")
+    image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
 
     response = client.models.generate_content(
         model=model,
-        contents=[_header + _body + _footer, image_part],
+        contents=[prompt_used, image_part],
         config=types.GenerateContentConfig(
-            temperature=0.1,
+            temperature=temperature,
             response_mime_type="application/json",
         ),
     )
 
-    # Parse
-    import json as _json
-    try:
-        detections = _json.loads(response.text.strip()).get("detections", [])
-    except (_json.JSONDecodeError, AttributeError):
-        detections = []
+    # Parse — Gemini's JSON mode occasionally emits malformed output
+    # (stray quotes before object opens, unterminated strings, extra
+    # markdown fences). Fall back through progressively-more-lenient
+    # strategies before giving up.
+    detections, parse_error = _parse_gemini_detections(response.text)
 
     # One color per unique label
     import random as _rand, colorsys as _cs
@@ -876,7 +1226,7 @@ def label_streetview(
         label_colors[lbl] = (int(r * 255), int(g * 255), int(b * 255))
 
     # Draw boxes
-    draw = ImageDraw.Draw(pano_img)
+    draw = ImageDraw.Draw(img)
     try:
         font = ImageFont.truetype("arial.ttf", font_size)
     except (OSError, IOError):
@@ -926,15 +1276,79 @@ def label_streetview(
         lines.append(f"| {i+1} | {d['label']} | ({b[0]},{b[1]},{b[2]},{b[3]}) |")
 
     buf = _io.BytesIO()
-    pano_img.save(buf, format="JPEG", quality=92)
+    img.save(buf, format="JPEG", quality=92)
 
     return {
         "image": buf.getvalue(),
         "detections": parsed,
         "summary": "\n".join(lines),
-        "original": pano_bytes,
-        "location": location_str,
+        "original": image_bytes,
+        "metadata": {
+            **_extract_gemini_metadata(
+                response, model=model, temperature=temperature,
+                mode=mode, prompt_used=prompt_used,
+            ),
+            # Surfaced so a silent zero-detection result is visible
+            # ("what happened?" → check metadata.parse_error).
+            "parse_error": parse_error,
+            "detections_count": len(parsed),
+        },
     }
+
+
+def label_streetview(
+    lon: float,
+    lat: float,
+    prompt: str | None = None,
+    heading: float = 0,
+    fov: float = 360,
+    pitch: float = 0,
+    size: str = _SV_DEFAULT_SIZE,
+    radius: int = 50,
+    source: str = "default",
+    model: str = "gemini-3.5-flash",
+    temperature: float = 0.3,
+    max_labels: int = 30,
+    font_size: int = 12,
+) -> dict[str, Any] | None:
+    """Fetch a Street View panorama and label objects on it.
+
+    Thin lon/lat wrapper around :func:`label_image`. Reverse-geocodes
+    the point for the prompt header, fetches the panorama, calls
+    ``label_image``, and adds ``location`` to the returned dict.
+
+    Args, return dict, and metadata block match :func:`label_image`
+    plus an extra ``location`` string. Returns ``None`` if no
+    panorama is available at that point.
+    """
+    # Fetch the panorama
+    pano_bytes = streetview_panorama(
+        lon, lat, heading=heading, fov=fov, pitch=pitch,
+        size=size, radius=radius, source=source,
+    )
+    if pano_bytes is None:
+        return None
+
+    # Get location info
+    meta = streetview_metadata(lon, lat, radius=radius, source=source)
+    location_str = ""
+    if meta.get("status") == "OK":
+        addr = reverse_geocode(lon, lat)
+        location_str = addr.get("formatted_address", "") if addr else f"({lat:.4f}, {lon:.4f})"
+
+    result = label_image(
+        pano_bytes,
+        mode="streetview",
+        prompt=prompt,
+        location_str=location_str,
+        model=model,
+        temperature=temperature,
+        max_labels=max_labels,
+        font_size=font_size,
+    )
+    if result is not None:
+        result["location"] = location_str
+    return result
 
 
 def streetview_html(
@@ -1566,109 +1980,371 @@ _ADE20K_LAND_COVER = {
                   "signboard", "traffic light", "flag"],
 }
 
-# Cached model/processor
+
+# ── Nadir aerial taxonomies ──────────────────────────────────────────────
+#
+# These match the OFFICIAL label order from each dataset's original
+# release, so any HuggingFace checkpoint fine-tuned on that dataset will
+# emit class indices consistent with the lists below. If you pick a
+# checkpoint that reorders classes, override with an explicit
+# ``class_names=`` on the call.
+
+# ISPRS Potsdam / Vaihingen — 6 classes, ~9 cm aerial RGB+DSM.
+# Good match for Google Static Maps satellite tiles at zoom 18-20.
+_POTSDAM_CLASSES = [
+    "impervious",        # roads, parking lots, sidewalks
+    "building",          # roofs
+    "low_vegetation",    # lawns, low crops
+    "tree",              # tree canopies
+    "car",               # vehicles
+    "clutter",           # background / unclassified
+]
+_POTSDAM_LAND_COVER = {
+    "impervious": ["impervious"],
+    "building": ["building"],
+    "vegetation": ["low_vegetation", "tree"],
+    "vehicle": ["car"],
+    "other": ["clutter"],
+}
+
+# LandCover.ai — 5 classes, ~25 cm–50 cm Polish aerial RGB.
+# Good for rural/mixed landscapes (buildings + woodland + water + roads).
+_LANDCOVERAI_CLASSES = [
+    "background",
+    "building",
+    "woodland",
+    "water",
+    "road",
+]
+_LANDCOVERAI_LAND_COVER = {
+    "impervious": ["road"],
+    "building": ["building"],
+    "vegetation": ["woodland"],
+    "water": ["water"],
+    "other": ["background"],
+}
+
+# DeepGlobe Land Cover — 7 classes, 50 cm satellite RGB.
+# Good for broader landscape zooms (Google satellite 14-17) with mixed
+# urban / agriculture / natural cover.
+_DEEPGLOBE_CLASSES = [
+    "urban_land",
+    "agriculture_land",
+    "rangeland",
+    "forest_land",
+    "water",
+    "barren_land",
+    "unknown",
+]
+_DEEPGLOBE_LAND_COVER = {
+    "urban": ["urban_land"],
+    "agriculture": ["agriculture_land", "rangeland"],
+    "forest": ["forest_land"],
+    "water": ["water"],
+    "bare": ["barren_land"],
+    "other": ["unknown"],
+}
+
+# Palettes — one per taxonomy. Colors match each dataset's official
+# reference palette where one exists (Potsdam / DeepGlobe do publish
+# official RGBs), otherwise picked to be distinguishable.
+_POTSDAM_COLOR_MAP = {
+    "impervious":     (255, 255, 255),
+    "building":       (  0,   0, 255),
+    "low_vegetation": (  0, 255, 255),
+    "tree":           (  0, 255,   0),
+    "car":            (255, 255,   0),
+    "clutter":        (255,   0,   0),
+}
+_LANDCOVERAI_COLOR_MAP = {
+    "background": ( 60,  60,  60),
+    "building":   (178, 102,  51),
+    "woodland":   ( 34, 139,  34),
+    "water":      ( 30, 144, 255),
+    "road":       (128, 128, 128),
+}
+_DEEPGLOBE_COLOR_MAP = {
+    "urban_land":       (  0, 255, 255),
+    "agriculture_land": (255, 255,   0),
+    "rangeland":        (255,   0, 255),
+    "forest_land":      (  0, 255,   0),
+    "water":            (  0,   0, 255),
+    "barren_land":      (255, 255, 255),
+    "unknown":          (  0,   0,   0),
+}
+
+# Single-class specialist taxonomies — used with any binary SegFormer
+# checkpoint fine-tuned for the specific feature (buildings, tree
+# canopy, roads, etc.). Class order (background=0, foreground=1) is
+# the near-universal convention for binary semantic segmentation
+# datasets on HuggingFace.
+_BUILDING_CLASSES  = ["background", "building"]
+_BUILDING_LAND_COVER = {
+    "building":   ["building"],
+    "background": ["background"],
+}
+_BUILDING_COLOR_MAP = {
+    "background": ( 40,  40,  50),
+    "building":   (255, 140,   0),   # bright orange — pops on gray satellite
+}
+
+_TREE_CLASSES = ["background", "tree"]
+_TREE_LAND_COVER = {
+    "tree":       ["tree"],
+    "background": ["background"],
+}
+_TREE_COLOR_MAP = {
+    "background": ( 40,  30,  20),
+    "tree":       ( 34, 139,  34),   # forest green
+}
+
+
+# Preset registry keyed by ``mode`` for :func:`segment_image`.
+#
+# Each entry describes: the intended imagery orientation, the class
+# taxonomy the checkpoint should emit, a broad-category rollup, a
+# color palette, and — where a stable checkpoint exists — a template
+# for auto-picking a HuggingFace ``model_id`` from ``model_variant``.
+#
+# ``model_id_template`` is ``None`` for nadir modes because community
+# checkpoint IDs on HF vary and rename over time — hard-coding one
+# would rot. Pass ``model_id="user/checkpoint"`` to override. Suggested
+# HF search patterns:
+#   aerial-urban:     "segformer potsdam", "isprs vaihingen segmentation"
+#   aerial-landcover: "segformer landcoverai", "landcover.ai segmentation"
+#   aerial-mixed:     "segformer deepglobe", "deepglobe land cover"
+_SEGMENT_PRESETS: dict[str, dict] = {
+    "streetview": {
+        "description": "Ground-level scenes (Street View panoramas, "
+                       "oblique photos). SegFormer trained on ADE20K.",
+        "orientation": "ground",
+        "classes": _ADE20K_CLASSES,
+        "broad_categories": _ADE20K_LAND_COVER,
+        # ADE20K color map is built inline below (150 classes).
+        "color_map": None,
+        # NVIDIA official checkpoints — verified: B0-B4 use 512-512, B5 uses 640-640.
+        "model_id_template": "nvidia/segformer-{variant}-finetuned-ade-{res}",
+    },
+    "aerial-urban": {
+        "description": "Top-down urban aerial (Google satellite zoom "
+                       "18-20). Fine-tuned on ISPRS Potsdam. Pass "
+                       "``model_id=`` to pick a specific checkpoint.",
+        "orientation": "nadir",
+        "classes": _POTSDAM_CLASSES,
+        "broad_categories": _POTSDAM_LAND_COVER,
+        "color_map": _POTSDAM_COLOR_MAP,
+        "model_id_template": None,  # user must supply model_id
+    },
+    "aerial-landcover": {
+        "description": "Rural/mixed aerial (Google satellite zoom 15-19). "
+                       "Fine-tuned on LandCover.ai. Pass ``model_id=`` "
+                       "to pick a specific checkpoint.",
+        "orientation": "nadir",
+        "classes": _LANDCOVERAI_CLASSES,
+        "broad_categories": _LANDCOVERAI_LAND_COVER,
+        "color_map": _LANDCOVERAI_COLOR_MAP,
+        "model_id_template": None,
+    },
+    "aerial-mixed": {
+        "description": "Broad landscape satellite (Google satellite "
+                       "zoom 12-16, ~50 cm equivalent). Fine-tuned on "
+                       "DeepGlobe Land Cover. Pass ``model_id=`` to "
+                       "pick a specific checkpoint.",
+        "orientation": "nadir",
+        "classes": _DEEPGLOBE_CLASSES,
+        "broad_categories": _DEEPGLOBE_LAND_COVER,
+        "color_map": _DEEPGLOBE_COLOR_MAP,
+        "model_id_template": None,
+    },
+    "buildings": {
+        "description": "Building rooftop extraction — binary segmentation "
+                       "(background vs. building). Pass ``model_id=`` to a "
+                       "HuggingFace SegFormer fine-tuned on any building "
+                       "dataset (SpaceNet / INRIA / WHU / Microsoft "
+                       "Building Footprints derivatives). Suggested "
+                       "search: 'segformer building segmentation'.",
+        "orientation": "nadir",
+        "classes": _BUILDING_CLASSES,
+        "broad_categories": _BUILDING_LAND_COVER,
+        "color_map": _BUILDING_COLOR_MAP,
+        "model_id_template": None,
+    },
+    "trees": {
+        "description": "Tree-canopy extraction — binary segmentation "
+                       "(background vs. tree canopy). Works on any "
+                       "orientation the checkpoint was trained for. "
+                       "Pass ``model_id=`` — suggested: "
+                       "``restor/tcd-segformer-mit-b5`` (Restor "
+                       "Foundation Tree Crown Delineation, real + "
+                       "actively maintained, trained on aerial RGB).",
+        "orientation": "nadir",
+        "classes": _TREE_CLASSES,
+        "broad_categories": _TREE_LAND_COVER,
+        "color_map": _TREE_COLOR_MAP,
+        "model_id_template": None,
+    },
+}
+
+
+# Cached model/processor — keyed by the loaded ``model_id`` string so
+# switching modes doesn't repeatedly re-download.
+_segformer_cache: dict[str, tuple] = {}
 _segformer_model = None
 _segformer_processor = None
 
 
 def segment_image(
     image_bytes: bytes,
+    mode: str = "streetview",
     model_variant: str = "b4",
     broad_categories: bool = False,
+    model_id: str | None = None,
 ) -> dict[str, Any]:
-    """Perform pixel-level semantic segmentation using SegFormer.
+    """Perform pixel-level semantic segmentation on an RGB image.
 
-    Uses NVIDIA's SegFormer model pre-trained on ADE20K (150 classes).
-    Downloads the model on first use (~64 MB for B4).
+    Uses a SegFormer checkpoint (via ``transformers``). The ``mode``
+    argument picks a preset — class taxonomy + broad-category rollup +
+    color palette matched to what the checkpoint emits.
+
+    **Modes**
+
+    - ``"streetview"`` (default, ground-level) — SegFormer B0–B5 on
+      ADE20K (150 classes). Works out-of-the-box; used for Street View
+      panoramas and oblique photos.
+    - ``"aerial-urban"`` (nadir) — Potsdam / Vaihingen 6-class taxonomy
+      (impervious / building / low_vegetation / tree / car / clutter).
+      Good match for Google Static Maps satellite zoom 18-20.
+    - ``"aerial-landcover"`` (nadir) — LandCover.ai 5-class taxonomy
+      (background / building / woodland / water / road). Good for
+      rural/mixed landscapes at zoom 15-19.
+    - ``"aerial-mixed"`` (nadir) — DeepGlobe 7-class taxonomy
+      (urban_land / agriculture_land / rangeland / forest_land /
+      water / barren_land / unknown). Good for broader landscape at
+      zoom 12-16.
+
+    All nadir modes require ``model_id="user/checkpoint"`` — community
+    HuggingFace fine-tunes on these datasets exist but their IDs rot,
+    so nothing is hard-coded. Suggested HF search terms are in the
+    error message you'll get if you forget.
 
     Args:
         image_bytes (bytes): JPEG or PNG image bytes.
+        mode (str, optional): Preset — one of ``"streetview"``,
+            ``"aerial-urban"``, ``"aerial-landcover"``,
+            ``"aerial-mixed"``. Defaults to ``"streetview"``.
         model_variant (str, optional): SegFormer size — ``"b0"`` (fast,
-            3.8M params), ``"b1"``, ``"b2"``, ``"b3"``, ``"b4"``
-            (balanced, 64M params), or ``"b5"`` (best, 82M params).
-            Defaults to ``"b4"``.
-        broad_categories (bool, optional): If True, merge the 150 ADE20K
-            classes into broad land cover categories (sky, vegetation,
-            impervious, building, vehicle, water, terrain, etc.).
-            Defaults to ``False``.
+            3.8M params) through ``"b5"`` (best, 82M params). Only
+            affects the ``streetview`` preset's auto model_id; ignored
+            when ``model_id`` is set explicitly. Defaults to ``"b4"``.
+        broad_categories (bool, optional): If True, roll fine-grained
+            classes into broad land-cover categories per the mode's
+            preset. Defaults to ``False``.
+        model_id (str, optional): HuggingFace checkpoint override. If
+            None, the preset's default is used (only ``streetview`` has
+            one; nadir modes require this).
 
     Returns:
         dict: Keys:
 
         - ``class_map`` (numpy.ndarray): ``(H, W)`` array of class IDs.
         - ``class_names`` (list): Class name for each ID.
-        - ``colored_image`` (bytes): JPEG with colored overlay.
+        - ``colored_image`` (bytes): JPEG with colored overlay + legend.
         - ``legend`` (dict): ``{class_name: hex_color}`` for classes present.
         - ``summary`` (str): Markdown table of area percentages.
         - ``area_pct`` (dict): ``{class_name: float}`` area percentages.
+        - ``metadata`` (dict): ``mode``, ``model_id``, ``model_variant``,
+          ``orientation`` (ground/nadir), ``classes_count``, and
+          ``broad_categories`` flag.
 
     Example:
         >>> pano = streetview_panorama(-111.80, 40.68, fov=360)
-        >>> seg = segment_image(pano)
+        >>> seg = segment_image(pano)                     # streetview default
+        >>> sat = get_static_map(-111.80, 40.68, maptype="satellite", zoom=19)
+        >>> seg2 = segment_image(sat, mode="aerial-urban",
+        ...                        model_id="user/segformer-potsdam-b4")
         >>> print(seg['summary'])
-        >>> with open("segmented.jpg", "wb") as f:
-        ...     f.write(seg['colored_image'])
     """
+    _check_gmaps_ai_enabled("segment_image")
     import numpy as np
     from PIL import Image
     import io as _io
 
-    global _segformer_model, _segformer_processor
+    # ── Pick preset ──
+    if mode not in _SEGMENT_PRESETS:
+        raise ValueError(
+            f"Unknown mode {mode!r}. Valid modes: {sorted(_SEGMENT_PRESETS)}"
+        )
+    preset = _SEGMENT_PRESETS[mode]
 
-    # Lazy-load model
-    if _segformer_model is None or model_variant not in str(getattr(_segformer_model, 'name_or_path', '')):
+    # ── Resolve model_id ──
+    # Priority: explicit model_id arg > preset's model_id_template.
+    if model_id is None:
+        _tpl = preset.get("model_id_template")
+        if _tpl is None:
+            raise ValueError(
+                f"mode={mode!r} has no built-in default checkpoint — pass "
+                f"`model_id='user/checkpoint'` from a HuggingFace fine-tune "
+                f"on the {mode.split('-', 1)[-1]} dataset. "
+                f"Try searching HF for: '{preset['description'].split('.')[-2].strip()}'."
+            )
+        # ADE20K checkpoint uses different resolutions for B0-B4 vs B5.
+        _res = "640-640" if model_variant == "b5" else "512-512"
+        model_id = _tpl.format(variant=model_variant, res=_res)
+
+    # ── Load model (per-model_id cache) ──
+    global _segformer_model, _segformer_processor
+    cached = _segformer_cache.get(model_id)
+    if cached is None:
         from transformers import AutoImageProcessor, AutoModelForSemanticSegmentation
         import torch
-
-        # B5 uses 640x640 resolution, others use 512x512
-        _res = "640-640" if model_variant == "b5" else "512-512"
-        model_id = f"nvidia/segformer-{model_variant}-finetuned-ade-{_res}"
-        _segformer_processor = AutoImageProcessor.from_pretrained(model_id)
-        _segformer_model = AutoModelForSemanticSegmentation.from_pretrained(model_id)
-        _segformer_model.eval()
-
-        # Use GPU if available
+        proc = AutoImageProcessor.from_pretrained(model_id)
+        mdl = AutoModelForSemanticSegmentation.from_pretrained(model_id)
+        mdl.eval()
         if torch.cuda.is_available():
-            _segformer_model = _segformer_model.to("cuda")
+            mdl = mdl.to("cuda")
+        _segformer_cache[model_id] = (proc, mdl)
+    else:
+        proc, mdl = cached
+    # Backward-compat globals — kept in sync with the last-loaded model
+    # so older code that peeks at them still works.
+    _segformer_processor = proc
+    _segformer_model = mdl
 
     import torch
 
-    # Load image
+    # ── Inference ──
     image = Image.open(_io.BytesIO(image_bytes)).convert("RGB")
     img_w, img_h = image.size
 
-    # Run inference
-    inputs = _segformer_processor(images=image, return_tensors="pt")
+    inputs = proc(images=image, return_tensors="pt")
     if torch.cuda.is_available():
         inputs = {k: v.to("cuda") for k, v in inputs.items()}
 
     with torch.no_grad():
-        outputs = _segformer_model(**inputs)
+        outputs = mdl(**inputs)
 
-    # Post-process to original image size
-    class_map = _segformer_processor.post_process_semantic_segmentation(
+    class_map = proc.post_process_semantic_segmentation(
         outputs, target_sizes=[(img_h, img_w)]
     )[0].cpu().numpy()
 
-    # Build class name list and optional broad-category remapping
+    # ── Build class name list and optional broad-category remapping ──
+    _preset_classes = preset["classes"]
+    _preset_broad = preset["broad_categories"]
     if broad_categories:
-        # Build reverse lookup: ADE20K class index -> broad category
         _reverse = {}
-        for cat, ade_names in _ADE20K_LAND_COVER.items():
-            for name in ade_names:
-                if name in _ADE20K_CLASSES:
-                    _reverse[_ADE20K_CLASSES.index(name)] = cat
-
-        # Remap class_map
-        broad_names = sorted(set(_ADE20K_LAND_COVER.keys()) | {"other"})
+        for cat, cls_names in _preset_broad.items():
+            for name in cls_names:
+                if name in _preset_classes:
+                    _reverse[_preset_classes.index(name)] = cat
+        broad_names = sorted(set(_preset_broad.keys()) | {"other"})
         broad_id_map = {name: i for i, name in enumerate(broad_names)}
         remapped = np.full_like(class_map, broad_id_map["other"])
-        for ade_idx, cat in _reverse.items():
-            remapped[class_map == ade_idx] = broad_id_map[cat]
+        for src_idx, cat in _reverse.items():
+            remapped[class_map == src_idx] = broad_id_map[cat]
         class_map = remapped
         class_names = broad_names
     else:
-        class_names = _ADE20K_CLASSES
+        class_names = _preset_classes
 
     # Calculate area percentages
     total_px = class_map.size
@@ -1685,21 +2361,28 @@ def segment_image(
     area_pct = dict(sorted(area_pct.items(), key=lambda x: -x[1]))
 
     # Generate colored overlay
-    # Use a fixed color palette for broad categories
+    # Broad-category palette — shared across all modes. Roll-up names
+    # (impervious / vegetation / water / etc.) are common enough that
+    # one palette is fine here.
     _CATEGORY_COLORS = {
-        "sky": (135, 206, 235),
-        "vegetation": (34, 139, 34),
-        "impervious": (128, 128, 128),
-        "building": (178, 102, 51),
-        "vehicle": (220, 20, 60),
-        "water": (30, 144, 255),
-        "person": (255, 165, 0),
-        "terrain": (139, 119, 101),
-        "furniture": (160, 82, 165),
-        "other": (80, 80, 80),
+        "sky":           (135, 206, 235),
+        "vegetation":    ( 34, 139,  34),
+        "impervious":    (128, 128, 128),
+        "building":      (178, 102,  51),
+        "vehicle":       (220,  20,  60),
+        "water":         ( 30, 144, 255),
+        "person":        (255, 165,   0),
+        "terrain":       (139, 119, 101),
+        "furniture":     (160,  82, 165),
+        # Nadir broad-category rollups
+        "urban":         ( 90,  90,  95),
+        "agriculture":   (218, 165,  32),
+        "forest":        ( 34, 139,  34),
+        "bare":          (188, 143, 143),
+        "other":         ( 80,  80,  80),
     }
 
-    if not broad_categories:
+    if not broad_categories and mode == "streetview":
         # Sensible colors for ADE20K 150 classes — keyed by class name
         _ADE20K_COLOR_MAP = {
             # Sky & atmosphere
@@ -1752,10 +2435,21 @@ def segment_image(
                 int(80 + (i * 89) % 160),
                 int(80 + (i * 53) % 160),
             ))
-    else:
+    elif broad_categories:
+        # Broad-category rollup — one palette shared across all modes.
         _colors = np.zeros((len(class_names), 3), dtype=np.uint8)
         for i, name in enumerate(class_names):
             _colors[i] = _CATEGORY_COLORS.get(name, (80, 80, 80))
+    else:
+        # Nadir mode, per-class output — use the preset's own palette.
+        _preset_cm = preset.get("color_map") or {}
+        _colors = np.zeros((len(class_names), 3), dtype=np.uint8)
+        for i, name in enumerate(class_names):
+            _colors[i] = _preset_cm.get(name, (
+                int(80 + (i * 137) % 160),
+                int(80 + (i * 89) % 160),
+                int(80 + (i * 53) % 160),
+            ))
 
     # Create colored mask
     color_mask = _colors[class_map]  # (H, W, 3)
@@ -1814,6 +2508,14 @@ def segment_image(
         "legend": legend,
         "summary": "\n".join(summary_lines),
         "area_pct": area_pct,
+        "metadata": {
+            "mode": mode,
+            "model_id": model_id,
+            "model_variant": model_variant,
+            "orientation": preset["orientation"],
+            "classes_count": len(class_names),
+            "broad_categories": broad_categories,
+        },
     }
 
 
@@ -1871,3 +2573,13 @@ def segment_streetview(
 
     return result
 
+
+# ── inventory_area re-export ─────────────────────────────────────────────
+# The rigorous image-inventory function lives in geeViz.inventoryLib for
+# organizational reasons. Re-exported here so the agent's usual
+# `gm.inventory_area(...)` call works.
+try:
+    from geeViz.inventoryLib import inventory_area  # noqa: F401
+except ImportError:
+    # inventoryLib not shipped or missing optional dep — leave gm without it
+    pass

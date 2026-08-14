@@ -105,9 +105,11 @@ class SARegistry:
                 )
 
     def list_tenants(self) -> list[str]:
+        """All tenant slugs currently registered, sorted alphabetically."""
         return sorted(self._sa_json.keys())
 
     def has_tenant(self, tenant: str) -> bool:
+        """True iff the registry has a service-account entry for ``tenant``."""
         return tenant in self._sa_json
 
     def resolve(self, tenant: Optional[str]) -> str:
@@ -171,8 +173,14 @@ _REGISTRY: Optional[SARegistry] = None
 
 
 def get_registry() -> SARegistry:
-    """Return the process-wide SA registry, constructing it lazily on
-    first access."""
+    """Return the process-wide SA registry, constructing it lazily on first access.
+
+    Thread-safe: the constructor grabs its own lock. Subsequent callers
+    receive the same instance.
+
+    Returns:
+        SARegistry: The singleton registry.
+    """
     global _REGISTRY
     if _REGISTRY is None:
         _REGISTRY = SARegistry()
@@ -180,6 +188,10 @@ def get_registry() -> SARegistry:
 
 
 def reset_registry() -> None:
-    """Clear the singleton — used by tests to re-load after env changes."""
+    """Clear the singleton so the next ``get_registry()`` re-reads the env.
+
+    Used by tests that mutate GEEVIZ_SA_JSON_* env vars between cases —
+    without a reset the cached registry would ignore the changes.
+    """
     global _REGISTRY
     _REGISTRY = None

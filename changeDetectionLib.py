@@ -1,7 +1,28 @@
-"""
-Apply change detection methods usin GEE
+"""Apply change detection methods using Google Earth Engine.
 
-geeViz.changeDetectionLib is the core module for setting up various change detection algorithms within GEE. Notably, it facilitates the use of LandTrendr and CCDC data preparation, application, and output formatting, compression, and decompression. 
+``geeViz.changeDetectionLib`` is the core module for setting up change
+detection algorithms in GEE. It facilitates preparation, application, and
+output formatting/compression/decompression of results from:
+
+* **LandTrendr** — annual spectral segmentation. Recommended entry points:
+  :func:`runLANDTRENDR` (simple one-band run) and
+  :func:`landtrendrWrapper` (full disturbance pipeline).
+* **VERDET** — annual noise-robust segmentation. See :func:`VERDETVertStack`
+  and :func:`VERDETFitMagSlopeDiffCollection`.
+* **CCDC** — continuous change detection. See :func:`getCCDCSegCoeffs`,
+  :func:`annualizeCCDC`, and :func:`simpleCCDCPredictionAnnualized`.
+* **Z-score / linear-fit** change — see :func:`zAndTrendChangeDetection`
+  and :func:`thresholdZAndTrend`.
+
+Most helpers are lower-level building blocks used by the wrappers above;
+each is a thin function that operates on ``ee.Image`` / ``ee.ImageCollection``
+inputs. When calling directly, consult the LandTrendr/VERDET/CCDC upstream
+docs for parameter semantics — this module mostly plumbs their outputs
+into GEE-friendly shapes for visualization + export.
+
+Palettes exposed at module level (``lossYearPalette``, ``lossMagPalette``,
+``gainYearPalette``, ``gainMagPalette``, ``changeDurationPalette``) match
+the color conventions used by :func:`addLossGainToMap`.
 """
 
 """
@@ -40,8 +61,22 @@ changeDurationPalette = "BD1600,E2F400,0C2780".split(",")
 
 
 ######################################################################
-# Helper to multiply image
 def multBands(img, distDir, by=1):
+    """Multiply every band of ``img`` by ``distDir * by``, preserving properties.
+
+    Used to flip the sign of a spectral index when the underlying algorithm
+    expects "up == improvement" but the index is oriented the opposite way
+    (e.g. NBR = negative on loss). Preserves ``system:time_start`` and all
+    other image properties.
+
+    Args:
+        img (ee.Image): Input image.
+        distDir (int): Direction multiplier — typically ``+1`` or ``-1``.
+        by (float): Additional scalar. Default ``1`` (no extra scaling).
+
+    Returns:
+        ee.Image: Multiplied image with source properties preserved.
+    """
     out = img.multiply(ee.Image(distDir).multiply(by))
     out = ee.Image(out.copyProperties(img, ["system:time_start"]).copyProperties(img))
     return out
@@ -310,7 +345,6 @@ def rawLTToVertices(rawLT, indexName=None, multBy=10000, vertexNoData=-32768):
 
 
 ############################################################################################################
-# Function to wrap landtrendr processing
 def landtrendrWrapper(
     processedComposites,
     startYear,
@@ -321,8 +355,37 @@ def landtrendrWrapper(
     distParams,
     mmu,
 ):
-    # startYear = 1984#ee.Date(ee.Image(processedComposites.first()).get('system:time_start')).get('year').getInfo()
-    # endYear = 2017#ee.Date(ee.Image(processedComposites.sort('system:time_start',false).first()).get('system:time_start')).get('year').getInfo()
+    """One-call wrapper that runs LandTrendr end-to-end on a composite collection.
+
+    Reorients the target index (via ``distDir``), runs
+    ``ee.Algorithms.TemporalSegmentation.LandTrendr``, extracts the
+    greatest disturbance segment per pixel, filters by ``distParams``,
+    applies MMU cleaning, and converts LT's array output back to an
+    ImageCollection of fitted values.
+
+    Args:
+        processedComposites (ee.ImageCollection): Annual composites (one
+            per year) with ``indexName`` present as a band.
+        startYear (int): First year in the analysis window.
+        endYear (int): Last year in the analysis window (inclusive).
+        indexName (str): Band name to segment on (e.g. ``"NBR"``, ``"NDVI"``).
+        distDir (int): Orientation of the index — ``-1`` if losses are
+            NEGATIVE in the raw index (NDVI, NBR), ``+1`` if losses are
+            POSITIVE (e.g. brightness, TCA-inverse).
+        run_params (dict): LandTrendr algorithm params. See
+            ``default_lt_run_params`` for defaults / valid keys.
+        distParams (dict): Disturbance-filter thresholds. Passed through
+            to ``extractDisturbance``.
+        mmu (int): Minimum mapping unit (pixels). Segments smaller than
+            this are filtered.
+
+    Returns:
+        list: ``[lt, distImg, fittedCollection, vertStack]``
+            * ``lt`` — raw LandTrendr array output (ee.Image).
+            * ``distImg`` — greatest-disturbance image (yod/mag/dur/preval bands).
+            * ``fittedCollection`` — per-year fitted values as an ImageCollection.
+            * ``vertStack`` — vertex-stack image (year_1, year_2, ..., fit_1, fit_2, ...).
+    """
     noDataValue = 32768
     if distDir == 1:
         noDataValue = -1.0 * noDataValue
@@ -426,10 +489,27 @@ def LTExportPrep(rawLT, multBy=10000):
 
 
 ###########################################################
-# New function 11/23 to simplify running of LandTrendr
-# and prepping outputs for export
 def runLANDTRENDR(ts, bandName, run_params=None):
-    # Get single band time series and set its direction so that a loss in veg/moisture is going up
+    """Run LandTrendr on a single band with sensible defaults.
+
+    Thin, opinionated wrapper around
+    ``ee.Algorithms.TemporalSegmentation.LandTrendr`` — auto-picks the
+    sign flip for the given band (via ``changeDirDict``, falls back to
+    ``-1``), runs LandTrendr, then packages the raw output into
+    export-ready vertex-only form via ``LTExportPrep``.
+
+    Args:
+        ts (ee.ImageCollection): Annual time series (one image per year)
+            with ``bandName`` present.
+        bandName (str): Band to segment (e.g. ``"NBR"``, ``"NDVI"``,
+            ``"tcWetness"``).
+        run_params (dict, optional): Override for LandTrendr params. If
+            ``None``, uses ``default_lt_run_params``.
+
+    Returns:
+        ee.Image: Vertex-stack image with metadata properties ``band`` and
+            ``run_params`` set for downstream traceability.
+    """
     ts = ts.select([bandName])
     try:
         distDir = changeDirDict[bandName]

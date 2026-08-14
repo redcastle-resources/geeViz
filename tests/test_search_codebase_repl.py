@@ -1,10 +1,10 @@
-"""Tests for the two search_geeviz REPL-introspection gaps that bit us
+"""Tests for the two search_codebase REPL-introspection gaps that bit us
 in a live agent run:
 
 1. ``_resolve_module`` couldn't walk dotted paths like ``"ee.ImageCollection"``
    — only top-level REPL module names worked.
 2. ``pandas`` / ``numpy`` weren't in the default REPL namespace, so
-   ``search_geeviz(name="pd.DataFrame.to_markdown")`` returned "not found".
+   ``search_codebase(name="pd.DataFrame.to_markdown")`` returned "not found".
 
 These tests don't require Earth Engine connectivity. They exercise the
 resolver logic on a mock namespace and verify the namespace-loading
@@ -131,13 +131,14 @@ def test_repl_class_resolves_without_dots():
 # ----------------- Namespace-setup source test -----------------
 def test_server_namespace_preloads_pandas_and_numpy():
     """The default REPL namespace must include pandas/pd and numpy/np
-    so search_geeviz can find them by name. Verified via source
+    so search_codebase can find them by name. Verified via source
     inspection — importing server.py triggers EE init."""
     src = open(os.path.join(os.path.dirname(__file__), "..", "mcp", "server.py"),
                encoding="utf-8").read()
-    # The literal namespace.update keys must mention pd and np
-    m = re.search(r"sess\.namespace\.update\(\{(.*?)\}\)", src, re.S)
-    assert m, "Couldn't find sess.namespace.update block in server.py"
+    # The namespace dict literal (assigned to _ns_update before the
+    # actual sess.namespace.update() call) must mention pd and np.
+    m = re.search(r"_ns_update\s*=\s*\{(.*?)\n    \}", src, re.S)
+    assert m, "Couldn't find _ns_update dict literal in server.py"
     block = m.group(1)
     for key in ('"pd"', '"pandas"', '"np"', '"numpy"'):
         assert key in block, f"{key} not added to default REPL namespace"

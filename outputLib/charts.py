@@ -1610,9 +1610,14 @@ def prepare_for_reduction(ee_obj, obj_info, x_axis_property="system:time_start",
     if obj_info["obj_type"] == "ImageCollection":
         ic = ee_obj
 
-        # Tag images with x_axis_property if it's a date-derived field
+        # Tag images with x_axis_property if it's a date-derived field.
+        # ``date_format`` MUST be a non-empty string; None makes EE emit
+        # a full ISO datetime ("2020-01-01T00:00:00") whose colons then
+        # break the ``label + "----" + band`` band-name construction
+        # below (EE band names reject ":"). Fall back to "YYYY".
+        _df = date_format or "YYYY"
         if x_axis_property in ("year", "date", "system:time_start"):
-            ic = ic.map(lambda img: img.set("year", img.date().format(date_format)))
+            ic = ic.map(lambda img: img.set("year", img.date().format(_df)))
             if x_axis_property in ("date", "system:time_start"):
                 x_axis_property = "year"
 
@@ -2924,7 +2929,7 @@ def chart_donut(
     Args:
         df (pandas.DataFrame): Output of :func:`zonal_stats` for a single
             Image.  Single row, columns = class names, values = area/%.
-        colors (list, optional): Hex colour strings, one per class.
+        colors (list, optional): Hex color strings, one per class.
         title (str, optional): Chart title.
         max_classes (int, optional): Maximum number of classes to display.
             Smaller classes are grouped into "Other".  Defaults to ``30``.
@@ -3022,7 +3027,7 @@ def chart_donut_multi_feature(
         df (pandas.DataFrame): Output of :func:`zonal_stats` with
             ``feature_label`` set.  Index = feature names, columns =
             class names, values = area/%.
-        colors (list, optional): Hex colour strings, one per class.
+        colors (list, optional): Hex color strings, one per class.
         title (str, optional): Overall chart title.
         max_classes (int, optional): Max classes per donut.
         width (int, optional): Chart width in pixels.
@@ -3160,7 +3165,7 @@ def chart_scatter(
             values used to color each point.  Defaults to ``None``.
         class_names (list, optional): Class name strings matching
             *class_values*.
-        class_palette (list, optional): Hex colour strings matching
+        class_palette (list, optional): Hex color strings matching
             *class_values*.
         class_values (list, optional): Integer class values that map
             to *class_names* and *class_palette*.
@@ -3623,7 +3628,7 @@ def summarize_and_chart(
     * **chart_type="donut"** -> **donut chart** (pie with center hole; Image + thematic only).
     * **chart_type="scatter"** -> **scatter plot** (Image +
       FeatureCollection only; uses 2 continuous bands as x/y axes,
-      optionally coloured by *thematic_band_name*).
+      optionally colored by *thematic_band_name*).
     * **chart_type="sankey"** -> **Sankey transition diagram**.
     * **feature_label** + ``ee.FeatureCollection`` + ``ee.Image`` ->
       **grouped bar** or **per-feature pie/donut** chart.
@@ -3698,10 +3703,10 @@ def summarize_and_chart(
             from results.
         thematic_band_name (str, optional): For ``chart_type="scatter"``
             only.  Name of a thematic band in the image whose mode value
-            per feature is used to colour each scatter point.  The image
+            per feature is used to color each scatter point.  The image
             must carry ``{band}_class_values``, ``{band}_class_names``,
-            and ``{band}_class_palette`` properties for the colours and
-            legend entries.  Defaults to ``None`` (single-colour points).
+            and ``{band}_class_palette`` properties for the colors and
+            legend entries.  Defaults to ``None`` (single-color points).
         line_width (int or float, optional): Line width in pixels for
             time series traces. Defaults to ``2``.
         marker_size (int or float, optional): Marker diameter in pixels
@@ -4119,19 +4124,34 @@ def summarize_and_chart(
             if thematic_band_name in scatter_df.columns:
                 _thematic_col = thematic_band_name
 
-            # Get class metadata from the image
+            # Get class metadata from the image.
+            #
+            # LCMS and several other thematic assets store the class
+            # properties as COMMA-SEPARATED STRINGS ("Trees,Tall
+            # Shrubs,Shrubs...") rather than lists. Downstream
+            # ``chart_scatter`` does ``zip(class_values, class_names)``
+            # which would iterate over characters of the string and
+            # produce garbage. Run everything through
+            # ``_normalize_class_prop`` so both list-form and string-form
+            # assets end up as clean Python lists.
             if _thematic_col and class_info and thematic_band_name in class_info:
                 ci = class_info[thematic_band_name]
-                _class_names = ci.get("class_names", [])
-                _class_palette = ci.get("class_palette", [])
-                _class_values = ci.get("class_values", [])
+                _class_names = _normalize_class_prop(ci.get("class_names", []))
+                _class_palette = _normalize_class_prop(ci.get("class_palette", []))
+                _class_values = _normalize_class_prop(ci.get("class_values", []), as_int=True)
             elif _thematic_col:
-                # Try reading from image properties directly
+                # Try reading from image properties directly (LCMS etc.
+                # where the caller's ee_obj has copyProperties'd the
+                # class arrays but obj_info didn't classify the band as
+                # thematic because it's not the first / only band).
                 try:
                     props = ee.Image(ee_obj).getInfo().get("properties", {})
-                    _class_values = props.get(f"{thematic_band_name}_class_values")
-                    _class_names = props.get(f"{thematic_band_name}_class_names")
-                    _class_palette = props.get(f"{thematic_band_name}_class_palette")
+                    _class_values = _normalize_class_prop(
+                        props.get(f"{thematic_band_name}_class_values"), as_int=True)
+                    _class_names = _normalize_class_prop(
+                        props.get(f"{thematic_band_name}_class_names"))
+                    _class_palette = _normalize_class_prop(
+                        props.get(f"{thematic_band_name}_class_palette"))
                 except Exception:
                     pass
 

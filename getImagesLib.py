@@ -1,8 +1,32 @@
-"""
-Get images and organize them so they are easier to work with
+"""Get images and organize them so they are easier to work with.
 
-geeViz.getImagesLib is the core module for setting up various imageCollections from GEE. Notably, it facilitates Landsat, Sentinel-2, and MODIS data organization. This module helps avoid many common mistakes in GEE. Most functions ease matching band names, ensuring resampling methods are properly set, date wrapping, and helping with cloud and cloud shadow masking.
+``geeViz.getImagesLib`` is the core module for setting up ImageCollections
+from Google Earth Engine. It facilitates Landsat, Sentinel-2, and MODIS
+data organization and normalization — matching band names across sensors,
+resampling defaults, date wrapping, and cloud / cloud-shadow masking.
 
+Recommended entry points (high-level wrappers):
+
+* :func:`getProcessedLandsatScenes` — Landsat 4-9 scene collection, cloud-
+  masked and band-normalized. Companion:
+  :func:`getLandsatWrapper` for annual composites.
+* :func:`getProcessedSentinel2Scenes` — Sentinel-2 SR scenes, cloud-masked.
+  Companion: :func:`getSentinel2Wrapper` for annual composites.
+* :func:`getProcessedModisScenes` — MODIS 8-day surface reflectance,
+  normalized to a Landsat-like band naming scheme.
+* :func:`getLandsatAndSentinel2HybridWrapper` — merged Landsat + Sentinel-2
+  composites when either alone isn't dense enough.
+
+Common helpers:
+
+* :func:`simpleAddIndices` — adds NDVI/NBR/tasseled-cap/etc. bands.
+* :func:`addWaterIndices` — MNDWI, AWEI, and other water-detection indices.
+* :func:`getModisAndProducts` — MODIS 8-day products (LST, snow, fire, etc.)
+* :func:`vizParamsFalse`, :func:`vizParamsTrue`, and other module-level
+  viz dicts — sensible defaults for ``Map.addLayer``.
+
+Terminology: "wrappers" produce annual composites; "processed scenes"
+produce per-scene collections you compositen yourself.
 """
 
 """

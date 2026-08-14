@@ -20,7 +20,6 @@
 import os, sys
 
 sys.path.append(os.getcwd())
-
 # Module imports
 import geeViz.getImagesLib as getImagesLib
 import geeViz.taskManagerLib as taskManagerLib

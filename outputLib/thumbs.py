@@ -85,7 +85,11 @@ _CONTINUOUS_DEFAULTS = {
 _DEFAULT_TITLE_FONT_SIZE = 16
 _DEFAULT_LABEL_FONT_SIZE = 12
 
-# Default CRS for thumbnail/GIF generation
+# Default CRS for thumbnail/GIF generation. EE's ``getThumbURL`` renders
+# the output raster in whatever CRS is passed via its ``crs`` param —
+# passing ``None`` means "no override", which lets EE pick (usually the
+# source image's native projection). Web Mercator is a sensible default
+# for browser-viewable thumbnails.
 _DEFAULT_CRS = "EPSG:3857"
 
 # Default single-band palette (grayscale fallback)
@@ -94,7 +98,7 @@ _CONTINUOUS_SINGLE_BAND_PALETTE = ["000000", "ffffff"]
 # Band-name → palette lookup using geeViz.geePalettes (ee-palettes)
 # Keys are lower-cased band names; values are resolved palette lists.
 def _build_band_palette_lookup():
-    """Build a dict mapping common band names to ee-palettes colour lists."""
+    """Build a dict mapping common band names to ee-palettes color lists."""
     try:
         import geeViz.geePalettes as gp
     except ImportError:
@@ -194,6 +198,7 @@ from geeViz.outputLib._basemaps import (
     build_bottom_strip as _build_bottom_strip,
     build_inset_image as _build_inset_image,
     build_title_strip as _build_title_strip,
+    get_basemap_presets,
 )
 
 
@@ -304,16 +309,23 @@ def _validate_projection_params(crs, transform, scale):
 
 
 def _apply_projection(ee_img, crs=None, transform=None, scale=None):
-    """Apply ``setDefaultProjection`` to an ``ee.Image`` if projection params are given.
+    """Advertise a default projection on the image (no-op if ``crs`` is None).
+
+    This uses ``.setDefaultProjection`` rather than ``.reproject`` — the
+    render CRS for thumbnail output is controlled by passing ``crs`` to
+    ``getThumbURL(...)`` directly (see the getThumbURL call sites). The
+    default projection is only a hint for downstream compute that reads
+    ``img.projection()``; it does not resample pixels.
 
     Args:
         ee_img: ``ee.Image``.
-        crs (str, optional): CRS code, e.g. ``"EPSG:4326"``.
+        crs (str, optional): CRS code, e.g. ``"EPSG:5070"``.
         transform (list, optional): Affine transform as a 6-element list.
         scale (float, optional): Nominal scale in meters.
 
     Returns:
-        ee.Image: The image with default projection set (or unchanged).
+        ee.Image: The image with default projection set (or unchanged
+        when *crs* is None).
     """
     if crs is None:
         return ee_img
@@ -323,16 +335,44 @@ def _apply_projection(ee_img, crs=None, transform=None, scale=None):
     if scale is not None:
         kwargs["scale"] = scale
     elif transform is None:
-        # When only crs is given (no scale or transform), derive the scale
-        # from the image's native projection.  Without an explicit scale,
-        # setDefaultProjection uses a [1,0,0,0,1,0] transform whose
-        # positive y-scale flips the image in projected CRSes like UTM.
         kwargs["scale"] = ee_img.projection().nominalScale()
     return ee_img.setDefaultProjection(**kwargs)
 
 
+def _resolve_effective_crs(source_img, caller_crs):
+    """Pick the CRS that drives both the render AND the basemap fetch.
+
+    * ``caller_crs is not None`` → use it verbatim (explicit wins).
+    * ``caller_crs is None``     → try to grab the source image's own
+      projection so the same grid is used for render + basemap.
+      Prefer ``.projection().crs().getInfo()`` (returns e.g.
+      ``"EPSG:5070"`` when the source is a canonical CRS); fall back
+      to ``.projection().getInfo()["wkt"]`` for ad-hoc projections like
+      LCMS's custom Albers Conical Equal Area, which has no EPSG code.
+
+    Returns None only when neither the caller nor the source provides
+    a projection — in which case downstream code should skip the
+    ``crs`` param entirely (EE rejects ``crs: null``).
+    """
+    if caller_crs is not None:
+        return caller_crs
+    if source_img is None:
+        return None
+    try:
+        c = source_img.projection().crs().getInfo()
+        if c:
+            return c
+    except Exception:
+        pass
+    try:
+        info = source_img.projection().getInfo() or {}
+        return info.get("wkt") or info.get("crs")
+    except Exception:
+        return None
+
+
 def _apply_projection_to_collection(ee_col, crs=None, transform=None, scale=None):
-    """Apply ``setDefaultProjection`` to every image in an ``ee.ImageCollection``.
+    """Reproject every image in an ``ee.ImageCollection`` to a target CRS.
 
     Args:
         ee_col: ``ee.ImageCollection``.
@@ -447,7 +487,7 @@ def _add_thumb_padding(frame, bg_color="black"):
 
     Args:
         frame (PIL.Image.Image): RGBA frame.
-        bg_color: Background colour for the padding.
+        bg_color: Background color for the padding.
 
     Returns:
         PIL.Image.Image: Padded RGBA image.
@@ -472,7 +512,7 @@ def _auto_geometry_color(basemap_img):
         basemap_img (PIL.Image.Image): Basemap tile image (RGBA).
 
     Returns:
-        tuple: ``(R, G, B)`` colour tuple.
+        tuple: ``(R, G, B)`` color tuple.
     """
     if basemap_img is None:
         return (220, 220, 220)
@@ -497,7 +537,7 @@ def _auto_geometry_color(basemap_img):
 
 
 def _resolve_geometry_color(geometry_outline_color, font_color, basemap, bounds):
-    """Resolve the geometry outline colour.
+    """Resolve the geometry outline color.
 
     Priority: explicit color > auto from basemap > font_color.
     """
@@ -525,11 +565,11 @@ def _paint_boundary(ee_obj, geometry, color, viz_params=None, fill_color=None, w
     Args:
         ee_obj: ``ee.Image`` or ``ee.ImageCollection``.
         geometry: ``ee.Geometry``, ``ee.Feature``, or ``ee.FeatureCollection``.
-        color (tuple or list): ``(R, G, B)`` colour for the outline (0–255).
+        color (tuple or list): ``(R, G, B)`` color for the outline (0–255).
         viz_params (dict, optional): Visualization parameters to apply
             before blending.  When ``None`` the image is assumed to be
             already visualized or single-band.
-        fill_color (str, optional): CSS fill colour for the geometry interior
+        fill_color (str, optional): CSS fill color for the geometry interior
             (e.g. ``"33333388"`` for semi-transparent). Default ``None`` (no fill).
 
     Returns:
@@ -546,7 +586,7 @@ def _paint_boundary(ee_obj, geometry, color, viz_params=None, fill_color=None, w
     else:
         boundary_fc = ee.FeatureCollection([ee.Feature(geom)])
 
-    # Convert colour to hex string for .style()
+    # Convert color to hex string for .style()
     if isinstance(color, str):
         gc = list(_resolve_color(color))
     else:
@@ -1286,7 +1326,7 @@ def auto_viz(
 
     For **thematic** data (images with ``{band}_class_values`` and
     ``{band}_class_palette`` properties) returns a palette-based viz dict
-    mapping class values to colours.
+    mapping class values to colors.
 
     For **continuous** data:
 
@@ -1447,10 +1487,12 @@ def get_thumb_url(ee_obj, geometry=None, viz_params=None, dimensions=_DEFAULT_DI
             Defaults to ``640``.
         band_name (str, optional): Band to visualize when using
             auto-detection.  Defaults to ``None`` (first band).
-        crs (str, optional): Coordinate reference system code
-            (e.g. ``"EPSG:4326"``, ``"EPSG:32612"``).  When provided,
-            ``setDefaultProjection`` is applied to the image.
-            Defaults to ``None``.
+        crs (str, optional): Output raster CRS. Passed directly to
+            ``ee.Image.getThumbURL(crs=...)`` so EE renders the
+            thumbnail in this projection. Defaults to ``"EPSG:3857"``
+            (Web Mercator). Pass ``None`` to omit the ``crs`` key
+            entirely; EE then uses the source image's native projection.
+            (EE rejects a literal ``crs: null``.)
         transform (list, optional): Affine transform as a 6-element
             list.  Requires ``crs``.  Defaults to ``None``.
         scale (float, optional): Nominal pixel scale in meters.
@@ -1500,10 +1542,17 @@ def get_thumb_url(ee_obj, geometry=None, viz_params=None, dimensions=_DEFAULT_DI
             _fill = "33333366" if _is_geom_only else None  # 0.4 opacity
             img = _paint_boundary(img, geom, gc, viz_params=viz_params, fill_color=_fill or geometry_fill_color, width=geometry_outline_weight, crs=crs)
             params = {"min": 0, "max": 255, "dimensions": dimensions, "format": "png"}
-        if clip_to_geometry:
-            params["region"] = geom
-        else:
-            params["region"] = geom.bounds()
+        # Region is the geometry itself. Passing ``crs`` in the
+        # getThumbURL params dict is what actually controls the render
+        # projection — EE respects that param when set, and falls back
+        # to the image's native projection when ``crs`` is None.
+        params["region"] = geom
+        # ``crs=None`` means "let EE pick" (source native). EE's server
+        # rejects a literal ``crs: null`` in the request body with
+        # "Parameter 'crs' is required and may not be null", so we omit
+        # the key entirely when the caller passed None.
+        if crs is not None:
+            params["crs"] = crs
 
     return img.getThumbURL(params)
 
@@ -1705,9 +1754,11 @@ def generate_gif(ee_obj, geometry, viz_params=None, band_name=None,
         output_path (str, optional): File path to save the GIF to disk.
             Parent directories are created automatically.
             Defaults to ``None`` (not saved).
-        crs (str, optional): CRS code (e.g. ``"EPSG:4326"``).
-            Applies ``setDefaultProjection`` to each frame.
-            Defaults to ``'EPSG:3857'``.
+        crs (str, optional): Output raster CRS for the rendered frames.
+            Passed to ``ee.Image.getThumbURL(crs=...)``. Defaults to
+            ``"EPSG:3857"`` (Web Mercator). Pass ``None`` to omit the
+            ``crs`` key entirely; EE then uses the source image's
+            native projection. (EE rejects a literal ``crs: null``.)
         transform (list, optional): Affine transform as a 6-element
             list.  Requires ``crs``.  Defaults to ``None``.
         scale (float, optional): Nominal pixel scale in meters.
@@ -1790,6 +1841,19 @@ def generate_gif(ee_obj, geometry, viz_params=None, band_name=None,
     col = col.filterBounds(_to_geometry(geometry))
     geom = _to_geometry(geometry)
 
+    # Resolve the "effective" render CRS. When the caller passes crs=None
+    # ("use source native"), we probe the source projection so the SAME
+    # CRS drives BOTH the image render AND the basemap fetch. Otherwise
+    # the two land on different grids and the basemap visibly slides out
+    # from under the data (a real user-reported bug).
+    #
+    # Note: ``.projection().crs().getInfo()`` returns None for many
+    # projections (e.g. LCMS is stored in an ad-hoc Albers WKT, not an
+    # EPSG code). Fall back to the full ``.projection().getInfo()`` dict
+    # and use its ``wkt`` field, which ee.Projection and our patched
+    # _fetch_arcgis_export both accept.
+    _effective_crs = _resolve_effective_crs(col.first(), crs)
+
     viz_params = _complete_viz_params(viz_params, col, band_name=band_name, geometry=geometry)
 
     # Extract legend info (thematic or continuous)
@@ -1823,9 +1887,13 @@ def generate_gif(ee_obj, geometry, viz_params=None, band_name=None,
     if count == 0:
         return {"html": "<p>No images available for GIF.</p>", "bytes": b"", "format": "gif"}
 
-    # Always use the PIL path so we can return bytes
-    pil_frames, date_labels = _download_frames(col, geom if clip_to_geometry else geom.bounds(), viz_params,
-                                                dimensions, count, date_format)
+    # Pass the geometry directly as the region. The render CRS is
+    # controlled by ``crs`` (passed through to getThumbURL params inside
+    # _download_frames); ``crs=None`` lets EE choose (usually the source
+    # image's native projection).
+    pil_frames, date_labels = _download_frames(col, geom, viz_params,
+                                                dimensions, count, date_format,
+                                                render_crs=_effective_crs)
 
     if not pil_frames:
         return {"html": "<p>Failed to generate GIF frames.</p>", "bytes": b"", "format": "gif"}
@@ -1834,13 +1902,17 @@ def generate_gif(ee_obj, geometry, viz_params=None, band_name=None,
     if overlay_opacity is None:
         overlay_opacity = 0.8 if basemap is not None else 1.0
 
-    # Fetch basemap once for all frames (same geometry)
+    # Fetch basemap once for all frames (same geometry). Use the SAME
+    # effective CRS the render was requested in — otherwise the basemap
+    # arrives on a different grid and visibly slides out from under the
+    # data (which is the exact bug that used to appear when crs=None
+    # let getThumbURL pick Albers while _fetch_basemap defaulted to 4326).
     basemap_img = None
     bounds = _get_bounds_4326(geom)
     if basemap is not None:
         if bounds is not None and pil_frames:
             fw, fh = pil_frames[0].size
-            basemap_img = _fetch_basemap(bounds, fw, fh, basemap, crs=crs)
+            basemap_img = _fetch_basemap(bounds, fw, fh, basemap, crs=_effective_crs)
 
     # Auto-scale font size for date — larger than scalebar tick labels
     if date_font_size is None:
@@ -1975,9 +2047,11 @@ def generate_filmstrip(ee_obj, geometry, viz_params=None, band_name=None,
         output_path (str, optional): File path to save the PNG.  Parent
             directories are created automatically.
             Defaults to ``None`` (not saved).
-        crs (str, optional): CRS code (e.g. ``"EPSG:4326"``).
-            Applies ``setDefaultProjection`` to each frame.
-            Defaults to ``'EPSG:3857'``.
+        crs (str, optional): Output raster CRS for the rendered frames.
+            Passed to ``ee.Image.getThumbURL(crs=...)``. Defaults to
+            ``"EPSG:3857"`` (Web Mercator). Pass ``None`` to omit the
+            ``crs`` key entirely; EE then uses the source image's
+            native projection. (EE rejects a literal ``crs: null``.)
         transform (list, optional): Affine transform as a 6-element
             list.  Requires ``crs``.  Defaults to ``None``.
         scale (float, optional): Nominal pixel scale in meters.
@@ -2060,6 +2134,9 @@ def generate_filmstrip(ee_obj, geometry, viz_params=None, band_name=None,
     col = ee.ImageCollection(ee_obj)
     geom = _to_geometry(geometry)
 
+    # Resolve the "effective" render CRS — same helper as generate_gif.
+    _effective_crs = _resolve_effective_crs(col.first(), crs)
+
     viz_params = _complete_viz_params(viz_params, col, band_name=band_name, geometry=geometry)
 
     legend_info = None
@@ -2091,8 +2168,11 @@ def generate_filmstrip(ee_obj, geometry, viz_params=None, band_name=None,
     if count == 0:
         return {"html": "<p>No images available.</p>", "bytes": b"", "format": "png"}
 
-    pil_frames, date_labels = _download_frames(col, geom if clip_to_geometry else geom.bounds(), viz_params,
-                                                dimensions, count, date_format)
+    # See generate_gif — pass geom as-is; render CRS from _effective_crs
+    # so it matches the CRS the basemap is fetched in.
+    pil_frames, date_labels = _download_frames(col, geom, viz_params,
+                                                dimensions, count, date_format,
+                                                render_crs=_effective_crs)
 
     # Resolve overlay opacity: default 0.8 when basemap is set
     if overlay_opacity is None:
@@ -2103,7 +2183,7 @@ def generate_filmstrip(ee_obj, geometry, viz_params=None, band_name=None,
     if basemap is not None and pil_frames:
         if bounds is not None:
             fw, fh = pil_frames[0].size
-            basemap_img = _fetch_basemap(bounds, fw + 2 * _THUMB_PADDING, fh + 2 * _THUMB_PADDING, basemap, crs=crs)
+            basemap_img = _fetch_basemap(bounds, fw + 2 * _THUMB_PADDING, fh + 2 * _THUMB_PADDING, basemap, crs=_effective_crs)
             if basemap_img is not None:
                 pil_frames = [_composite_with_basemap(f, basemap_img, overlay_opacity) for f in pil_frames]
             else:
@@ -2393,7 +2473,7 @@ def _auto_date_format(timestamps_ms):
         return "YYYY"
 
 
-def _download_frames(col, geom, viz_params, dimensions, count, date_format=None):
+def _download_frames(col, geom, viz_params, dimensions, count, date_format=None, render_crs=None):
     """Download individual frames and extract date labels from a collection.
 
     Returns:
@@ -2404,6 +2484,8 @@ def _download_frames(col, geom, viz_params, dimensions, count, date_format=None)
         date_format: Format token (e.g. ``"YYYY-MM"``). When ``None`` or
             ``"auto"``, the format is chosen from the collection's temporal
             span — yearly for >5y, monthly for <5y, daily for <60d, etc.
+        render_crs: CRS code for the output raster. Passed as ``crs`` in
+            ``getThumbURL`` params so EE renders in this projection.
     """
     from datetime import datetime as dt
     from PIL import Image
@@ -2422,8 +2504,12 @@ def _download_frames(col, geom, viz_params, dimensions, count, date_format=None)
             date_labels.append("")
 
     img_list = col.toList(count)
+    # EE rejects ``crs: null`` outright, so omit the key when the caller
+    # passed ``render_crs=None`` — EE then uses the image's native.
     frame_params = {**viz_params, "dimensions": dimensions, "format": "png",
                     "region": geom}
+    if render_crs is not None:
+        frame_params["crs"] = render_crs
 
     def _get_frame(i):
         img = ee.Image(img_list.get(i))
@@ -2616,11 +2702,14 @@ def _build_legend_panel(class_names, class_palette, target_height,
     usable_h = target_height  # no top/bottom padding
     # Each row: swatch + gap; font size drives row height
     base_font = max(8, int(usable_h / n_classes * 0.6 * scale)) if n_classes > 0 else 10
-    # Cap at label_font_size from theme
-    base_font = min(base_font, _DEFAULT_LABEL_FONT_SIZE)
-
-    font = _get_font(base_font)
-    swatch_size = max(6, base_font)
+    # Cap font at the theme size for readability
+    font_size = min(base_font, _DEFAULT_LABEL_FONT_SIZE)
+    font = _get_font(font_size)
+    # Swatch scales with per-row vertical budget (not the font cap) so that
+    # dark palette colors on dark themes stay visible when there's room.
+    per_row_budget = usable_h / max(n_classes, 1)
+    swatch_size = max(font_size, min(int(per_row_budget * 0.6), font_size * 2))
+    swatch_size = max(6, swatch_size)
 
     # Measure text widths
     tmp_img = Image.new("RGB", (1, 1))
@@ -2685,20 +2774,20 @@ def _build_continuous_legend_panel(vmin, vmax, palette, target_height,
     """Build a vertical gradient colorbar panel for continuous data.
 
     Creates a PIL image with a smooth vertical gradient derived from
-    ``palette`` colours, with evenly-spaced numeric tick labels running
+    ``palette`` colors, with evenly-spaced numeric tick labels running
     from ``vmax`` (top) to ``vmin`` (bottom).
 
     Args:
         vmin (float): Minimum value at the bottom of the bar.
         vmax (float): Maximum value at the top of the bar.
-        palette (list[str]): Hex colour strings (without ``#``) defining
+        palette (list[str]): Hex color strings (without ``#``) defining
             the gradient from low to high.
         target_height (int): Pixel height the panel must match.
         band_name (str, optional): Band label drawn above the bar.
-        bg_color (str, optional): Background colour.  Defaults to
+        bg_color (str, optional): Background color.  Defaults to
             ``"black"``.
         scale (float, optional): Size multiplier.  Defaults to ``1.0``.
-        font_color (tuple or None, optional): ``(R, G, B)`` text colour.
+        font_color (tuple or None, optional): ``(R, G, B)`` text color.
         n_ticks (int, optional): Number of tick labels.  Defaults to 5.
 
     Returns:
@@ -2761,7 +2850,7 @@ def _build_continuous_legend_panel(vmin, vmax, palette, target_height,
     if band_name:
         draw.text((padding, padding), band_name, font=name_font, fill=text_color)
 
-    # Build gradient column — interpolate palette colours
+    # Build gradient column — interpolate palette colors
     pal_rgb = [_hex_to_rgb(c) for c in palette]
     n_colors = len(pal_rgb)
     for py in range(bar_h):
@@ -2923,15 +3012,15 @@ def _build_horizontal_legend(class_names, class_palette, width,
                              bg_color="black", font_color=None, scale=1.0):
     """Build a full-width horizontal legend with wrapping rows of swatches.
 
-    Arranges coloured swatches and labels in rows that fill the given
+    Arranges colored swatches and labels in rows that fill the given
     *width*, wrapping to additional rows as needed.
 
     Args:
         class_names (list[str]): Class display names.
-        class_palette (list[str]): Hex colour strings (no ``#``).
+        class_palette (list[str]): Hex color strings (no ``#``).
         width (int): Target width in pixels.
-        bg_color (str): Background colour.
-        font_color (tuple or None): ``(R, G, B)`` text colour.
+        bg_color (str): Background color.
+        font_color (tuple or None): ``(R, G, B)`` text color.
         scale (float): Size multiplier.
 
     Returns:
@@ -3190,7 +3279,7 @@ def generate_map_chart(
       per-feature donut chart
     - **ee.Image + multi-feature FC** with ``chart_type="scatter"``
       -> map of bounding region with sample points burned in +
-      scatter plot (optionally coloured by *thematic_band_name*)
+      scatter plot (optionally colored by *thematic_band_name*)
     - **ee.ImageCollection + any geometry** -> delegates to
       :func:`generate_map_chart_gif`, returning ``bytes`` (GIF format)
 
@@ -3204,13 +3293,16 @@ def generate_map_chart(
         band_name (str, optional): Band to visualize on the map.
         dimensions (int, optional): Map thumbnail width in pixels.
             Defaults to ``640``.
-        bg_color (str, optional): Background colour.  Dark theme when
+        bg_color (str, optional): Background color.  Dark theme when
             ``None``.
-        font_color (str or tuple, optional): Font colour override.
+        font_color (str or tuple, optional): Font color override.
         font_outline_color (str or tuple, optional): Font outline.
         output_path (str, optional): Save output to this path.
-        crs (str, optional): Output CRS (e.g. ``"EPSG:5070"``).
-            Defaults to ``"EPSG:3857"``.
+        crs (str, optional): Output raster CRS. Passed to
+            ``ee.Image.getThumbURL(crs=...)``. Defaults to
+            ``"EPSG:3857"``. Pass ``None`` to omit the ``crs`` key
+            (EE then uses the image's native projection; EE rejects a
+            literal ``crs: null``).
         transform (list, optional): CRS transform.
         scale (int, optional): Pixel scale in metres.
         margin (int, optional): Margin around the output in pixels.
@@ -3250,7 +3342,7 @@ def generate_map_chart(
             thumbnail.  Defaults to ``True``.
         title_font_size (int, optional): Title font size.  Default 16.
         label_font_size (int, optional): Label font size.  Default 12.
-        geometry_outline_color (str, optional): Boundary colour.
+        geometry_outline_color (str, optional): Boundary color.
         geometry_fill_color (str, optional): Boundary fill (hex+alpha).
         geometry_outline_weight (int, optional): Boundary width.
         clip_to_geometry (bool, optional): Mask data outside boundary.
@@ -3262,7 +3354,7 @@ def generate_map_chart(
         band_names (list[str], optional): Bands for scatter x/y axes.
             Uses first two image bands when ``None``.
         thematic_band_name (str, optional): Thematic band name for
-            colouring scatter points by class.  The image must carry
+            coloring scatter points by class.  The image must carry
             ``{band}_class_values/names/palette`` properties.
         opacity (float, optional): Point opacity for scatter charts.
             Defaults to ``0.7``.
@@ -3363,10 +3455,11 @@ def generate_map_chart(
         if thumb_width:
             thumb_kwargs["thumb_width"] = thumb_width
 
-    # For scatter: use FC bounds for the map, burn in points as geometry
+    # For scatter: use the FC bounds for the map, burn in points as geometry.
     _map_geometry = geometry
     if _is_scatter and is_multi:
-        _map_geometry = ee.FeatureCollection(geometry).geometry().bounds()
+        _fc_full_geom = ee.FeatureCollection(geometry).geometry()
+        _map_geometry = _fc_full_geom.bounds(100, crs) if crs is not None else _fc_full_geom.bounds()
         # Burn in the sample points on the map
         thumb_kwargs["burn_in_geometry"] = True
         thumb_kwargs["clip_to_geometry"] = False
@@ -3389,13 +3482,12 @@ def generate_map_chart(
         # Pass pre-visualized image, skip further viz
         thumb_kwargs["viz_params"] = {"min": 0, "max": 255}
         thumb_kwargs["burn_in_geometry"] = False  # already painted
-        thumb_result = generate_thumbs(_img, _map_geometry, **thumb_kwargs)
+        _thumb_ee_obj = _img
     else:
-        thumb_result = generate_thumbs(ee_obj, _map_geometry, **thumb_kwargs)
+        _thumb_ee_obj = ee_obj
 
-    map_img = Image.open(io.BytesIO(thumb_result["bytes"])).convert("RGBA")
-
-    # --- Generate the chart ---
+    # --- Build chart kwargs (fast — just Python) so both branches can
+    #     kick off in parallel below. ---
     chart_kwargs = dict(
         scale=chart_scale,
         area_format=area_format,
@@ -3403,8 +3495,17 @@ def generate_map_chart(
         opacity=opacity,
     )
 
-    # For thematic data, suppress chart legend since it's on the thumb
-    if _is_thematic and burn_in_legend:
+    # For thematic data, suppress chart legend since it's on the thumb.
+    # EXCEPTION: scatter charts use ``thematic_band_name`` to COLOR
+    # points, but the map thumb shows the two continuous bands
+    # (``band_names``), not the thematic band — so the thumb has no
+    # class legend to piggyback on. Keep the chart legend visible for
+    # scatter regardless of ``_is_thematic``.
+    _chart_type_lc = (chart_type or "").lower().strip()
+    _suppress_chart_legend = (
+        _is_thematic and burn_in_legend and _chart_type_lc != "scatter"
+    )
+    if _suppress_chart_legend:
         chart_kwargs["legend_position"] = {"visible": False}
     else:
         chart_kwargs["legend_position"] = legend_position
@@ -3423,36 +3524,81 @@ def generate_map_chart(
         chart_kwargs["feature_label"] = feature_label
     chart_kwargs["columns"] = columns
 
-    result = cl.summarize_and_chart(ee_obj, geometry, **chart_kwargs)
+    # --- Run the two slow EE-bound steps in parallel ---
+    # ``generate_thumbs`` and ``cl.summarize_and_chart`` are the two
+    # dominant wall-clock components (each 5-30 s of Google-hosted EE
+    # work). They're independent — the chart doesn't need thumb bytes
+    # and the thumb doesn't need chart data — so ThreadPoolExecutor
+    # halves the total time. EE calls are HTTP I/O so the GIL releases
+    # during network wait; two workers is enough.
+    print(f"[generate_map_chart] starting thumb thread "
+          f"(dimensions={dimensions}, basemap={basemap!r}) ...")
+    print(f"[generate_map_chart] starting chart thread "
+          f"(chart_type={chart_type!r}, chart_scale={chart_scale}m, "
+          f"area_format={area_format!r}) ...")
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=2, thread_name_prefix="gmc",
+    ) as _pool:
+        _fut_thumb = _pool.submit(
+            generate_thumbs, _thumb_ee_obj, _map_geometry, **thumb_kwargs
+        )
+        _fut_chart = _pool.submit(
+            cl.summarize_and_chart, ee_obj, geometry, **chart_kwargs
+        )
+        # Report completion order — helps operators see which side is
+        # the bottleneck for their workload. Whichever future finishes
+        # first prints first.
+        for _fut in concurrent.futures.as_completed(
+            (_fut_thumb, _fut_chart)
+        ):
+            if _fut is _fut_thumb:
+                print("[generate_map_chart] thumb thread done")
+            else:
+                print("[generate_map_chart] chart thread done")
+        # Collect results (both are already resolved at this point).
+        thumb_result = _fut_thumb.result()
+        result = _fut_chart.result()
 
-    # Unpack (varies by chart type)
-    if isinstance(result, tuple) and len(result) == 3:
-        df, fig, extra = result  # sankey
-    elif isinstance(result, tuple):
-        df, fig = result
-    else:
-        df, fig = result, None
+    map_img = Image.open(io.BytesIO(thumb_result["bytes"])).convert("RGBA")
+
+    # summarize_and_chart returns {"df": ..., "chart": ..., ["matrix": ...]}
+    df = result.get("df")
+    fig = result.get("chart")
 
     if fig is None:
         thumb_bytes = _pil_to_png_bytes(map_img, bg_color)
         return {"html": "", "bytes": thumb_bytes, "format": "png", "df": df, "fig": None}
 
-    # Suppress chart legend for thematic (already on thumb)
-    if _is_thematic and burn_in_legend:
+    # Suppress chart legend for thematic (already on thumb) —
+    # same scatter exception as above.
+    if _suppress_chart_legend:
         fig.update_layout(showlegend=False)
 
     # Remove chart title — the combined output has its own title strip
     fig.update_layout(title=None)
 
     # --- Render chart to PNG ---
+    #
+    # Default aspect ratio is 4:3 (width:height). Prior default was
+    # "match map height", which yielded 4:5-ish tall/narrow charts when
+    # the map was square — bar charts looked cramped and scatter plots
+    # looked squashed vertically. 4:3 is a widely-used aesthetic default
+    # for standalone plots (matplotlib, seaborn, plotly all lean this way).
+    # The caller can still pass ``chart_height`` explicitly to override.
     mw, mh = map_img.size
-    if chart_height is None:
-        chart_height = mh  # match map height for side-by-side
-
+    _CHART_ASPECT = 4.0 / 3.0  # width / height
     if layout == "side-by-side":
-        chart_width = max(400, int(mw * 0.8))
+        # Align chart to map height so the side-by-side row lines up
+        # visually. Compute chart_width from the 4:3 ratio.
+        if chart_height is None:
+            chart_height = mh
+        chart_width = max(400, int(chart_height * _CHART_ASPECT))
     else:
+        # Stacked: align chart WIDTH to map width so the two panels stack
+        # cleanly. Compute chart_height from the 4:3 ratio.
         chart_width = mw
+        if chart_height is None:
+            chart_height = max(300, int(chart_width / _CHART_ASPECT))
 
     chart_png_bytes = fig.to_image(format="png", width=chart_width, height=chart_height)
     chart_img = Image.open(io.BytesIO(chart_png_bytes)).convert("RGBA")
@@ -3577,9 +3723,9 @@ def generate_map_chart_gif(
         date_format (str, optional): Date format for labels (e.g.
             ``"YYYY-MM"``).  Defaults to ``None`` — auto-detect from
             the collection's temporal span.
-        bg_color: Background colour.
-        font_color: Font colour.
-        font_outline_color: Font outline colour.
+        bg_color: Background color.
+        font_color: Font color.
+        font_outline_color: Font outline color.
         output_path (str, optional): Save GIF to this path.
         crs, transform, scale: Projection params for thumbnails.
         margin (int): Margin in pixels.
@@ -3635,13 +3781,22 @@ def generate_map_chart_gif(
             label_font_size=label_font_size,
         )
 
+    # Default date_format to "YYYY" when the caller didn't pick one.
+    # Passing ``None`` all the way through to charts.prepare_for_reduction
+    # makes EE emit full ISO datetimes ("2020-01-01T00:00:00") as
+    # per-image labels; the ":" and "-" in those strings break the
+    # ``label + "----" + band`` band-name construction that follows
+    # (EE rejects colons in band names). "YYYY" gives clean labels
+    # like "2020" that survive band-name validation.
+    _date_format = date_format or "YYYY"
+
     def _do_stats():
         return cl.zonal_stats(
             ee_obj, geometry,
             band_names=[band_name] if band_name else None,
             scale=chart_scale,
             area_format=area_format,
-            date_format=date_format,
+            date_format=_date_format,
             include_masked_area=include_masked_area,
         )
 
@@ -4063,13 +4218,20 @@ def get_thumb_urls_by_feature_parallel(ee_obj, features, viz_params=None,
         # fills to the basemap edges
         _padded_dims = dimensions + 2 * _THUMB_PADDING
         _bounds = _get_bounds_4326(geom)
+        # Render CRS comes from burn_in_params when the caller supplied
+        # one (multi-feature grids pass it through). None → we omit the
+        # ``crs`` key (EE rejects a literal null and falls back to the
+        # image's native projection otherwise).
+        _crs = (burn_in_params or {}).get("crs")
         if _bounds is not None:
             _expanded = _expand_bounds_for_padding(_bounds, dimensions)
             _ee_region = ee.Geometry.Rectangle(_expanded, proj=ee.Projection("EPSG:4326"), evenOdd=False)
         else:
-            _ee_region = geom if clip_to_geometry else geom.bounds()
+            _ee_region = geom
         params = {**_vp, "dimensions": _padded_dims, "format": "png",
                   "region": _ee_region}
+        if _crs is not None:
+            params["crs"] = _crs
         url = _out_img.getThumbURL(params)
         return {"label": label, "url": url, "geometry": geom}
 
@@ -4303,9 +4465,11 @@ def generate_thumbs(ee_obj, geometry, viz_params=None, band_name=None,
         output_path (str, optional): File path to save the PNG.  Parent
             directories are created automatically.
             Defaults to ``None`` (not saved).
-        crs (str, optional): CRS code (e.g. ``"EPSG:4326"``).
-            Applies ``setDefaultProjection`` to the image.
-            Defaults to ``'EPSG:3857'``.
+        crs (str, optional): Output raster CRS. Passed to
+            ``ee.Image.getThumbURL(crs=...)``. Defaults to
+            ``"EPSG:3857"`` (Web Mercator). Pass ``None`` to omit the
+            ``crs`` key entirely; EE then uses the source image's
+            native projection. (EE rejects a literal ``crs: null``.)
         transform (list, optional): Affine transform as a 6-element
             list.  Requires ``crs``.  Defaults to ``None``.
         scale (float, optional): Nominal pixel scale in meters.
@@ -4344,9 +4508,9 @@ def generate_thumbs(ee_obj, geometry, viz_params=None, band_name=None,
             outline onto the image using ``FeatureCollection.style()``.
             Defaults to ``False``.
         geometry_outline_color (tuple or None, optional): ``(R, G, B)``
-            colour for the boundary outline.  When ``None``, auto-detected
+            color for the boundary outline.  When ``None``, auto-detected
             from the basemap luminance.  Defaults to ``None``.
-        geometry_fill_color (str or None, optional): CSS fill colour for
+        geometry_fill_color (str or None, optional): CSS fill color for
             the geometry interior (e.g. ``"33333366"``).  Used for
             geometry-only thumbnails (``ee_obj=None``).
             Defaults to ``None``.
@@ -4404,6 +4568,9 @@ def generate_thumbs(ee_obj, geometry, viz_params=None, band_name=None,
         burn_in_geometry = True
     else:
         img = _to_image(ee_obj)
+
+    # Resolve the "effective" render CRS — same helper as generate_gif.
+    _effective_crs = _resolve_effective_crs(None if _is_geom_only else img, crs)
     img = _apply_projection(img, crs, transform, scale)
 
     if not _is_geom_only:
@@ -4505,21 +4672,25 @@ def generate_thumbs(ee_obj, geometry, viz_params=None, band_name=None,
         bounds = _get_bounds_4326(geom)
         padded_dims = dimensions + 2 * _THUMB_PADDING
 
-        # Expand region so EE data fills to basemap edges (including padding margin)
+        # Expand region so EE data fills to basemap edges (including padding margin).
+        # ``crs=None`` means "let EE pick"; we omit the key rather than
+        # sending ``crs: null`` (which EE rejects). Use the effective CRS
+        # (resolved from source projection when caller passed None) so
+        # image + basemap end up on the same grid.
+        _crs_kw = {"crs": _effective_crs} if _effective_crs is not None else {}
         if basemap is not None and bounds is not None:
             expanded = _expand_bounds_for_padding(bounds, dimensions)
             ee_region = ee.Geometry.Rectangle(expanded, proj=ee.Projection("EPSG:4326"), evenOdd=False)
             _out_img = img.clip(geom) if clip_to_geometry else img
             url = _out_img.getThumbURL({
                 **viz_params, "dimensions": padded_dims,
-                "format": "png", "region": ee_region,
+                "format": "png", "region": ee_region, **_crs_kw,
             })
         else:
-            region = geom if clip_to_geometry else geom.bounds()
             _out_img = img.clip(geom) if clip_to_geometry else img
             url = _out_img.getThumbURL({
                 **viz_params, "dimensions": padded_dims,
-                "format": "png", "region": region,
+                "format": "png", "region": geom, **_crs_kw,
             })
 
         data = download_thumb(url)
@@ -4527,8 +4698,10 @@ def generate_thumbs(ee_obj, geometry, viz_params=None, band_name=None,
 
         # Composite basemap underneath or add blank padding
         if basemap is not None and bounds is not None:
-            # Basemap at same expanded extent and size
-            basemap_img = _fetch_basemap(bounds, padded_dims, padded_dims, basemap, crs=crs)
+            # Basemap fetched in the SAME effective CRS as the image
+            # render — otherwise the basemap slides out from under the
+            # data whenever crs=None resolves to a non-3857 native.
+            basemap_img = _fetch_basemap(bounds, padded_dims, padded_dims, basemap, crs=_effective_crs)
             if basemap_img is not None:
                 frame = _composite_with_basemap(frame, basemap_img, overlay_opacity)
 
@@ -4884,7 +5057,11 @@ def _build_thumb_grid_image(thumb_results, columns=3, thumb_width=300,
             _grid_kw2["rect_color"] = inset_rect_color
         if inset_rect_fill_color is not None:
             _grid_kw2["rect_fill_color"] = inset_rect_fill_color
-        inset_img = _build_inset_image(overview_bounds, size=max(60, _inset_display), inset_basemap=_ib, **_grid_kw2)
+        # Pass ALL per-feature bounds (not just the union) so each tile
+        # gets its own outlined polygon in the inset overview. When only
+        # one feature is present the list collapses to a single-element
+        # list and the inset looks identical to the pre-list behavior.
+        inset_img = _build_inset_image(all_bounds, size=max(60, _inset_display), inset_basemap=_ib, **_grid_kw2)
         if inset_img is not None:
             src_w, src_h = inset_img.size
             aspect = src_w / src_h if src_h > 0 else 1.0
@@ -4962,18 +5139,44 @@ def _is_multi_feature(geometry):
 
 
 def _mosaic_by_date(col):
-    """Mosaic a tiled ImageCollection by unique date.
+    """Mosaic a tiled ImageCollection by unique date, preserving projection.
 
     Groups images by ``system:time_start`` (truncated to day) and mosaics
-    each group into a single image.  This handles tiled datasets like LCMS
+    each group into a single image. This handles tiled datasets like LCMS
     that have multiple spatial tiles per time step.
+
+    ``.mosaic()`` drops per-tile projection info — the mosaic result
+    reports the WGS84 default (~111 km scale) instead of the source's
+    native grid. That silently breaks downstream ``crs=None`` renders
+    (EE picks the mosaic's degenerate WGS84 projection instead of the
+    LCMS-native Albers). We restore it here by grabbing the projection
+    from a source tile before the mosaic and calling
+    ``.setDefaultProjection(wkt, transform)`` on every mosaic'd frame.
 
     Args:
         col: ``ee.ImageCollection``.
 
     Returns:
-        ee.ImageCollection: One image per unique date, sorted by time.
+        ee.ImageCollection: One image per unique date, sorted by time,
+        with the source's native projection preserved.
     """
+    # Snapshot the source projection ONCE (one getInfo round-trip per
+    # call — cheap). We stamp it onto every mosaic frame via
+    # setDefaultProjection so downstream ``crs=None`` renders see the
+    # real projection instead of the WGS84 default that .mosaic() would
+    # otherwise leave behind. Passing the WKT + transform client-side
+    # matches the LCMS JS docs example and avoids the "Parameter 'crs'
+    # is required and may not be null" error you get if you try to feed
+    # ``setDefaultProjection(crs=<server-side ee.String>)`` inside a
+    # mapped function.
+    try:
+        _src_proj_info = col.first().projection().getInfo() or {}
+        _src_wkt = _src_proj_info.get("wkt") or _src_proj_info.get("crs")
+        _src_transform = _src_proj_info.get("transform")
+    except Exception:
+        _src_wkt = None
+        _src_transform = None
+
     # Get distinct dates
     def _add_date_millis(img):
         d = ee.Date(img.get("system:time_start"))
@@ -4988,9 +5191,14 @@ def _mosaic_by_date(col):
         date_millis = ee.Number(date_millis)
         filtered = col.filter(ee.Filter.eq("date_millis", date_millis))
         mosaic = filtered.mosaic()
+        # Restore projection lost during .mosaic(). Only stamp when we
+        # actually captured a projection above — some inputs (already-
+        # composited images, in-memory constructions) don't have one.
+        if _src_wkt:
+            mosaic = mosaic.setDefaultProjection(
+                crs=_src_wkt, crsTransform=_src_transform,
+            )
         return mosaic.set("system:time_start", date_millis) \
                       .copyProperties(filtered.first())
 
     return ee.ImageCollection(distinct_dates.map(_mosaic_date))
-
-clip_to_geometry=True,

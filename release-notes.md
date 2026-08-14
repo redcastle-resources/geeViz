@@ -1,5 +1,136 @@
 # geeViz Release Notes
 
+## 2026.8.1 — August 13, 2026
+
+### geeViz.eeAuth
+
+- **New workload-tag library primitives.** `geeViz.eeAuth.tags` now
+  ships:
+  - `mint_workload_tag(parts: dict, *, secret: str) -> "wl_<hex>"` —
+    deterministic short hash of a canonicalised parts dict. Same
+    parts + secret always yield the same tag, so re-mints collapse
+    to one row in whatever store you pair it with.
+  - `TagStore` Protocol with `put(tag, parts)` / `lookup(tag) -> parts`.
+  - `InMemoryTagStore` (dict, thread-safe) and `SQLiteTagStore`
+    (file-backed at `~/.geeViz/workload_tags.db`, survives kernel
+    restart, Windows-safe via explicit connection close).
+  - `default_tag_store()` — lazy SQLite singleton for standalone use.
+- **New `eeCreds` methods.** All in one call — mint + store + set on
+  the EE SDK so subsequent `.getInfo()` / `.getMapId()` calls carry
+  the tag:
+  - `eeCreds.setWorkloadTag(**parts) -> str`
+  - `eeCreds.lookupWorkloadTag(tag) -> dict | None`
+  - `eeCreds.setTagStore(store)` / `getTagStore()`
+  - `eeCreds.setTagSecret(secret)`
+  - `eeCreds.clearWorkloadTag()`
+  - `eeCreds.restart(mode="detached")` — stop + `ensure_started`.
+  - `eeCreds.stop()` now shuts down BOTH the in-process proxy AND
+    any detached subprocess, and calls `ee.Reset()` so subsequent
+    EE calls fail fast with a clear "not initialized" error instead
+    of hanging on the dead proxy URL.
+- **Default builder respects client-set tags.** The proxy's
+  `_default_workload_tag_builder` now honours a `workloadTag`
+  already in `request.query_params` (from `ee.data.setWorkloadTag`
+  on the Python side or baked into a `getMapId` tile URL) rather
+  than blindly overwriting it. When no client tag is present, the
+  fallback mints reversible richer parts (`{tenant, cred, pid,
+  src=proxy-default}`) and stores them so `lookupWorkloadTag()`
+  works for auto-minted tags too.
+- **Sensible SDK default installed at proxy start.** `eeCreds.start()`
+  and `ensure_started()` install
+  `ee.data.setDefaultWorkloadTag("geeviz__<tenant>")` when no default
+  is set — untagged EE calls now surface as `geeviz__<tenant>` in
+  Cloud Monitoring instead of an anonymous empty bucket.
+- **Proxy modes: canonical names.** `attached` / `attached_strict` /
+  `detached` / `legacy`. Old names (`auto`, `proxy`) still work as
+  soft-deprecated aliases.
+- **`ensure_started` reports actual mode.** Previously reused an
+  in-process proxy but claimed `mode="attached"` when the underlying
+  proxy was actually a detached subprocess. Now reports the actual
+  mode via a new `_proxy_mode` singleton attribute — critical for
+  `Map.view()` deciding whether to spin up its own daemon HTTP
+  server. Also handles the reverse: an explicit `mode="attached"`
+  request while a detached subprocess is running now correctly kills
+  the subprocess and switches modes (previously the shortcut locked
+  the caller into detached).
+- **Auto-respawn on port change.** `ensure_started(proxy_port=N)`
+  now respawns the detached subprocess when the existing one is on a
+  different port. `Map.view()` feeds `Map.port` through so
+  `Map.port = 1234` with detached mode auto-respawns rather than
+  silently attaching to the old port.
+
+### geeViz.eeAuth.monitoring (new)
+
+- **New library module** for polling Cloud Monitoring EE usage. One
+  reusable primitive:
+  - `EEUsageMonitor(project, cost_per_eecu_hour=0.40)` — thread-safe
+    client with a lazy singleton `MetricServiceClient` (~200-500ms
+    saved per poll).
+  - `monitor.poll(start_time, end_time=None, grouping_seconds=3600,
+    snap_to=True) -> list[dict]` returning one row per
+    `(workload_tag, bucket_start)` with `eecu_seconds`, `eecu_hours`,
+    `cost_usd`. `snap_to=True` (default) floors/ceils to multiples
+    of `grouping_seconds` from the Unix epoch so repeated polls
+    return stable buckets. Any positive `grouping_seconds` works
+    (60=minute, 3600=hour, 86400=day, 900=15min, etc.).
+  - Return-key rename: `hour_bucket` → `bucket_start` (accurate now
+    that grouping is variable).
+
+### geeViz.geeView
+
+- **Per-layer workload tagging in `Map.view()`.** `addLayer`,
+  `addTimeLapse`, `addSelectLayer`, `addTileLayer`,
+  `addDynamicMapService`, and `addAreaChartLayer` now capture the
+  Python-side `ee.data.getWorkloadTag()` at add-time and stash it
+  on the layer's `idDict`. `_build_run_js` emits interleaved
+  `ee.data.setWorkloadTag(<tag>)` / `resetWorkloadTag()` in the
+  generated `runGeeViz()` so each layer's getMapId (and downstream
+  tile fetches) attribute to that layer's tag. Also emits
+  `setDefaultWorkloadTag(<Python default>)` at the top so browser-
+  side compute (area charts, click-query, elevation) inherits the
+  Python-side default. No changes to `lcms-viewer.min.js` — the
+  emit runs before the viewer JS's own `setDefaultWorkloadTag`.
+- **`Map.port` is now a property + deprecated for detached mode.**
+  Setting `Map.port` in attached mode still binds the local HTTP
+  daemon on that port. In detached mode (the default) the browser
+  talks to the subprocess directly; the port is fed through as
+  `ensure_started(proxy_port=...)` which spawns/respawns the
+  subprocess on that port.
+- **Cleaner terminal output.** Removed the redundant "geeViz server
+  at http://..." line before `geeView URL:` — one URL, less noise.
+
+### geeViz.mcp
+
+- **`search_geeviz` renamed to `search_codebase`.** Doc references
+  updated across `mcp.rst`, `overview.rst`, and the shipped MCP
+  diagram HTML.
+
+### geeViz.examples
+
+- **New `eeUsageMonitoring.ipynb`** — 5 examples covering:
+  0. Baseline (no tags — sees the new `geeviz__<tenant>` default)
+  1. `ee.data.setWorkloadTag("literal-string")`
+  2. `eeCreds.setWorkloadTag(**parts)` (reversible via `TagStore`)
+  3. Custom `workload_tag_builder=...` on `eeCreds.start()` (agent
+     framework pattern)
+  4. Multi-tenant — `addCreds(name=...)` × 3 + per-tenant rollup
+- **`geeViz_geeMap_comparison.py`** now uses
+  `USDOS/LSIB_SIMPLE/2017` for the Switzerland outline instead of
+  a manually-downloaded GADM shapefile — works out-of-the-box.
+- **`WeatherNextTimeLapse.py` / `weather_forecast_examples.ipynb`**
+  preflight-check WeatherNext access and exit-with-hint if the
+  calling credential can't read the gated dataset (was raising a
+  cryptic `List.get: List is empty` deep in the render pipeline).
+- **`areaChart_examples.ipynb`** — 10 sankey-cell fixes: the sankey
+  `chart` field is already a rendered HTML string (per the 2026.6
+  contract), so `display(HTML(sankey_fig))` — not
+  `.to_html(...)` on top.
+- **`esri_integration.ipynb`** — None-guard `r['url'][:60]` slice
+  before the "no service URL, skipping" check.
+- **`report_generation_examples.ipynb`** — wrap `.copyProperties()`
+  chain in `ee.Image(...)` so `add_section` gets an `ee.Image`
+  instead of an `ee.Element`.
+
 ## 2026.7.4 — July 16, 2026
 
 ### geeViz.outputLib._basemaps

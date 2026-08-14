@@ -10,10 +10,11 @@ The core problem is that **Earth Engine is a live, authenticated cloud platform*
 
 | Task | Vanilla coding agent (web search, grep, file read) | geeViz MCP server |
 |------|-----------------------------------------------------|-------------------|
-| **Look up a geeViz function signature** | Grep source files or search the web -- may find outdated docs, wrong version, or miss internal helpers | `search_geeviz(name="func")` uses AST inspection on the _installed_ code -- always returns the real signature and docstring |
-| **Find which module has a function** | `grep -r` across all .py files, manually parse results | `search_geeviz` searches every geeViz module in one call, or lists functions in a specific module -- structured results, no runtime imports |
-| **Discover example scripts** | `find` + `cat` and guess the filename | `search_geeviz(module="examples")` lists example scripts; add `name="GFSTimeLapse"` to get the full source |
-| **Look up reference data (band mappings, viz params, projections)** | Grep for the constants and hope you found the current version | `search_geeviz(module="getImagesLib", name="common_projections")` returns the live value; same tool serves signatures AND reference dicts |
+| **Look up a geeViz function signature** | Grep source files or search the web -- may find outdated docs, wrong version, or miss internal helpers | `search_codebase(name="func")` uses AST inspection on the _installed_ code -- always returns the real signature and docstring |
+| **Find which module has a function** | `grep -r` across all .py files, manually parse results | `search_codebase` searches every geeViz module in one call, or lists functions in a specific module -- structured results, no runtime imports |
+| **Discover example scripts** | `find` + `cat` and guess the filename | `search_codebase(module="examples")` lists example scripts; add `name="GFSTimeLapse"` to get the full source |
+| **Look up reference data (band mappings, viz params, projections)** | Grep for the constants and hope you found the current version | `search_codebase(module="getImagesLib", name="common_projections")` returns the live value; same tool serves signatures AND reference dicts |
+| **Look up an EE / pandas / numpy signature** | Web search or read auto-generated docs | `search_codebase(name="ee.Image.reduceRegion")` / `name="pd.DataFrame.to_markdown"` — same tool, same shape of result, any module the REPL has loaded |
 | **Check what bands a dataset has** | Search the GEE data catalog website, parse HTML, hope the page is current | `inspect_asset` calls `ee.data.getInfo()` on the _live_ asset -- returns real bands, CRS, scale, date range, properties |
 | **Get image count and date range for a filtered collection** | Write and run a script with multiple `getInfo()` calls | `inspect_asset` with optional start_date/end_date/region_var returns count, date range, band info in one structured call |
 | **Search for GEE datasets by keyword** | Web search, browse the GEE catalog, read blog posts | `search_datasets` searches 700+ official and community datasets offline (24h-cached catalog), returns ranked results with asset IDs |
@@ -24,8 +25,7 @@ The core problem is that **Earth Engine is a live, authenticated cloud platform*
 | **Visualize results on a map** | Write code to call `Map.view()`, tell the user to open a browser | `map_control(action="view")` opens the geeView map and returns the URL directly |
 | **Get a visual preview of an image** | Write a `getThumbURL` script, fetch the image, save to disk | `tl.generate_thumbs()` in `run_code` produces publication-ready PNG thumbnails with basemap, legend, and scalebar |
 | **Sample pixel values or chart zonal statistics** | Write `reduceRegion` scripts, detect thematic vs continuous data, choose reducers, build Plotly figures manually | `cl.summarize_and_chart()` in `run_code` handles point sampling, time series, bar charts, and Sankey diagrams in one call -- auto-detects data type, picks the right reducer, and returns a DataFrame + chart |
-| **Geocode a place name to a GEE geometry** | Call a geocoding API, manually construct `ee.Geometry` | `geeviz_search_places` returns coordinates and place details; `sal` in `run_code` provides boundary polygons for counties, states, forests, protected areas, etc. |
-| **See what a place looks like on the ground** | Call the Street View API manually, handle keys, decode responses | `get_streetview` returns a Street View image URL for any lat/lon -- useful for ground-truthing thematic classifications |
+| **Geocode a place name to a GEE geometry** | Call a geocoding API, manually construct `ee.Geometry` | `sal` in `run_code` provides boundary polygons for counties, states, forests, protected areas; `gm.geocode()` / `gm.search_places()` for arbitrary addresses/POIs when the optional Google Maps dep is installed |
 | **Export an image to an asset** | Write export code, look up `pyramidingPolicy` options, handle overwrite | `export_image(destination="asset")` wraps geeViz's exporter with validation, overwrite support, and pyramiding policy |
 | **Export to Drive or Cloud Storage** | Write export boilerplate, remember required parameters | `export_image(destination="drive"\|"cloud")` handles all params with sensible defaults (COG enabled, etc.) |
 | **Manage assets (copy, move, delete, permissions)** | Write 5-10 lines of `ee.data.*` calls per operation | `manage_asset(action="copy"\|"move"\|"delete"\|"create"\|"update_acl")` -- one call with validation |
@@ -94,12 +94,12 @@ Ensure `cwd` is the folder that contains the `geeViz` package so `python -m geeV
 
 ## Tools
 
-The MCP surface is **12 tools** organized by role. Charting, thumbnails, reports, and geocoding are accessed via `run_code` using pre-loaded aliases (`cl`, `tl`, `rl`, `gm`) rather than dedicated tools — one execution primitive plus a rich REPL namespace beats a proliferation of narrow wrappers.
+The MCP surface is organized by role. Charting, thumbnails, reports, geocoding, and street-view / static-map imagery are accessed via `run_code` using pre-loaded aliases (`cl`, `tl`, `rl`, `gm`) rather than dedicated tools — one execution primitive plus a rich REPL namespace beats a proliferation of narrow wrappers.
 
 ### Discover & inspect
 | Tool | Description |
 |------|-------------|
-| **`search_geeviz`** | Unified search across every geeViz module. Signature lookup, module listing, source dumps, reference-dict values, and example scripts all in one tool. Use `search_geeviz(query="landsat")` for broad search, `search_geeviz(name="simpleMask")` for exact lookup with full docstring, `search_geeviz(module="getImagesLib")` to list a module's contents, `search_geeviz(module="examples", name="GFSTimeLapse")` for a runnable example. AST-based — no imports until a runtime value is actually requested. |
+| **`search_codebase`** | Unified search across every geeViz module — plus any module already loaded in the REPL (`ee`, `pd`/`pandas`, `np`/`numpy`, `gm` if the optional Google Maps dep is installed, anything a prior `run_code` block imported). Signature lookup, module listing, reference-dict values, and example-script source all in one tool. `search_codebase(query="landsat")` for broad search, `search_codebase(name="simpleMask")` for exact lookup with full docstring, `search_codebase(module="getImagesLib")` to list a module's contents, `search_codebase(module="examples", name="GFSTimeLapse")` for a runnable example, `search_codebase(name="ee.Image.reduceRegion")` / `name="pd.DataFrame.to_markdown"` for EE / pandas members. AST-based on geeViz modules — no imports fire until a runtime value is actually requested. |
 | **`inspect_asset`** | Get metadata for any GEE asset — bands, CRS, scale, date range, catalog info (title, provider, keywords, viz params), properties. Uses 10s timeout per query; never hangs on large collections. |
 | **`search_datasets`** | Search GEE dataset catalogs by keyword. Crawls official STAC + community catalogs (cached 24h). Returns ranked results with asset IDs. |
 | **`env_info`** | Get versions, REPL namespace, or project info (action="version"\|"namespace"\|"project"). Use `action="namespace"` to see all variables defined by prior `run_code` calls. |
@@ -107,16 +107,14 @@ The MCP surface is **12 tools** organized by role. Charting, thumbnails, reports
 ### Execute
 | Tool | Description |
 |------|-------------|
-| **`run_code`** | Execute Python/GEE code in a persistent REPL (like Jupyter). Variables persist across calls. Pre-populated with `ee`, `Map`, `gv` (geeView), `gil` (getImagesLib), `sal` (getSummaryAreasLib), `edw` (edwLib), `gm` (googleMapsLib), `palettes` (geePalettes), `cl` (outputLib.charts), `tl` (outputLib.thumbs), `rl` (outputLib.reports), `pd`/`pandas`, `np`/`numpy`, and `save_file`. See "Persistent REPL namespace" below for the full list. Timeout tracks inactivity (not total time). Errors are returned inline with traceback. |
-| **`save_session`** | Save the current REPL history as a `.py` or `.ipynb` file. |
+| **`run_code`** | Execute Python/GEE code in a persistent REPL (like Jupyter). Variables persist across calls. Pre-populated with `ee`, `Map`, `gv` (geeView), `gil` (getImagesLib), `sal` (getSummaryAreasLib), `edw` (edwLib), `palettes` (geePalettes), `cl` (outputLib.charts), `tl` (outputLib.thumbs), `rl` (outputLib.reports), `pd`/`pandas`, `np`/`numpy`, `save_file`, and `gm` (googleMapsLib) when its optional deps are installed. See "Persistent REPL namespace" below for the full list. Timeout tracks inactivity (not total time). Errors are returned inline with traceback. |
+| **`save_session`** | Save the current REPL history as a `.py` or `.ipynb`. Backward slicer keeps only the blocks that contribute to the final successful state (superseded assignments and unused variables are dropped); pass `sliced=False` for the raw history. |
 
 ### Visualize & preview
 | Tool | Description |
 |------|-------------|
-| **`map_control`** | View, list layers, clear, or test the interactive map viewer. Actions: `view` (renders a self-contained HTML file and opens it in the browser), `layers` (structured list of active layers), `layer_names` (just the names), `clear` (drop all layers), `test_layers` (validates every layer with parallel `getMapId()` calls — ~1-2s quality gate before `view`), `test_view` (captures a PNG via headless Chrome CDP for visual/JS console checks). |
-| **`view_output`** | Return the current map viewer URL and read back the contents of files the REPL has produced (thumbnails, chart HTML, reports). Useful when the agent needs to inspect the final artifact after `run_code`. |
-| **`get_streetview`** | Get Google Street View imagery at a lat/lon for ground-truthing thematic classifications. |
-| **`geeviz_search_places`** | Search Google Places API for nearby landmarks, businesses, POIs. Also useful for geocoding a place name to coordinates before turning them into an `ee.Geometry`. |
+| **`map_control`** | View, list layers, clear, or test the interactive map viewer. Actions: `view` (renders a self-contained HTML file and opens it in the browser), `export` (writes the HTML for chat-artifact serving), `preview` (per-layer EE tile PNGs), `layers` (structured list of active layers), `layer_names` (just the names), `clear` (drop all layers), `test_layers` (validates every layer with parallel `getMapId()` calls — ~1-2s quality gate before `view`), `test_view` (captures a PNG via headless Chrome CDP for visual/JS console checks). |
+| **`view_output`** | Return a saved raster image (PNG / GIF / JPEG / WebP) from the session output directory as an inline image the agent can see. Does NOT work on HTML files — for HTML maps use `map_control(action="preview")`. |
 
 ### Export & manage
 | Tool | Description |
@@ -129,7 +127,7 @@ The MCP surface is **12 tools** organized by role. Charting, thumbnails, reports
 - **Zonal summaries + charts** — `cl.summarize_and_chart()` returns a DataFrame plus a Plotly figure. Auto-detects thematic vs continuous data, picks the right reducer, supports time series / bar / grouped bar / donut / scatter / Sankey.
 - **Thumbnails** — `tl.generate_thumbs()` produces publication-ready PNGs with basemap, legend, and scalebar.
 - **Reports** — `rl.build_report()` writes multi-section HTML reports.
-- **Geocoding** — `gm.geocode("Salt Lake City, UT")` returns coordinates without needing the Places API.
+- **Google Maps Platform** (when `gm` alias is present) — `gm.geocode(...)`, `gm.reverse_geocode(...)`, `gm.search_places(...)`, `gm.search_nearby(...)`, `gm.streetview_image(...)`, `gm.streetview_panorama(...)`, `gm.get_static_map(...)`, `gm.interpret_image(bytes, mode=...)`, `gm.label_image(bytes, ...)`, `gm.get_elevation*(...)`, `gm.get_air_quality(...)`, `gm.get_solar_insights(...)`, `gm.get_timezone(...)`, `gm.snap_to_roads(...)`, `gm.nearest_roads(...)`. Requires `GOOGLE_MAPS_PLATFORM_API_KEY`; `interpret_image` / `label_image` additionally need `GEMINI_API_KEY` and `pip install google-genai Pillow`.
 - **Task management** — `ee.data.listOperations()` or `ee.data.getTaskList()` inside `run_code` gives the agent full task control when needed.
 
 ## Using Without an IDE
@@ -202,7 +200,7 @@ server_params = StdioServerParameters(
 async with stdio_client(server_params, errlog=subprocess.DEVNULL) as (read, write):
     async with ClientSession(read, write) as session:
         await session.initialize()
-        tools = await session.list_tools()       # discover all 12 tools
+        tools = await session.list_tools()       # discover all tools
         result = await session.call_tool(         # call any tool
             name="env_info", arguments={"action": "version"}
         )
@@ -242,11 +240,11 @@ Every geeViz module import triggers `robustInitializer()` at module level, which
 - `pd` / `pandas` -- both aliases point at the pandas module
 - `np` / `numpy` -- both aliases point at numpy
 - `save_file` -- helper for writing per-session output files
-- `search_datasets`, `search_geeviz`, `inspect_asset`, `map_control`, `env_info`,
-  `view_output`, `geeviz_search_places`, `search_places`, `lookup_weather`,
-  `compute_routes` -- clear-error stubs for MCP tool names, so if the agent
-  accidentally calls one from inside `run_code` it gets an actionable message
-  instead of a confusing NameError.
+- `search_datasets`, `search_codebase`, `inspect_asset`, `map_control`,
+  `env_info`, `view_output`, `manage_asset`, `export_image`, `save_session`
+  -- clear-error stubs for MCP tool names, so if the agent accidentally
+  calls one from inside `run_code` it gets an actionable message instead
+  of a confusing NameError.
 
 Variables set in one `run_code` call are available in subsequent calls within the same session. Use `reset=True` to clear and re-initialize.
 
@@ -271,17 +269,22 @@ run_code("print(x)")  # prints 42
 inspect_asset("COPERNICUS/S2_SR_HARMONIZED")
 
 # Look up a function (exact match with full docstring)
-search_geeviz(name="superSimpleGetS2")
+search_codebase(name="superSimpleGetS2")
 
 # Search by keyword across a module
-search_geeviz(query="add", module="geeView")
+search_codebase(query="add", module="geeView")
 
 # List example scripts, then read one
-search_geeviz(module="examples")
-search_geeviz(module="examples", name="GFSTimeLapse")
+search_codebase(module="examples")
+search_codebase(module="examples", name="GFSTimeLapse")
 
 # Look up a reference dict (band mappings, viz params, projections, test areas)
-search_geeviz(module="getImagesLib", name="common_projections")
+search_codebase(module="getImagesLib", name="common_projections")
+
+# EE / pandas / numpy — same tool, any REPL-loaded module
+search_codebase(name="ee.Image.reduceRegion")
+search_codebase(name="pd.DataFrame.to_markdown")
+search_codebase(module="np", query="mean")
 
 # Check versions / namespace / project
 env_info(action="version")
@@ -324,14 +327,14 @@ map_control(action="test_view")
 # Read the current map URL and/or a generated file's contents
 view_output()
 
-# Search for places / geocode
-geeviz_search_places("Yellowstone National Park")
-
-# Get Street View imagery
-get_streetview(lon=-111.88, lat=40.76)
-
 # Task management (no dedicated tools — use run_code + ee.data)
 run_code("import ee; ops = ee.data.listOperations(); print([o['metadata']['description'] for o in ops[:10]])")
+
+# Google Maps helpers (require googleMapsLib deps + GOOGLE_MAPS_PLATFORM_API_KEY)
+run_code("loc = gm.geocode('Yellowstone National Park'); print(loc)")
+run_code("pano = gm.streetview_panorama(-111.80, 40.68, fov=360)")
+run_code("sat = gm.get_static_map(lon=-111.88, lat=40.76, maptype='satellite')")
+run_code("r = gm.interpret_image(sat, mode='satellite-map'); print(r['metadata']['total_tokens'])")
 
 # Charting, thumbnails, and analysis via run_code
 run_code("result = cl.summarize_and_chart(my_ic, geometry=area)")

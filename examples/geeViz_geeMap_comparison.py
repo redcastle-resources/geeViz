@@ -222,9 +222,9 @@ gmMap
 # * As such, geeViz is building dependencies on geeMap
 
 # %%
-shp = "data/gadm41_CHE_shp/gadm41_CHE_0.shp"
-
-ch = gm.shp_to_ee(shp)
+ch = ee.FeatureCollection("USDOS/LSIB_SIMPLE/2017").filter(
+    ee.Filter.eq("country_na", "Switzerland")
+)
 
 gmMap = gm.Map()
 gvMap.clearMap()

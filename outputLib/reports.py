@@ -76,6 +76,8 @@ import threading
 import traceback
 from datetime import datetime
 
+import ee
+
 from geeViz.outputLib import charts as cl
 from geeViz.outputLib import thumbs as tl
 from geeViz.outputLib import themes as _themeLib
@@ -360,7 +362,116 @@ class Report:
 
         Args:
             ee_obj: ``ee.Image`` or ``ee.ImageCollection`` to summarize.
-            geometry: ``ee.Geometry``, ``ee.Feature``, or ``ee.FeatureCollection``.
+            geometry: ``ee.Geometry``, ``ee.Feature``, or
+                ``ee.FeatureCollection`` — the AOI. Applied both as the
+                reduceRegion boundary and as the thumbnail clip region.
+            title (str): Section heading. Also used as the executive-summary
+                anchor. Default ``"Section"``.
+            prompt (str, optional): Per-section LLM guidance appended to
+                the report-level ``prompt`` when generating the narrative.
+                Use to nudge tone, focal metric, or comparison years.
+            generate_table (bool): Include the data table under the chart.
+                Default ``True``.
+            generate_chart (bool): Include the chart. Default ``True``.
+            thumb_format (str or None): Thumbnail image format.
+                Default ``"png"``.
+
+                * ``"png"`` — single composite thumbnail (works for both
+                  ``ee.Image`` and ``ee.ImageCollection``).
+                * ``"gif"`` — animated GIF with per-frame date labels
+                  (``ee.ImageCollection`` only).
+                * ``"filmstrip"`` — grid of individual time-step frames
+                  (``ee.ImageCollection`` only). Used by PDF export.
+                * ``None`` or ``False`` — no thumbnail.
+
+            chart_types (list[str] | str | None): Which charts to render.
+                Accepts a list, a single string, or a comma-delimited
+                string. Each entry maps to a
+                ``summarize_and_chart(chart_type=...)`` call.
+                Valid: ``"bar"``, ``"stacked_bar"``, ``"line+markers"``,
+                ``"stacked_line+markers"``, ``"donut"``, ``"scatter"``,
+                ``"sankey"``. When ``"sankey"`` is in the list, the
+                ``sankey``, ``transition_periods``, ``sankey_band_name``,
+                and ``min_percentage`` kwargs feed that chart.
+                Empty / ``None`` auto-detects one chart type.
+                Recommended max length: 3.
+
+                Examples::
+
+                    chart_types="sankey"
+                    chart_types="sankey,bar"
+                    chart_types=["line+markers"]
+
+            **kwargs: All other keyword arguments. Params prefixed
+                ``thumb_`` are extracted and forwarded to ``thumbLib``;
+                everything else goes to
+                ``chartingLib.summarize_and_chart()``.
+
+                **Thumbnail kwargs** (all optional):
+
+                * ``thumb_viz_params`` (dict): Viz dict, same shape as
+                  ``Map.addLayer`` — e.g. ``{'autoViz': True,
+                  'canAreaChart': True}`` or ``{'min': 0, 'max': 1,
+                  'palette': ['red','green']}``. Autoviz picks up class
+                  props (``<band>_class_values / _names / _palette``).
+                * ``thumb_band_name`` (str): Which band to render when
+                  ``ee_obj`` has multiple bands.
+                * ``thumb_dimensions`` (int | str): Output pixel size —
+                  ``512`` or ``"1024x768"``. Default ``512``.
+                * ``thumb_crs`` (str): Reprojection CRS for the thumbnail,
+                  e.g. ``"EPSG:32612"``. Default lets EE pick from the
+                  first pixel — which yields lat/lon for global datasets
+                  and can look rotated for high-latitude AOIs. Set an
+                  appropriate UTM zone (or the AOI's native CRS) to keep
+                  the frame upright.
+                * ``thumb_transform`` (list): Custom affine transform
+                  when ``thumb_crs`` is set. Advanced.
+                * ``thumb_geometry`` (ee.Geometry): Override clip region.
+                  Defaults to the section ``geometry``.
+                * ``thumb_bg_color`` (str): Background hex.
+                * ``thumb_fps`` (int): GIF frames-per-second. Default 2.
+                  Bare alias: ``fps=``.
+                * ``thumb_max_frames`` (int): Cap frames for gif/filmstrip
+                  when the collection is long. Bare alias: ``max_frames=``.
+                * ``thumb_columns`` (int): Filmstrip grid width. Bare
+                  alias: ``columns=``.
+                * ``thumb_burn_in_date`` (bool): Overlay date label on
+                  gif frames. Bare alias: ``burn_in_date=``.
+                * ``thumb_date_format`` (str): strftime format for
+                  burned-in dates (gif/filmstrip). Default ``"%Y"``.
+                * ``thumb_date_position`` (str): ``"tl" | "tr" | "bl" |
+                  "br"`` — corner for the burned-in date. Bare alias:
+                  ``date_position=``.
+                * ``burn_in_legend`` (bool): Draw the autoviz legend into
+                  the thumbnail canvas.
+                * ``legend_scale`` (float): Scale factor for the burned-in
+                  legend.
+
+                **Chart / summarize kwargs** (forwarded verbatim,
+                examples):
+
+                * ``scale`` (int): reduceRegion pixel scale (metres).
+                * ``feature_label`` (str): FeatureCollection property to
+                  label bars/donut wedges with.
+                * ``stacked`` (bool): Stack multi-series charts.
+                * ``sankey`` (bool): Enable sankey rendering.
+                * ``transition_periods`` (list[list[str]]): For sankey
+                  charts, pairs of ISO dates defining transitions.
+                * ``sankey_band_name`` (str): Band to sankey on when
+                  ``ee_obj`` is multi-band.
+                * ``min_percentage`` (float): Minimum node/link % to
+                  render in sankey — below this collapses to "Other".
+                * ``max_classes`` (int): Cap categorical classes on
+                  bar/donut/stacked charts.
+                * ``areaChartParams`` (dict): Same shape as viz-time
+                  areaChartParams — ``{'shouldUnmask': True,
+                  'unmaskValue': 0}`` etc.
+
+                See ``geeViz.chartingLib.summarize_and_chart`` and
+                ``geeViz.outputLib.thumbs`` for the full surface.
+
+        Returns:
+            Report: ``self`` (for method chaining).
         """
         if not isinstance(ee_obj, (ee.Image, ee.ImageCollection)):
             raise TypeError(
@@ -455,6 +566,28 @@ class Report:
             ct_list = list(chart_types)
         else:
             ct_list = []
+
+        # Accept bare-name aliases for common thumb params so callers who
+        # forget the ``thumb_`` prefix don't get silently ignored (the
+        # unprefixed name would otherwise land in ``chart_kwargs`` and get
+        # dropped by summarize_and_chart). Only alias params that are
+        # unambiguously thumb-only.
+        _BARE_TO_THUMB = {
+            "fps":            "thumb_fps",
+            "max_frames":     "thumb_max_frames",
+            "columns":        "thumb_columns",
+            "burn_in_date":   "thumb_burn_in_date",
+            "date_position":  "thumb_date_position",
+        }
+        for bare, prefixed in _BARE_TO_THUMB.items():
+            if bare in kwargs and prefixed not in kwargs:
+                kwargs[prefixed] = kwargs.pop(bare)
+                print(f"    Note: '{bare}=' aliased to '{prefixed}=' "
+                      f"for section '{title}'", flush=True)
+            elif bare in kwargs and prefixed in kwargs:
+                # Both provided — thumb_ prefix wins, drop the bare one
+                # to avoid it leaking into chart_kwargs.
+                kwargs.pop(bare)
 
         self._sections.append(_Section(
             ee_obj, geometry, title, prompt, kwargs,
@@ -576,11 +709,11 @@ class Report:
             for sec in self._sections
         )
         if not already_computed:
-            print(f"Generating report: {self.title}")
+            print(f"Generating report: {self.title}", flush=True)
             self._compute_all_parallel()
             self._generate_executive_summary()
         else:
-            print(f"Re-rendering report: {self.title}")
+            print(f"Re-rendering report: {self.title}", flush=True)
 
         # Collect per-section errors + successes before rendering. We
         # still render the partial content so the caller (or the
@@ -626,7 +759,7 @@ class Report:
             os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
             with open(output_path, "w", encoding="utf-8") as f:
                 f.write(content)
-            print(f"Report saved to: {output_path}")
+            print(f"Report saved to: {output_path}", flush=True)
             if strict and section_errors:
                 raise ReportGenerationError(
                     section_errors,
@@ -679,7 +812,7 @@ class Report:
                 try:
                     future.result()
                 except Exception as e:
-                    print(f"  Unexpected narrative error: {e}")
+                    print(f"  Unexpected narrative error: {e}", flush=True)
                     traceback.print_exc()
                 with lock:
                     narratives_remaining[0] -= 1
@@ -735,7 +868,7 @@ class Report:
         When ``sec.chart_types`` is empty, falls back to the auto-detect
         behavior (single ``summarize_and_chart`` call).
         """
-        print(f"  [{idx+1}/{len(self._sections)}] Computing chart/table: {sec.title}")
+        print(f"  [{idx+1}/{len(self._sections)}] Computing chart/table: {sec.title}", flush=True)
         try:
             chart_kwargs = {k: v for k, v in sec.kwargs.items()
                            if k not in _REPORT_KEYS}
@@ -750,7 +883,7 @@ class Report:
                 all_figs = []  # list of (chart_type, fig)
                 for ct in ct_list:
                     ct_lower = ct.lower().strip()
-                    print(f"  [{idx+1}/{len(self._sections)}] Computing {ct} chart: {sec.title}")
+                    print(f"  [{idx+1}/{len(self._sections)}] Computing {ct} chart: {sec.title}", flush=True)
                     try:
                         if ct_lower == "sankey":
                             # Sankey path — use chart_type='sankey'
@@ -795,7 +928,7 @@ class Report:
                                         sec.df = first
                                 all_figs.append((ct, second))
                     except Exception as e:
-                        print(f"    {ct} chart error: {type(e).__name__}: {e}")
+                        print(f"    {ct} chart error: {type(e).__name__}: {e}", flush=True)
 
                 # Distribute figures: first non-sankey → sec.fig,
                 # sankey → sec.sankey_fig, rest → sec.extra_figs
@@ -835,7 +968,7 @@ class Report:
                         sec.fig = second
         except Exception as e:
             sec.error = f"{type(e).__name__}: {e}"
-            print(f"    Chart/table error: {sec.error}")
+            print(f"    Chart/table error: {sec.error}", flush=True)
             traceback.print_exc()
 
     def _compute_thumb(self, idx, sec):
@@ -847,7 +980,7 @@ class Report:
         fmt = sec.thumb_format
         kw = sec.kwargs
         label = {"png": "thumbnail", "gif": "GIF", "filmstrip": "filmstrip"}.get(fmt, fmt)
-        print(f"  [{idx+1}/{len(self._sections)}] Computing {label}: {sec.title}")
+        print(f"  [{idx+1}/{len(self._sections)}] Computing {label}: {sec.title}", flush=True)
 
         # Shared params (all formats)
         # thumb_crs/thumb_transform override section-level crs/transform/scale
@@ -880,7 +1013,7 @@ class Report:
                 import geeViz.geeView as gv
                 ee_mod = gv.ee
                 if not isinstance(sec.ee_obj, ee_mod.ImageCollection):
-                    print(f"    Skipping GIF: ee_obj is not an ImageCollection")
+                    print(f"    Skipping GIF: ee_obj is not an ImageCollection", flush=True)
                     return
                 result = tl.generate_gif(
                     sec.ee_obj, geom,
@@ -895,7 +1028,7 @@ class Report:
 
                 # Also generate a filmstrip for PDF (GIFs don't work in static PDF)
                 try:
-                    print(f"  [{idx+1}/{len(self._sections)}] Computing filmstrip (PDF fallback): {sec.title}")
+                    print(f"  [{idx+1}/{len(self._sections)}] Computing filmstrip (PDF fallback): {sec.title}", flush=True)
                     has_legend = kw.get("burn_in_legend", True)
                     default_cols = 3 if has_legend else 4
                     fs_result = tl.generate_filmstrip(
@@ -908,13 +1041,13 @@ class Report:
                     )
                     sec.thumb_filmstrip_html = fs_result["html"]
                 except Exception as e:
-                    print(f"    Filmstrip fallback failed: {e}")
+                    print(f"    Filmstrip fallback failed: {e}", flush=True)
 
             elif fmt == "filmstrip":
                 import geeViz.geeView as gv
                 ee_mod = gv.ee
                 if not isinstance(sec.ee_obj, ee_mod.ImageCollection):
-                    print(f"    Skipping filmstrip: ee_obj is not an ImageCollection")
+                    print(f"    Skipping filmstrip: ee_obj is not an ImageCollection", flush=True)
                     return
                 result = tl.generate_filmstrip(
                     sec.ee_obj, geom,
@@ -937,7 +1070,7 @@ class Report:
 
         except Exception as e:
             err_msg = f"{label.title()} error: {type(e).__name__}: {e}"
-            print(f"    {err_msg}")
+            print(f"    {err_msg}", flush=True)
             if sec.error:
                 sec.error += f"\n{err_msg}"
             else:
@@ -953,7 +1086,7 @@ class Report:
         _t = _themeLib.get_theme(self.theme)
         new_bg = _t.bg_hex
         print(f"  Theme changed ({self._computed_theme} -> {self.theme}); "
-              f"recomputing thumbnails with bg={new_bg}")
+              f"recomputing thumbnails with bg={new_bg}", flush=True)
 
         # Update the thumb_bg_color in each section's kwargs
         for sec in self._sections:
@@ -975,7 +1108,7 @@ class Report:
                         fut.result()
                     except Exception as e:
                         i, sec = futs[fut]
-                        print(f"    Thumb recompute error [{i}] {sec.title}: {e}")
+                        print(f"    Thumb recompute error [{i}] {sec.title}: {e}", flush=True)
 
         self._computed_theme = self.theme
 
@@ -989,7 +1122,7 @@ class Report:
             sec.narrative = f"*Section could not be computed: {sec.error}*"
             return
 
-        print(f"  [{idx+1}/{len(self._sections)}] Generating narrative: {sec.title}")
+        print(f"  [{idx+1}/{len(self._sections)}] Generating narrative: {sec.title}", flush=True)
         table = self._df_to_table_str(sec.df)
 
         # Build units context from kwargs so LLM knows what the numbers mean
@@ -1155,7 +1288,7 @@ class Report:
             )
             return response.text
         except Exception as e:
-            print(f"    LLM error: {e}")
+            print(f"    LLM error: {e}", flush=True)
             return None
 
     def _df_to_table_str(self, df, max_rows=80):
@@ -1192,13 +1325,13 @@ class Report:
             self._generate_executive_summary_inner()
         except Exception as e:
             self._summary_error = f"{type(e).__name__}: {e}"
-            print(f"  Executive summary error: {self._summary_error}")
+            print(f"  Executive summary error: {self._summary_error}", flush=True)
             traceback.print_exc()
             if not self._summary:
                 self._summary = "Executive summary could not be generated."
 
     def _generate_executive_summary_inner(self):
-        print("  Generating executive summary...")
+        print("  Generating executive summary...", flush=True)
         briefs = []
         images = []
         for sec in self._sections:
@@ -1305,7 +1438,7 @@ class Report:
                 b64 = base64.b64encode(data).decode()
                 return f"data:{mime};base64,{b64}"
         except Exception as e:
-            print(f"    Warning: Could not fetch icon from {url}: {e}")
+            print(f"    Warning: Could not fetch icon from {url}: {e}", flush=True)
             return None
 
     # -- Private: CSS assembly ---------------------------------------------
@@ -1426,7 +1559,7 @@ class Report:
             b64 = base64.b64encode(img_bytes).decode()
             return f"data:image/png;base64,{b64}"
         except Exception as e:
-            print(f"    Static chart export failed: {e}")
+            print(f"    Static chart export failed: {e}", flush=True)
             return None
 
     def _sankey_to_static_img(self, fig, width=900, height=600):
@@ -1448,10 +1581,10 @@ class Report:
                 b64 = base64.b64encode(img_bytes).decode()
                 return f"data:image/png;base64,{b64}"
             else:
-                print(f"    Sankey screenshot failed (no browser), falling back to kaleido")
+                print(f"    Sankey screenshot failed (no browser), falling back to kaleido", flush=True)
                 return self._fig_to_static_img(fig, width=width, height=height)
         except Exception as e:
-            print(f"    Sankey screenshot error: {e}, falling back to kaleido")
+            print(f"    Sankey screenshot error: {e}, falling back to kaleido", flush=True)
             return self._fig_to_static_img(fig, width=width, height=height)
 
     def _gif_to_filmstrip_html(self, sec):
@@ -1490,7 +1623,7 @@ class Report:
             )
             return result["html"]
         except Exception as e:
-            print(f"    GIF-to-filmstrip fallback failed: {e}")
+            print(f"    GIF-to-filmstrip fallback failed: {e}", flush=True)
             return sec.thumb_html  # fallback to original GIF HTML
 
     # -- Private: section HTML builder (shared by HTML and PDF) ------------
@@ -1853,13 +1986,37 @@ class Report:
             }}
             table {{ font-size: 9px; }}
             thead {{ display: table-header-group; }}
-            tr {{ page-break-inside: avoid; }}
-            h2 {{ page-break-after: avoid; }}
-            .narrative {{ page-break-before: avoid; }}
-            .filmstrip img {{ page-break-inside: avoid; }}
-            .matrix-title {{ page-break-after: avoid; }}
-            .table-units {{ page-break-after: avoid; }}
-            .table-wrapper {{ page-break-before: auto; }}
+            tfoot {{ display: table-footer-group; }}
+            /* Both the legacy (``page-break-*``) AND modern (``break-*``)
+               properties are set — WeasyPrint honors different subsets
+               across versions, and covering both maximizes the odds a
+               given release respects the intent. */
+            tr, tr th, tr td {{
+                page-break-inside: avoid;
+                break-inside: avoid;
+            }}
+            h2, h3 {{ page-break-after: avoid; break-after: avoid; }}
+            .narrative {{ page-break-before: avoid; break-before: avoid; }}
+            /* Keep individual thumbnail cells intact — never cut a
+               single frame across a page boundary. */
+            .filmstrip img,
+            .filmstrip-cell,
+            .thumbnail,
+            .section-thumbnail,
+            .thumb-cell {{
+                page-break-inside: avoid;
+                break-inside: avoid;
+            }}
+            .matrix-title {{ page-break-after: avoid; break-after: avoid; }}
+            .table-units {{ page-break-after: avoid; break-after: avoid; }}
+            .table-wrapper {{ page-break-before: auto; break-before: auto; }}
+            /* A table's rows are already `avoid`-broken above; also add
+               a soft rule on the wrapper so the header + first row stay
+               together, and the last row isn't orphaned on a new page. */
+            .data-table {{
+                page-break-inside: auto;
+                break-inside: auto;
+            }}
             .report-footer {{ display: none; }}
             .pdf-footer-tpl {{ display: none; }}
             .pdf-page-footer {{
@@ -1950,13 +2107,13 @@ class Report:
                 os.remove(tmp_html)
 
                 if result.returncode == 0 and os.path.exists(abs_pdf):
-                    print(f"PDF saved to: {output_path}")
+                    print(f"PDF saved to: {output_path}", flush=True)
                     return output_path
                 else:
                     stderr = result.stderr.decode(errors="replace")[:200]
-                    print(f"  Browser PDF failed: {stderr}")
+                    print(f"  Browser PDF failed: {stderr}", flush=True)
             except Exception as e:
-                print(f"  Browser PDF failed: {e}")
+                print(f"  Browser PDF failed: {e}", flush=True)
 
         # Strategy 2: pdfkit + wkhtmltopdf
         try:
@@ -1973,19 +2130,19 @@ class Report:
                 "enable-local-file-access": "",
             }
             pdfkit.from_string(html, output_path, options=options)
-            print(f"PDF saved to: {output_path}")
+            print(f"PDF saved to: {output_path}", flush=True)
             return output_path
         except ImportError:
             pass
         except Exception as e:
-            print(f"  pdfkit failed: {e}")
+            print(f"  pdfkit failed: {e}", flush=True)
 
         # Strategy 3: Fallback — return print-ready HTML content
         # (caller is responsible for saving via save_file or open)
         print(
             "PDF conversion not available (Chrome/wkhtmltopdf not found).\n"
             "Returning print-ready HTML instead. Download and open in browser -> Print -> Save as PDF."
-        )
+        , flush=True)
         return html
 
 

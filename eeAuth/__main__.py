@@ -31,6 +31,18 @@ from .server import create_proxy_app, DEFAULT_UPSTREAM, DEFAULT_TENANT_HEADER
 
 
 def main(argv=None) -> int:
+    """CLI entry point for the standalone eeAuth proxy.
+
+    Parses argv, builds the FastAPI app via ``create_proxy_app``, and runs
+    it under uvicorn. Invoked as ``python -m geeViz.eeAuth``.
+
+    Args:
+        argv (list[str], optional): Argument list. Defaults to sys.argv[1:]
+            when None.
+
+    Returns:
+        int: Exit code (0 on clean shutdown, non-zero on startup failure).
+    """
     parser = argparse.ArgumentParser(
         prog="python -m geeViz.eeAuth",
         description="Standalone Earth Engine multi-tenant auth proxy.",

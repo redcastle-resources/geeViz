@@ -35,6 +35,26 @@ ee = getImagesLib.ee
 Map = getImagesLib.Map
 Map.clearMap()
 ####################################################################################################
+# Access preflight — WeatherNext datasets are gated. If the calling
+# credential can't see the collection, exit cleanly with a helpful
+# hint rather than raising a cryptic EE "List is empty" error deep
+# in the visualization pipeline.
+_WEATHERNEXT_GATE = "projects/gcp-public-data-weathernext/assets/59572747_4_0"
+try:
+    _n = ee.ImageCollection(_WEATHERNEXT_GATE).limit(1).size().getInfo()
+    if not _n:
+        raise RuntimeError("empty collection")
+except Exception as _e:
+    print(
+        "\n[skip] This example requires access to Google's WeatherNext datasets.\n"
+        "       The account signed in with EE couldn't read\n"
+        f"       {_WEATHERNEXT_GATE}\n"
+        "       Request access at https://developers.google.com/earth-engine/datasets/catalog/weathernext\n"
+        f"       Underlying error: {type(_e).__name__}: {_e}\n"
+    )
+    sys.exit(0)
+
+####################################################################################################
 # Common settings
 today = ee.Date(datetime.datetime.now())
 
@@ -87,9 +107,22 @@ def prep_for_timelapse(img):
 print("Loading WeatherNext Graph (deterministic)...")
 graph = (
     ee.ImageCollection("projects/gcp-public-data-weathernext/assets/59572747_4_0")
-    .filter(ee.Filter.gt("system:time_start", today.advance(-12, "hour").millis()))
+    # 48h lookback is wider than the model's 6-hour init cadence so a
+    # missed run doesn't leave this window empty; the .get(-1) below
+    # then picks the newest run in the window.
+    .filter(ee.Filter.gt("system:time_start", today.advance(-48, "hour").millis()))
     .filter(ee.Filter.inList("forecast_hour", which_hours))
 )
+
+# Skip cleanly if EE indexes are stale / no recent run — otherwise
+# .first().projection() below raises a cryptic "List is empty" error.
+if graph.size().getInfo() == 0:
+    print(
+        "\n[skip] No WeatherNext Graph forecast runs indexed in the last 48h.\n"
+        "       This is usually transient (asset indexing lag / model gap).\n"
+        "       Try again later or widen the lookback window in the script.\n"
+    )
+    sys.exit(0)
 
 # Get the most recent initialization time
 graph_init = graph.aggregate_array("start_time").distinct().sort().get(-1)

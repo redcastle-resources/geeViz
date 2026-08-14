@@ -3,7 +3,7 @@ interchangeably from the same Python process.
 
 **You don't need to call this directly if you only use one credential.**
 Importing :mod:`geeViz.geeView` and calling ``Map.view()`` already
-auto-starts the proxy under the hood via ``ensure_started("auto")`` —
+auto-starts the proxy under the hood via ``ensure_started("attached")`` —
 single-credential workflows get the proxy for free. Multi-credential
 workflows use this module to register, switch, and stop credentials
 explicitly.
@@ -177,7 +177,111 @@ class EECreds:
         self._proxy_url: Optional[str] = None
         self._proxy_thread: Optional[threading.Thread] = None
         self._proxy_server = None       # uvicorn.Server
+        # What kind of proxy is behind _proxy_url — "attached" (in-process
+        # uvicorn thread owned by this process) or "detached" (long-lived
+        # subprocess we attached to or spawned). Callers of ensure_started
+        # need to know this to make the right lifecycle decisions:
+        # ``Map.view()`` skips its own daemon HTTP server when the proxy
+        # is "detached" because the subprocess serves /geeView too AND
+        # survives script exit (attached-mode daemon threads die with
+        # the main thread, causing ERR_CONNECTION_RESET on tile fetches
+        # after the script returns).
+        self._proxy_mode: Optional[str] = None
         self._lock = threading.Lock()
+        # Tag store — pluggable persistence for auto-minted workload tags.
+        # Lazy: constructed on first use via geeViz.eeAuth.tags.default_tag_store()
+        # (which defaults to SQLite at ~/.geeViz/workload_tags.db). Users
+        # can swap it via setTagStore() before start().
+        self._tag_store = None
+        self._tag_secret: Optional[str] = None
+
+    # ─────────────── workload-tag store + one-call setter ───────────────
+    def setTagStore(self, store) -> "EECreds":
+        """Replace the default ``TagStore`` used for auto-minted workload
+        tags. Pass an ``InMemoryTagStore()``, ``SQLiteTagStore(path=...)``,
+        or any object matching the ``TagStore`` protocol. Call this
+        BEFORE ``start()`` if you want the proxy's fallback builder to
+        write into your store. Returns self for chaining."""
+        from geeViz.eeAuth.tags import TagStore as _TagStore
+        if not isinstance(store, _TagStore):
+            raise TypeError(
+                f"setTagStore: expected object matching TagStore protocol "
+                f"(put/lookup methods); got {type(store).__name__}"
+            )
+        self._tag_store = store
+        return self
+
+    def getTagStore(self):
+        """Return the current tag store, constructing the default lazily
+        on first call. See :meth:`setTagStore` for how to override."""
+        if self._tag_store is None:
+            from geeViz.eeAuth.tags import default_tag_store
+            self._tag_store = default_tag_store()
+        return self._tag_store
+
+    def setTagSecret(self, secret: str) -> "EECreds":
+        """Set the secret used when minting workload tags. Defaults to
+        ``$WORKLOAD_TAG_SECRET`` (or a local-dev fallback if unset).
+        Same secret is required to re-mint the same tag from the same
+        parts across processes."""
+        if not isinstance(secret, str) or not secret:
+            raise ValueError("setTagSecret: secret must be a non-empty string")
+        self._tag_secret = secret
+        return self
+
+    def _resolve_tag_secret(self) -> str:
+        if self._tag_secret:
+            return self._tag_secret
+        from geeViz.eeAuth.tags import _default_secret
+        return _default_secret()
+
+    def setWorkloadTag(self, **parts) -> str:
+        """Mint a tag from ``parts``, store the mapping, and set it on
+        the EE Python SDK so every subsequent EE call carries it.
+
+        Three things happen atomically:
+
+        1. ``tag = mint_workload_tag(parts, secret=…)`` — deterministic
+           short hash (``wl_<hex>``).
+        2. ``getTagStore().put(tag, parts)`` — so ``lookupWorkloadTag(tag)``
+           can recover ``parts`` later, and any Cloud Monitoring row
+           tagged with ``tag`` can be joined back to identity.
+        3. ``ee.data.setWorkloadTag(tag)`` — SDK-side setter. The tag is
+           attached to every subsequent ``.getInfo()``, ``.getMapId()``,
+           export, etc., AND baked into any tile URL returned by
+           ``getMapId``, so browser tile fetches inherit it.
+
+        Since the proxy's default builder honours client-set tags
+        (``if request.query_params['workloadTag']: return it``), the
+        same tag round-trips through the proxy without any custom
+        builder needed.
+
+        Returns the minted tag so callers can log / correlate it.
+        """
+        from geeViz.eeAuth.tags import mint_workload_tag
+        import ee.data as _ee_data
+        if not parts:
+            raise ValueError("setWorkloadTag: at least one part required")
+        tag = mint_workload_tag(parts, secret=self._resolve_tag_secret())
+        self.getTagStore().put(tag, dict(parts))
+        _ee_data.setWorkloadTag(tag)
+        return tag
+
+    def lookupWorkloadTag(self, tag: str) -> Optional[dict]:
+        """Recover the parts dict for a previously-minted tag. Returns
+        ``None`` if the tag isn't in this process's tag store (could be
+        from another instance if not using shared storage, or an
+        untagged / externally-tagged request)."""
+        if not tag:
+            return None
+        return self.getTagStore().lookup(tag)
+
+    def clearWorkloadTag(self) -> None:
+        """Clear the SDK-side workload tag so subsequent EE calls fall
+        back to the proxy's default builder. Mapping in the store is
+        preserved (so historical tags remain reversible)."""
+        import ee.data as _ee_data
+        _ee_data.resetWorkloadTag()
 
     # ─────────────── adding credentials ───────────────
     def addCreds(
@@ -1009,6 +1113,22 @@ class EECreds:
                 f"(known: {self.list()})"
             )
 
+        # Fail fast if there's no proxy to route through — otherwise the
+        # ContextVar gets set, the next EE call hits a dead URL, and the
+        # client spins for its full connect+read timeout before failing
+        # with a confusing socket error. We key on ``_proxy_url`` rather
+        # than ``_started`` because ``ensure_started()`` (the implicit
+        # start path used by ``robust_init`` / ``Map.view()``) populates
+        # ``_proxy_url`` without flipping ``_started``. Both stop() and
+        # a never-started singleton correctly land here with proxy_url=None.
+        if not self._proxy_url:
+            raise RuntimeError(
+                f"eeCreds.use({name!r}) called with no proxy running "
+                f"(never started, or already stopped). Switching tenants "
+                f"would silently route EE calls to a dead socket. Call "
+                f"eeCreds.start() first."
+            )
+
         # Allow both:
         #   eeCreds.use("acme")             — plain call, no with
         #   with eeCreds.use("ian"): ...    — context manager
@@ -1022,6 +1142,7 @@ class EECreds:
         proxy_host: str = "127.0.0.1",
         ee_init: bool = True,
         launch_proxy: bool = True,
+        workload_tag_builder=None,
     ) -> dict:
         """Initialize Earth Engine for multi-credential use.
 
@@ -1050,7 +1171,10 @@ class EECreds:
                 )
 
             if launch_proxy:
-                self._launch_proxy(proxy_host, proxy_port)
+                self._launch_proxy(
+                    proxy_host, proxy_port,
+                    workload_tag_builder=workload_tag_builder,
+                )
 
             if ee_init:
                 proxy_url = self._proxy_url or ""
@@ -1072,13 +1196,59 @@ class EECreds:
                     first = next(iter(self._entries.values()))
                     self._direct_init(first)
 
+                self._install_default_workload_tag()
+
             self._started = True
             return self._status()
 
+    def _install_default_workload_tag(self) -> None:
+        """Install a sensible SDK-level default workload tag so untagged
+        EE calls surface as something identifiable in Cloud Monitoring
+        rather than as an empty string / anonymous bucket.
+
+        Only fires when nothing is currently set (the check is on
+        ``ee.data.getWorkloadTag() == ""``) so we never clobber a tag
+        an earlier caller — user code, the JS viewer, a custom builder
+        — had already installed. Uses the current tenant name in the
+        default so per-tenant untagged spend is still distinguishable
+        (e.g. ``geeviz__ee-persistent`` vs ``geeviz__acme-prod``).
+
+        The user can override any time with ``ee.data.setWorkloadTag()``
+        or their own ``ee.data.setDefaultWorkloadTag()``.
+        """
+        try:
+            import ee.data as _ee_data
+            if _ee_data.getWorkloadTag():
+                return  # someone already picked a default; respect it
+            tenant = self.current() or ""
+            # build_workload_tag joins parts with '__' after sanitizing
+            # each — passing them separately keeps the '__' delimiter
+            # intact (single-string "a__b" would get its double
+            # underscore collapsed).
+            from geeViz.eeAuth.tags import build_workload_tag
+            parts = ["geeviz"] + ([tenant] if tenant else [])
+            _ee_data.setDefaultWorkloadTag(build_workload_tag(*parts))
+        except Exception:
+            logger.exception("_install_default_workload_tag: failed")
+
     def stop(self) -> None:
-        """Shut down the in-process proxy if one's running. Safe to
-        call when not started."""
+        """Shut down the proxy — in-process AND any detached subprocess
+        — and un-initialize the EE SDK so subsequent calls fail fast.
+
+        Without the SDK reset, ``ee.Image(...).getInfo()`` after
+        ``stop()`` hangs on the socket timeout of the (now-dead) proxy
+        URL before raising. ``ee.Reset()`` clears the SDK's cached
+        connection so the next call raises "Earth Engine client library
+        not initialized" immediately.
+
+        Prints one line describing what was torn down so the caller has
+        a visible confirmation rather than a silent state change.
+
+        Safe to call when nothing is running.
+        """
+        parts_killed = []
         with self._lock:
+            had_inprocess = self._proxy_url is not None and self._proxy_server is not None
             srv = self._proxy_server
             if srv is not None:
                 try:
@@ -1087,10 +1257,58 @@ class EECreds:
                     pass
             if self._proxy_thread is not None:
                 self._proxy_thread.join(timeout=5.0)
+            inprocess_url = self._proxy_url if had_inprocess else None
             self._proxy_server = None
             self._proxy_thread = None
             self._proxy_url = None
+            self._proxy_mode = None
             self._started = False
+        if had_inprocess:
+            parts_killed.append(f"in-process proxy ({inprocess_url})")
+
+        # Nuke any detached subprocess + its state file. Kept outside
+        # the lock because _kill_detached runs a subprocess wait.
+        try:
+            state = self._read_detached_state()
+            if state:
+                pid = int(state.get("pid", 0) or 0)
+                url = state.get("url", "")
+                if pid and self._pid_alive(pid):
+                    self._kill_detached(state)
+                    parts_killed.append(f"detached subprocess (pid={pid}, {url})")
+                self._clear_detached_state()
+        except Exception:
+            logger.exception("eeCreds.stop: detached teardown failed")
+
+        # Un-initialize the EE SDK so subsequent calls fail fast
+        # instead of hanging on the dead proxy URL. Best-effort — some
+        # SDK builds may not expose Reset; a failure here shouldn't
+        # break stop().
+        ee_reset = False
+        try:
+            import ee as _ee
+            if hasattr(_ee, "Reset"):
+                _ee.Reset()
+                ee_reset = True
+        except Exception:
+            logger.exception("eeCreds.stop: ee.Reset() failed")
+
+        if parts_killed:
+            msg = "eeCreds.stop: shut down " + " + ".join(parts_killed)
+            if ee_reset:
+                msg += "; EE SDK reset (next EE call will raise 'not initialized')"
+            print(msg)
+        else:
+            print("eeCreds.stop: nothing to shut down (no proxy was running)")
+
+    def restart(self, *, mode: str = "detached") -> dict:
+        """Full ``stop()`` followed by ``ensure_started(mode=mode)``.
+        Use after editing any ``geeViz.eeAuth`` source file so a fresh
+        proxy loads the changes instead of the caller attaching to a
+        still-running subprocess whose Python interpreter cached the
+        old bytecode. Returns the ``ensure_started`` status dict."""
+        self.stop()
+        return self.ensure_started(mode=mode)
 
     def _find_free_port(self, host: str, preferred: int) -> int:
         """Return ``preferred`` if it's bindable, otherwise the first
@@ -1126,7 +1344,7 @@ class EECreds:
             s.bind((host, 0))
             return s.getsockname()[1]
 
-    def _launch_proxy(self, host: str, port: int) -> None:
+    def _launch_proxy(self, host: str, port: int, workload_tag_builder=None) -> None:
         """Start a uvicorn server in a background thread serving the
         proxy router. Captures the URL so ``ee.Initialize`` can point
         at it.
@@ -1157,7 +1375,10 @@ class EECreds:
                 "eeCreds: port %d busy, using %d instead", port, actual_port
             )
 
-        app = create_proxy_app(creds=self, prefix="/ee-api")
+        app = create_proxy_app(
+            creds=self, prefix="/ee-api",
+            workload_tag_builder=workload_tag_builder,
+        )
         config = uvicorn.Config(
             app, host=host, port=actual_port,
             log_level="warning",
@@ -1189,6 +1410,7 @@ class EECreds:
         self._proxy_server = server
         self._proxy_thread = t
         self._proxy_url = f"http://{host}:{actual_port}/ee-api"
+        self._proxy_mode = "attached"
         logger.info("eeCreds: proxy listening at %s", self._proxy_url)
 
     def _direct_init(self, entry: _CredEntry) -> None:
@@ -1548,15 +1770,33 @@ class EECreds:
                         f"(proxy={health.get('tenant_fingerprint')!r} "
                         f"expected={expected_fp!r})"
                     )
+                else:
+                    # Port mismatch — user asked for a different port than
+                    # the existing subprocess is bound to. Respawn on the
+                    # requested port. Common when callers pin Map.port
+                    # after a prior session left a subprocess on the
+                    # default 8889.
+                    try:
+                        from urllib.parse import urlparse as _urlparse
+                        existing_port = _urlparse(url).port
+                    except Exception:
+                        existing_port = None
+                    if existing_port and int(existing_port) != int(proxy_port):
+                        stale_reason = (
+                            f"port mismatch (proxy on {existing_port}, "
+                            f"requested {proxy_port})"
+                        )
 
             if stale_reason is None:
                 # Attach — set the inline-mode fields so callers that
                 # read .proxy_url see the detached URL transparently.
                 self._proxy_url = url
+                self._proxy_mode = "detached"
                 logger.info(
                     "eeCreds: attached to detached proxy %s pid=%s",
                     url, pid,
                 )
+                self._init_ee_against_detached(url)
                 return {
                     "proxy_url": url, "tenants": self.list(),
                     "current": self.current(),
@@ -1573,12 +1813,41 @@ class EECreds:
         # No usable existing proxy — spawn a new one.
         new_state = self._spawn_detached(proxy_port)
         self._proxy_url = new_state["url"]
+        self._proxy_mode = "detached"
+        self._init_ee_against_detached(new_state["url"])
         return {
             "proxy_url": new_state["url"], "tenants": self.list(),
             "current": self.current(),
             "mode": "detached", "discovered": [],
             "attached": False, "pid": new_state["pid"],
         }
+
+    def _init_ee_against_detached(self, url: str) -> None:
+        """Point ``ee.Initialize`` at the detached proxy URL.
+
+        Both the attach-existing and spawn-fresh paths call this so
+        EE is initialized in THIS process regardless of which branch
+        ran. Without it, ``stop()`` (which now calls ``ee.Reset()`` to
+        fail fast) leaves callers in a "proxy alive but EE not
+        initialized" state after a subsequent ``ensure_started`` — the
+        next ``.getInfo()`` raises "client library not initialized"
+        instead of using the just-spawned proxy.
+
+        Uses the first registered credential's project so EE builds
+        real project URLs (matching the in-process ``start()`` path).
+        Best-effort — logs and returns silently on failure so this
+        can't strand a caller who just wanted the proxy up.
+        """
+        try:
+            if not self._entries:
+                return
+            first = next(iter(self._entries.values()))
+            initialize_via_proxy(url, project=first.project_id or None)
+            self._install_default_workload_tag()
+        except Exception:
+            logger.exception(
+                "eeCreds._init_ee_against_detached: initialize_via_proxy failed"
+            )
 
     @classmethod
     def stop_detached(cls) -> bool:
@@ -1736,7 +2005,7 @@ class EECreds:
         # ``x-goog-user-project`` and get 403. Auto mode keeps the
         # proxy in-process so ``sync_oauth_project`` after the prompt
         # actually takes effect.
-        _default_mode = "auto" if "google.colab" in sys.modules else "detached"
+        _default_mode = "attached" if "google.colab" in sys.modules else "detached"
         mode = os.environ.get("GEEVIZ_EEAUTH_MODE", _default_mode).lower()
         if mode != "legacy":
             try:
@@ -2048,7 +2317,7 @@ class EECreds:
     def ensure_started(
         self,
         *,
-        mode: str = "auto",
+        mode: str = "attached",
         proxy_port: int = _DEFAULT_PROXY_PORT,
     ) -> dict:
         """Idempotent "I want the proxy running, please" helper used by
@@ -2076,11 +2345,30 @@ class EECreds:
         Returns ``{proxy_url, tenants, current, mode, discovered}``.
         ``proxy_url == ""`` means caller should fall back.
         """
-        m = (mode or "auto").lower()
-        if m not in ("auto", "proxy", "detached", "legacy"):
+        # Mode aliases — the old names (auto / proxy) still work but log
+        # a soft deprecation. Canonical names describe the process
+        # model: attached = in-process; detached = subprocess.
+        _MODE_ALIASES = {
+            "auto":  "attached",         # in-process, silent-fallback on fail
+            "proxy": "attached_strict",  # in-process, raise on fail
+        }
+        _CANONICAL_MODES = {"attached", "attached_strict", "detached", "legacy"}
+        m_raw = (mode or "attached").lower()
+        if m_raw in _MODE_ALIASES:
+            new_name = _MODE_ALIASES[m_raw]
+            logger.info(
+                "eeCreds.ensure_started: mode=%r is deprecated, use %r; "
+                "old aliases will be removed in a future major version",
+                m_raw, new_name,
+            )
+            m = new_name
+        else:
+            m = m_raw
+        if m not in _CANONICAL_MODES:
             raise ValueError(
-                f"eeCreds.ensure_started: mode must be auto/proxy/detached/"
-                f"legacy, got {mode!r}"
+                f"eeCreds.ensure_started: mode must be one of "
+                f"{sorted(_CANONICAL_MODES)} (aliases {sorted(_MODE_ALIASES)} "
+                f"also accepted); got {mode!r}"
             )
 
         if m == "legacy":
@@ -2089,11 +2377,73 @@ class EECreds:
                 "current": "", "mode": m, "discovered": [],
             }
 
+        # A proxy is already running on THIS singleton. Whether to
+        # reuse it depends on the requested mode vs the actual mode:
+        #
+        # - Same mode: reuse (idempotent).
+        # - Currently attached (in-process), asked for detached:
+        #   KEEP attached. The in-process proxy may hold Python
+        #   closures (workload_tag_builder, custom eeCreds state)
+        #   that can't cross the subprocess boundary — silently
+        #   demoting to detached would drop them without warning.
+        # - Currently detached (subprocess), asked for attached:
+        #   SWITCH to attached. The user explicitly wants in-process
+        #   (typically to use Map.port, or to install a closure via
+        #   start(workload_tag_builder=…)). Kill the subprocess and
+        #   fall through to the normal attached start path.
+        if self._proxy_url:
+            current_mode = self._proxy_mode or "attached"
+            # Port match test — if the caller pinned a proxy_port and
+            # the running proxy is on a DIFFERENT port, we can't reuse
+            # (they explicitly want another port). Falls through to
+            # the normal start path where _ensure_detached / _launch_proxy
+            # will respawn on the requested port.
+            try:
+                from urllib.parse import urlparse as _urlparse
+                current_port = _urlparse(self._proxy_url).port
+            except Exception:
+                current_port = None
+            port_matches = (
+                current_port is None
+                or int(current_port) == int(proxy_port)
+            )
+
+            if current_mode == m and port_matches:
+                return self._status_for_ensure(current_mode, discovered=[])
+            if current_mode == "attached" and port_matches:
+                # Requested detached but attached is running — keep
+                # attached (closures can't cross to subprocess).
+                return self._status_for_ensure("attached", discovered=[])
+            # Fall through to the normal start path — respawn is needed.
+            # Kill whichever kind is currently running.
+            if current_mode == "detached":
+                try:
+                    state = self._read_detached_state()
+                    if state:
+                        pid = int(state.get("pid", 0) or 0)
+                        if pid and self._pid_alive(pid):
+                            self._kill_detached(state)
+                        self._clear_detached_state()
+                except Exception:
+                    logger.exception("ensure_started: subprocess teardown failed")
+            else:
+                # attached — stop the in-process daemon thread
+                try:
+                    with self._lock:
+                        srv = self._proxy_server
+                        if srv is not None:
+                            srv.should_exit = True
+                        if self._proxy_thread is not None:
+                            self._proxy_thread.join(timeout=5.0)
+                        self._proxy_server = None
+                        self._proxy_thread = None
+                except Exception:
+                    logger.exception("ensure_started: in-process teardown failed")
+            self._proxy_url = None
+            self._proxy_mode = None
+
         if m == "detached":
             return self._ensure_detached(proxy_port)
-
-        if self._started and self._proxy_url:
-            return self._status_for_ensure(m, discovered=[])
 
         discovered: list[str] = []
         if not self._entries:
@@ -2103,15 +2453,15 @@ class EECreds:
                 logger.exception("eeCreds.ensure_started: discovery failed")
 
         if not self._entries:
-            if m == "proxy":
+            if m == "attached_strict":
                 raise RuntimeError(
-                    "eeCreds.ensure_started(mode='proxy'): no credentials "
-                    "could be auto-discovered. Either set "
+                    "eeCreds.ensure_started(mode='attached_strict'): no "
+                    "credentials could be auto-discovered. Either set "
                     "GOOGLE_APPLICATION_CREDENTIALS, run "
                     "`earthengine authenticate`, or call "
                     "eeCreds.addCreds(...) manually before this."
                 )
-            # mode='auto' → silent fallback
+            # mode='attached' → silent fallback
             return {
                 "proxy_url": "", "tenants": [], "current": "",
                 "mode": m, "discovered": discovered,
@@ -2123,7 +2473,7 @@ class EECreds:
             logger.exception(
                 "eeCreds.ensure_started: start() failed; falling back"
             )
-            if m == "proxy":
+            if m == "attached_strict":
                 raise
             return {
                 "proxy_url": "", "tenants": self.list(),

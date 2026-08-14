@@ -78,8 +78,7 @@ Map.clearMap()
 ####################################################################################################
 # Define user parameters:
 
-    # Get composite
-    composite = gil.getComposite(studyArea, startYear, endYear, startJulian, endJulian)
+
 # Specify study area: Study area
 # Can be a featureCollection, feature, or geometry
 studyArea = gil.testAreas["CA"]
@@ -99,7 +98,7 @@ endJulian = 273
 # pre-computed stats for cloudScore and TDOM, this does not
 # matter
 startYear = 1990
-endYear = 2024
+endYear = 2026
 
 
 # Choose band or index

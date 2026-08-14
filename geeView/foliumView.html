@@ -25,7 +25,7 @@
             <meta name="viewport" content="width=device-width,
                 initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
             <style>
-                #map_2be53e839ada36315766a94bfacfc8e5 {
+                #map_c4a72d1e1298eba80b6b7634daa5495a {
                     position: relative;
                     width: 100.0%;
                     height: 100.0%;
@@ -41,14 +41,14 @@
 <body>
     
     
-            <div class="folium-map" id="map_2be53e839ada36315766a94bfacfc8e5" ></div>
+            <div class="folium-map" id="map_c4a72d1e1298eba80b6b7634daa5495a" ></div>
         
 </body>
 <script>
     
     
-            var map_2be53e839ada36315766a94bfacfc8e5 = L.map(
-                "map_2be53e839ada36315766a94bfacfc8e5",
+            var map_c4a72d1e1298eba80b6b7634daa5495a = L.map(
+                "map_c4a72d1e1298eba80b6b7634daa5495a",
                 {
                     center: [0.0, 0.0],
                     crs: L.CRS.EPSG3857,
@@ -65,7 +65,7 @@
 
         
     
-            var tile_layer_5865eb1cd3056ae725acdd52f0fa63eb = L.tileLayer(
+            var tile_layer_9d7c5257a4570c0a2708012f9efb85b1 = L.tileLayer(
                 "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
                 {
   "minZoom": 0,
@@ -82,16 +82,16 @@
             );
         
     
-            tile_layer_5865eb1cd3056ae725acdd52f0fa63eb.addTo(map_2be53e839ada36315766a94bfacfc8e5);
+            tile_layer_9d7c5257a4570c0a2708012f9efb85b1.addTo(map_c4a72d1e1298eba80b6b7634daa5495a);
         
     
-            map_2be53e839ada36315766a94bfacfc8e5.fitBounds(
-                [[36.40774412106424, -119.96383760287506], [37.138150574108714, -117.95333955600006]],
+            map_c4a72d1e1298eba80b6b7634daa5495a.fitBounds(
+                [[40.595571243156144, -113.21807278537877], [41.786028237932015, -111.82280911350377]],
                 {}
             );
         
     
-            var tile_layer_efc7d62a5186dccc7ea0c66599273467 = L.tileLayer(
+            var tile_layer_3d0f7d460656a132eda7caa276d66036 = L.tileLayer(
                 "https://mt1.google.com/vt/lyrs=m\u0026x={x}\u0026y={y}\u0026z={z}",
                 {
   "minZoom": 0,
@@ -108,10 +108,10 @@
             );
         
     
-            tile_layer_efc7d62a5186dccc7ea0c66599273467.addTo(map_2be53e839ada36315766a94bfacfc8e5);
+            tile_layer_3d0f7d460656a132eda7caa276d66036.addTo(map_c4a72d1e1298eba80b6b7634daa5495a);
         
     
-            var tile_layer_3df1f222c988219ba6e8002639af71ee = L.tileLayer(
+            var tile_layer_d29b0c93ba242fe6608dd4766c61da67 = L.tileLayer(
                 "https://mt1.google.com/vt/lyrs=y\u0026x={x}\u0026y={y}\u0026z={z}",
                 {
   "minZoom": 0,
@@ -128,11 +128,11 @@
             );
         
     
-            tile_layer_3df1f222c988219ba6e8002639af71ee.addTo(map_2be53e839ada36315766a94bfacfc8e5);
+            tile_layer_d29b0c93ba242fe6608dd4766c61da67.addTo(map_c4a72d1e1298eba80b6b7634daa5495a);
         
     
-            var tile_layer_5bb10a1ccc8dd71d116d12d6a61db522 = L.tileLayer(
-                "https://earthengine.googleapis.com/v1/projects/rcr-gee-training/maps/290929b446ccf1b4492dfe449030fb00-b37f07fc9e41915d81b3f7d83dcf40df/tiles/{z}/{x}/{y}",
+            var tile_layer_e8e2b429919063bf6eeb86f0a4cff7b1 = L.tileLayer(
+                "http://127.0.0.1:8889/ee-api/v1/projects/geeviz-geo-agent/maps/921cafa1e3f9bc77d627eea8e3565a20-b169092096317930bca54018b6841e1e/tiles/{z}/{x}/{y}",
                 {
   "minZoom": 0,
   "maxZoom": 18,
@@ -148,11 +148,28 @@
             );
         
     
-            tile_layer_5bb10a1ccc8dd71d116d12d6a61db522.addTo(map_2be53e839ada36315766a94bfacfc8e5);
+            tile_layer_e8e2b429919063bf6eeb86f0a4cff7b1.addTo(map_c4a72d1e1298eba80b6b7634daa5495a);
         
     
-            var tile_layer_1ad9fdd9829ada4d4aa57a6bb55ec4d6 = L.tileLayer(
-                "https://earthengine.googleapis.com/v1/projects/rcr-gee-training/maps/cbe1d6e7e58e96647a88aaea75f90d16-f7da9cfd44eeb0babaa4b7b07c9536b3/tiles/{z}/{x}/{y}",
+            var tile_layer_b3c1e911c37e63e680f057c02e111506 = L.tileLayer(
+                "http://127.0.0.1:8889/ee-api/v1/projects/geeviz-geo-agent/maps/b0a79c05dda7e0b3a2f3e19301cad34c-401fab95cd0bec0730d8e3a709cce59a/tiles/{z}/{x}/{y}",
+                {
+  "minZoom": 0,
+  "maxZoom": 18,
+  "maxNativeZoom": 18,
+  "noWrap": false,
+  "attribution": "Google Earth Engine | GeeViz",
+  "subdomains": "abc",
+  "detectRetina": false,
+  "tms": false,
+  "opacity": 1,
+}
+
+            );
+        
+    
+            var tile_layer_81157d3ba640a6e9ef05c8c3b1da7cad = L.tileLayer(
+                "http://127.0.0.1:8889/ee-api/v1/projects/geeviz-geo-agent/maps/1dd1ca8432e9c77788f5ff204934cb9a-3eaae8829e66aa25e37cae9b74b73e00/tiles/{z}/{x}/{y}",
                 {
   "minZoom": 0,
   "maxZoom": 18,
@@ -168,29 +185,30 @@
             );
         
     
-            tile_layer_1ad9fdd9829ada4d4aa57a6bb55ec4d6.addTo(map_2be53e839ada36315766a94bfacfc8e5);
+            tile_layer_81157d3ba640a6e9ef05c8c3b1da7cad.addTo(map_c4a72d1e1298eba80b6b7634daa5495a);
         
     
-            var layer_control_5f1c63aac654eacb9b566ef237368239_layers = {
+            var layer_control_28c2bdc7b18e843093eb819c4a7f79ab_layers = {
                 base_layers : {
-                    "openstreetmap" : tile_layer_5865eb1cd3056ae725acdd52f0fa63eb,
+                    "openstreetmap" : tile_layer_9d7c5257a4570c0a2708012f9efb85b1,
                 },
                 overlays :  {
-                    "Google Maps" : tile_layer_efc7d62a5186dccc7ea0c66599273467,
-                    "Google Satellite" : tile_layer_3df1f222c988219ba6e8002639af71ee,
-                    "MODIS composite" : tile_layer_5bb10a1ccc8dd71d116d12d6a61db522,
-                    "Study area" : tile_layer_1ad9fdd9829ada4d4aa57a6bb55ec4d6,
+                    "Google Maps" : tile_layer_3d0f7d460656a132eda7caa276d66036,
+                    "Google Satellite" : tile_layer_d29b0c93ba242fe6608dd4766c61da67,
+                    "S2 Median 2023" : tile_layer_e8e2b429919063bf6eeb86f0a4cff7b1,
+                    "S2 Median 2022" : tile_layer_b3c1e911c37e63e680f057c02e111506,
+                    "Study Area" : tile_layer_81157d3ba640a6e9ef05c8c3b1da7cad,
                 },
             };
-            let layer_control_5f1c63aac654eacb9b566ef237368239 = L.control.layers(
-                layer_control_5f1c63aac654eacb9b566ef237368239_layers.base_layers,
-                layer_control_5f1c63aac654eacb9b566ef237368239_layers.overlays,
+            let layer_control_28c2bdc7b18e843093eb819c4a7f79ab = L.control.layers(
+                layer_control_28c2bdc7b18e843093eb819c4a7f79ab_layers.base_layers,
+                layer_control_28c2bdc7b18e843093eb819c4a7f79ab_layers.overlays,
                 {
   "position": "topright",
   "collapsed": false,
   "autoZIndex": false,
 }
-            ).addTo(map_2be53e839ada36315766a94bfacfc8e5);
+            ).addTo(map_c4a72d1e1298eba80b6b7634daa5495a);
 
         
     
@@ -201,7 +219,7 @@
   "titleCancel": "Exit Full Screen",
   "forceSeparateButton": false,
 }
-            ).addTo(map_2be53e839ada36315766a94bfacfc8e5);
+            ).addTo(map_c4a72d1e1298eba80b6b7634daa5495a);
         
 </script>
 </html>

@@ -11,7 +11,7 @@ What "by default" gets you
 ``Map.view()`` in :mod:`geeViz.geeView` auto-starts the proxy on first
 use. The flow is:
 
-1. ``Map.view()`` → ``eeCreds.ensure_started("auto")``
+1. ``Map.view()`` → ``eeCreds.ensure_started("attached")``
 2. :func:`~geeViz.eeAuth.eeCreds.EECreds.discover` finds whatever
    credentials are visible in the environment
    (``$GOOGLE_APPLICATION_CREDENTIALS``, the EE persistent file,
@@ -162,4 +162,4 @@ __all__ = [
     "create_proxy_app",
 ]
 
-__version__ = "2026.7.4"
+__version__ = "2026.8.1"

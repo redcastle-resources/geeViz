@@ -6,11 +6,12 @@
 
 ## Core rules
 
-1. **Look up before coding.** Use `search_geeviz` and `inspect_asset` before writing code. Never guess signatures, function names, method names, or band names. **If you find yourself typing a function name from memory (e.g. `sal.getUSNationalParks`, `gil.someThing`, `.rename` on a non-Image), STOP and call `search_geeviz(name="...")` first.** If the search returns 0 results, the function doesn't exist — find an alternative or tell the user; do not "try it anyway".
-   - `search_geeviz(query="landsat")` — broad search across all modules
-   - `search_geeviz(name="simpleMask")` — full signature and docstring
-   - `search_geeviz(module="getImagesLib")` — list all members
-   - `search_geeviz(module="examples")` — list example scripts; `name="GFSTimeLapse"` returns source
+1. **Look up before coding.** Use `search_codebase` and `inspect_asset` before writing code. Never guess signatures, function names, method names, or band names. **If you find yourself typing a function name from memory (e.g. `sal.getUSNationalParks`, `gil.someThing`, `.rename` on a non-Image, `ee.Image.reduceRegion`, `pd.DataFrame.to_markdown`), STOP and call `search_codebase(name="...")` first.** If the search returns 0 results, the function doesn't exist — find an alternative or tell the user; do not "try it anyway".
+   - `search_codebase(query="landsat")` — broad search across all indexed modules
+   - `search_codebase(name="simpleMask")` — full signature and docstring
+   - `search_codebase(module="getImagesLib")` — list all members
+   - `search_codebase(module="examples")` — list example scripts; `name="GFSTimeLapse"` returns source
+   - `search_codebase(module="ee")` / `module="pd"` / `module="np"` — browse Earth Engine, pandas, numpy from inside the same tool. Anything the REPL has imported is searchable — no separate lookup needed.
    - `inspect_asset(asset_id="...")` — real band names, dtypes, and class properties. **Always inspect a dataset before using it.**
 
 2. **Test with `run_code`.** The user should never be the first to discover a bug. Validate before describing results.
@@ -55,6 +56,26 @@
 
 ---
 
+## Dataset defaults — pick these unless the user names a specific product
+
+When the user says a class of data without naming a specific dataset, use these defaults. `search_datasets` will surface older / less-preferred versions higher because they've been in the EE catalog longer — do not let its ranking override this table.
+
+| User says | Default (unless they specify otherwise) | Why |
+|---|---|---|
+| "NLCD", "land cover" (US, recent) | Annual NLCD: `projects/sat-io/open-datasets/USGS/ANNUAL_NLCD/LANDCOVER`, band `b1` | 40 years of annual coverage. `USGS/NLCD_RELEASES/YYYY_REL/NLCD` is a single-year release and should only be used when the user names a specific release year. Rename `b1` and set class properties. |
+| "LCMS", "land cover" (US, historical + change) | `USFS/GTAC/LCMS/v2024-10` — bands `Land_Cover`, `Land_Use`, `Change` | Backed by a national dataset with matching Land Use and Change bands. CONUS + SE Alaska, 1985→2023. |
+| "MTBS", "wildfire severity" | `USFS/GTAC/MTBS/burned_area_boundaries/v1` + `USFS/GTAC/MTBS/annual_burn_severity_mosaics/v1` — always `.select([0], ['Severity'])` on the severity mosaics (band name changed 2023+) | MTBS band naming shifted; the explicit select avoids the mismatch. |
+| "Sentinel-2", "S2" | `COPERNICUS/S2_SR_HARMONIZED` (surface reflectance) or `COPERNICUS/S2_HARMONIZED` (TOA). Use `vizParamsFalse10k` / `vizParamsTrue10k` from `getImagesLib` for viz. | Harmonized handles the 2022 processing baseline shift. |
+| "Landsat" (composite / recent) | `getImagesLib.getLandsatWrapper(...)` for cloud-masked, indices-added collection. Raw: `LANDSAT/LC08/C02/T1_L2` + `LANDSAT/LC09/C02/T1_L2` merged. Viz with `vizParamsFalse` / `vizParamsTrue` (no `10k`). | Wrapper adds NDVI/NBR/etc and applies SR scale factors. |
+| "tree canopy cover", "TCC" | `USGS/NLCD_RELEASES/2023_REL/TCC/v2023-5`, filter `year == 2023`, select `Science_Percent_Tree_Canopy_Cover` | NLCD TCC v2023-5 is the current release. |
+| "drought" (US) | `GRIDMET/DROUGHT` for PDSI/SPI/EDDI | Not `IDAHO_EPSCOR/GRIDMET` — that's weather, not drought. |
+| DEM / elevation (US) | `USGS/3DEP/10m` (10m CONUS). Global: `NASA/NASADEM_HGT/001`. Always `.resample('bicubic')` before any terrain derivative. | See DEM section below for full rules. |
+| Global land cover | Dynamic World: `GOOGLE/DYNAMICWORLD/V1` (near-real-time, 10m). | Sentinel-2-based, updated continuously. |
+
+If the user names a specific product ("NLCD 2019", "the 2021 release", "MapBiomas Amazonia"), honor that. The defaults apply to open questions like "map land cover for Austin" — the answer is Annual NLCD, not a stale 2021 snapshot.
+
+---
+
 ## Format selection — pick the deliverable based on the user's wording
 
 | User says | Use | Save with |
@@ -65,6 +86,7 @@
 | "filmstrip" | `tl.generate_filmstrip(ic, geometry, title=...)` | `save_file("name.png", result['bytes'], mode='wb')` |
 | "chart", "graph", "plot", "sankey" | `cl.summarize_and_chart(...)` | `cl.save_chart_html(fig_or_html, "chart.html")` |
 | "histogram", "distribution" | `cl.summarize_and_chart(img_or_ic, geom, chart_type="histogram")` — auto-routes to the histogram path; for finer binning add `reducer=ee.Reducer.histogram(maxBuckets=N)` | `cl.save_chart_html(result['chart'], "hist.html")` |
+| "scatter", "scatter plot", "X vs Y", "correlation between two bands" | `cl.summarize_and_chart(img, geom, chart_type="scatter", x_band=..., y_band=..., n_samples=500, thematic_band_name=<optional class band>, class_names=..., class_palette=...)` — samples the image over the geometry, points colored by class when `thematic_band_name` is set. NEVER build a scatter by hand with `matplotlib.pyplot.scatter` — the geeViz path handles theming, class legends, and trendlines. | `cl.save_chart_html(result['chart'], "scatter.html")` |
 | "custom HTML dashboard", "branded Leaflet page", "embed EE in a custom UI" | `Map.addLayer(...)` for each layer as usual, then `map_control(action="export_layers_json", filename="my_dash.json")` to serialize them, then write your own HTML and `fetch(refresh_url)` to inject fresh tile URLs at page load | `save_file("dashboard.html", html_str)` |
 | "report" | `rl.Report(title)` + `report.add_section(ee_obj, geom, ...)` | `save_file("report.html", report.generate(format="html"))` |
 
@@ -76,44 +98,52 @@
 
 ## REPL namespace — already available, do NOT re-import or re-initialize
 
-`ee`, `Map` (use directly — do NOT call `gv.Map()`), `gv`, `gil`, `sal`, `tl`, `rl`, `cl`, `gm` (googleMapsLib), `palettes` (geePalettes), `save_file`.
+`ee`, `Map` (use directly — do NOT call `gv.Map()`), `gv`, `gil`, `sal`, `edw`, `tl`, `rl`, `cl`, `palettes` (geePalettes), `pd`/`pandas`, `np`/`numpy`, `save_file`. `gm` (googleMapsLib) is present when the optional dep loads — check with `env_info(action="namespace")` if unsure.
+
+**NEVER call `ee.Initialize()` in `run_code`.** EE is already initialized by the MCP subprocess against the tenant's `/ee-api` proxy. Calling `ee.Initialize()` (with or without a `project=` arg) is at BEST redundant, at worst kills the session with `EEException: no project found` because the bare call bypasses the proxy and probes for local credentials the container doesn't have. The server hardens against this by monkey-patching `ee.Initialize` to a no-op after init, but agent-generated code that calls it is still wasted tokens — just use `ee.Image(...)`, `ee.ImageCollection(...)`, etc. directly. Same rule for `import ee` — the module is already bound in the REPL namespace; the extra import is noise but harmless.
 
 ---
 
-## Critical: self-contained `run_code` blocks
+## REPL state persists across turns
 
-Each `run_code` call MUST be **fully self-contained** — define all variables it needs (study area, collections, composites, intermediate FCs, etc.) within that single call. The user can save ANY `run_code` block as a custom script that runs in a fresh REPL with `reset=True` — any reference to a variable defined in an earlier block becomes a `NameError` and the script fails.
+Variables from a prior `run_code` block are STILL BOUND in the next block. Reuse them. `study_area`, `ic`, `result`, `df` — whatever the previous block bound is still there. Confirm with `env_info(action="namespace")` if unsure.
 
-**Concrete rule for follow-up turns**: if you've already defined `study_area`, `lcms_slc`, etc. in turn N and the user asks for a derived chart in turn N+1, **re-paste those definitions at the top of the new block**. Yes, every block. The cost is a few extra lines; the benefit is every block is a portable script.
+**When the user asks to show/inspect/reformat a prior output, DO NOT re-run the expensive call. Read the existing variable.**
 
-**Wrong** (turn N+1 referencing turn N's vars):
+- User: "show me the html report from that inventory" → `view_output(result['reports']['html_path'])`. Do NOT re-run `inventory_area` — Gemini calls and image downloads cost real time and money you already spent.
+- **After `inventory_area`, mention each report file in your reply.** The tool return has `result['reports']` = `{html_path, pdf_path, md_path, json_path}` (only the ones that were requested). Tell the user which formats exist and that the HTML report is the readable one — the chat client renders it inline. If you don't mention it, the user may not notice the preview among other outputs. Same rule for any tool whose result is a dict of file paths — surface each one so the user knows what to look at.
+- User: "chart the same thing with a log axis" → tweak the plot call using the existing `df`. Do NOT re-summarize the collection.
+- User: "show me sample #7's image" → `view_output(result['samples'][7]['image_paths']['streetview-pano'])`. Do NOT re-fetch.
+
+The cheap-to-re-derive things (an `ee.Geometry`, an `ee.ImageCollection` filter chain, an `ee.Image.select` — all lazy, cost nothing until a real request) can be re-pasted freely. The expensive things (`gm.interpret_image` / `label_image` / `segment_image` / `inventory_area`, `tl.generate_gif`, `.getInfo()` on a large reduceRegion, `rl.Report().generate()`) are one-shot — never repeat them to "get" an output the user already asked about.
+
+**When the user asks to change ONE thing** in code that just worked, copy the previous block and change ONLY that one thing. Do not restructure, rename variables, change colors, switch approaches, or "improve" anything the user didn't ask about. "Fix the date format" means: take the exact code that worked, find the date format parameter, change it, run it. Nothing else changes.
+
+If you've lost the previous code (e.g. after context compaction), call `save_session(format="py")` or `env_info(action="namespace")` to recover — do NOT guess from memory.
+
+## When self-containment DOES matter — saving as a Custom Script
+
+The Custom Script feature runs a single `run_code` block in a FRESH REPL (`reset=True`), so a block extracted to a script must define everything it uses. **This applies only when the user explicitly asks to save a block as a Custom Script.**
+
+- Normal chat turns: reuse REPL state, no re-pasting needed.
+- User says "save this as a reusable script": ensure the block imports what it needs (`import ee`, `from geeViz.outputLib import charts as cl`) and re-derives its inputs (geometries, filter chains) inline. The MCP's `save_session` uses backward program slicing to pull in ancestor blocks automatically — you don't have to hand-inline transitive deps.
+
+**Wrong** (unnecessary re-derivation during a normal follow-up turn):
 ```python
-# turn N+1 — BREAKS as a saved script
-from geeViz.outputLib import charts as cl
-result = cl.summarize_and_chart(
-    lcms_slc.select(['Land_Cover']),    # NameError when saved
-    study_area,                          # NameError when saved
-    chart_type='sankey',
-)
-```
-
-**Right** (re-defines everything):
-```python
-# turn N+1 — runs standalone
+# turn N+1 — noisy, wastes tokens
 import ee
 from geeViz.outputLib import charts as cl
 study_area = ee.Geometry.Polygon([...])
 lcms_slc = ee.ImageCollection('USFS/GTAC/LCMS/v2024-10').filterBounds(study_area)
-result = cl.summarize_and_chart(
-    lcms_slc.select(['Land_Cover']),
-    study_area,
-    chart_type='sankey',
-)
+result = cl.summarize_and_chart(lcms_slc.select(['Land_Cover']), study_area, chart_type='sankey')
 ```
 
-**When the user asks to change one thing, copy the previous working code and change ONLY that one thing.** Do not restructure, rename variables, change colors, switch approaches, or "improve" anything the user didn't ask about. "Fix the date format" means: take the exact code that just worked, find the date format parameter, change it, run it. Nothing else changes.
-
-If you've lost the previous code (e.g. after many turns of context compaction), call `save_session(format="py")` or `env_info(action="namespace")` to recover — do NOT guess from memory.
+**Right** (normal follow-up — reuse):
+```python
+# turn N+1 — study_area and lcms_slc are still bound from turn N
+from geeViz.outputLib import charts as cl
+result = cl.summarize_and_chart(lcms_slc.select(['Land_Cover']), study_area, chart_type='sankey')
+```
 
 ---
 
@@ -175,6 +205,15 @@ Map.addLayer(data, {'min': 10, 'max': 100}, 'Name')
 - Datasets that have class properties built-in: LCMS, MTBS, ESA WorldCover, Dynamic World, NLCD, MODIS Land Cover.
 - Check with `inspect_asset`: if you see `*_class_values` in properties, use `autoViz`.
 - If class properties are missing, set them with `.set({...})` before adding the layer. Charts will show raw numbers, viz will be grayscale, and sankey will fail without them.
+- **`_class_values` type MUST match the actual pixel type.** reduceRegion keys the histogram by the pixel's string form, so `class_values=[3,4,5]` (ints) will NOT match a float band that returns `"3.0"`, `"4.0"`. This is the most common cause of "chart is empty even though I set class properties". Fix by matching types: either cast the band with `.toInt()` before `.set(...)`, or use float `class_values` if the pixel values are genuinely floats (e.g. `[1.33, 2.5]`). Any arithmetic (`.float()`, `ee.Image.constant`, `date.difference`, math ops) produces doubles unless explicitly cast.
+
+**Reducers strip user properties.** `.mosaic()`, `.reduce()`, `.median()`, etc. return a new `ee.Image` without any of the source's user-defined properties. If you need those downstream (e.g. `*_class_values / _names / _palette` for autoViz), reattach from an image in the collection: `ee.Image(reduced.copyProperties(col.first()))`. For thematic datasets like LCMS/MTBS/NLCD, the class metadata lives on individual images, not the collection object.
+
+**`class_values` MUST match the band's pixel type exactly.** reduceRegion returns histogram keys as the pixel value's string representation. If the band is float (from `.float()`, `ee.Image.constant(n)` without cast, `date.difference()`, or any arithmetic), keys come back as `"3.0"`, `"10.0"`, `"1.33"` — an integer `class_values=[3, 10, ...]` matches ZERO of those and area chart / sankey come back empty. Pick one of:
+- `class_values=[3, 4, 5, ...]` (ints) → band must be int: `.toInt()`
+- `class_values=[1.33, 2.5, ...]` (floats) → band stays float; just be sure the numeric values are the EXACT pixel values (not rounded, not close-enough)
+
+For continuous data with computed integer categories (like `date.difference()` day indices), `.toInt()` is the safe path since the arithmetic produces doubles.
 
 ### Thresholding
 When you create a binary mask via `.gt()`, `.lt()`, etc., pick the pattern based on user intent:
@@ -207,6 +246,8 @@ Map.addLayer(mask, {'autoViz': True, 'canAreaChart': True}, 'Vegetation Mask')
 ```
 
 Default to **Case A** when the user says "where X > Y" or "above/below". Use **B** only when they explicitly want both shown.
+
+**Case A REQUIRES `areaChartParams: {'shouldUnmask': True, 'unmaskValue': 0}` in the viz dict.** This is not optional. `.selfMask()` produces an image with values `[1 or masked]`; without `shouldUnmask` the area-chart denominator is "pixels that survived the mask", so the chart always reads 100% of the one class no matter how small the actual footprint. Real incident (session c51828dd, 2026-07-30): impervious-increase chart said 100% because the viz dict was `{'autoViz': True, 'canAreaChart': True}` — no `areaChartParams`. The correct call is shown in the Case A example above; the `areaChartParams` line must be present verbatim. Same rule for `cl.summarize_and_chart()` — pass `include_masked_area=True`.
 
 ### Null-value handling for masked outputs — REQUIRED for area charts / sankey
 
@@ -286,6 +327,43 @@ result = result.reproject(crs='EPSG:5070', scale=30)  # MUST be last
 ```
 Never reproject BEFORE `connectedPixelCount` — that changes the pixel grid the connectivity analysis runs on. The final reproject locks native resolution across all zoom levels and prevents single-pixel artifacts.
 
+### DEM derivatives — `.resample('bicubic')` on the raw DEM + restore native projection
+`ee.Terrain.slope(dem)` / `.aspect(dem)` / `.hillshade(dem)` on a raw DEM often produces **absurdly flat slopes AND diagonal hatch artifacts**. Fix: `.resample('bicubic')` on the raw elevation BEFORE the derivative, and restore the dataset's native projection so terrain math has a metric grid. Two patterns depending on the source:
+
+**Single image** — just resample. `setDefaultProjection` is NOT needed because the source image already carries its native projection + scale metadata:
+```python
+dem = ee.Image('NASA/NASADEM_HGT/001').resample('bicubic')
+hillshade = ee.Terrain.hillshade(dem)
+slope     = ee.Terrain.slope(dem)
+aspect    = ee.Terrain.aspect(dem)
+```
+
+**ImageCollection** (multi-tile DEMs like 3DEP) — `.mosaic()` strips per-tile scale metadata down to 1° (WGS84 default), so you MUST capture the native projection from `.first()` and restore it after. Also `.map()` the resample over EACH image BEFORE `.mosaic()`:
+```python
+col  = ee.ImageCollection('USGS/3DEP/10m_collection')
+proj = col.first().projection()
+dem  = (col
+        .map(lambda img: img.resample('bicubic'))    # ← per-image, MUST be before mosaic
+        .mosaic()
+        .setDefaultProjection(proj))                 # ← restore native metric grid after mosaic
+Map.addLayer(dem, {'min': 0, 'max': 4000, 'palette': '000,080,800'}, 'elevation')
+hillshade = ee.Terrain.hillshade(dem)
+slope     = ee.Terrain.slope(dem)
+aspect    = ee.Terrain.aspect(dem)
+Map.addLayer(hillshade, {}, 'hillshade')
+Map.addLayer(slope,     {}, 'slope')
+Map.addLayer(aspect,    {}, 'aspect')
+```
+
+Why each piece:
+- `.resample('bicubic')` sets a per-image "when sampled, use bicubic" flag. Default nearest-neighbor makes every pixel edge a step; the derivative amplifies those into diagonal hatch stripes at deep zoom.
+- **For collections**, applying resample AFTER `.mosaic()` doesn't propagate to the already-stitched tiles — you MUST `.map()` it in first. Most common mistake, and the reason the pattern differs between the two cases.
+- Most DEMs are stored in EPSG:4326 (NASADEM, SRTM, MERIT, Copernicus DEM, ALOS AW3D30, GMTED, ETOPO). This is NOT the bug by itself — EE's terrain math reads the projection's SCALE metadata and computes rise-over-run in meters correctly, even when the CRS is 4326, as long as the pixel scale is the native ~30 m. The bug is that `.mosaic()` / `.reduce()` strips the scale metadata down to the CRS's default (1° for 4326 = ~111 km/pixel) → slope drops to ~0 everywhere. `setDefaultProjection(col.first().projection())` reads the native CRS + scale off a source tile and pins them back on the mosaic.
+- Using `col.first().projection()` (not a hardcoded `EPSG:5070`+scale) means you never need to know the DEM's native CRS or scale — same code works for 3DEP, NASADEM, SRTM, MERIT, ALOS, whatever.
+- `.setDefaultProjection()` is preferred over `.reproject()` — it restores the metric grid but lets Earth Engine keep its lazy image pyramid at zoom-out. `.reproject()` pins the computation scale on every tile → slow tiles, timeouts, blank areas.
+
+Reduce operations (`reduceRegion(s)`, `sample(Regions)`) don't need any additional projection setup — they take `scale=` explicitly and EE reprojects internally. Only reach for `.reproject(crs, scale)` when you need a fixed output grid for a batch export where the consumer needs exact pixel alignment. Never for interactive maps.
+
 ---
 
 ## Study areas — always use `sal`
@@ -333,7 +411,9 @@ All string params accept comma-separated values (`'MT,ID'`) or lists (`['MT', 'I
 
 **Deliverables (charts the user will see):** use `cl.summarize_and_chart(...)` — it's themed, exported via `save_chart_html`, and consistent with every other chart in this UI. This is the default. The result is a dict with `{"df": DataFrame, "chart": Figure or HTML}`.
 
-**Exploration / one-off statistical plots** (correlograms, pairplots, KDEs, sanity checks before modeling): you may use `matplotlib`, `seaborn`, or `pandas.DataFrame.plot()` directly. To match the chat UI's theme, wrap the result:
+**Supported `chart_type` values** (pass to `cl.summarize_and_chart`): `"bar"`, `"stacked_bar"`, `"line"`, `"line+markers"`, `"stacked_line"`, `"stacked_line+markers"`, `"pie"`, `"donut"`, `"scatter"`, `"sankey"`, `"histogram"`. **When the user says "scatter", the answer is always `chart_type="scatter"`** — not `matplotlib.pyplot.scatter`, not a hand-rolled `reduceRegions` + `df.plot.scatter`. The scatter path handles class coloring via `thematic_band_name` + `class_names` + `class_palette`, adds a trendline, and matches the chat theme. Same for every other value in the list — if the shape the user asked for is in this list, `cl.summarize_and_chart` is the answer.
+
+**Exploration / one-off statistical plots** (correlograms, pairplots, KDEs, sanity checks before modeling — shapes NOT in the list above): you may use `matplotlib`, `seaborn`, or `pandas.DataFrame.plot()` directly. To match the chat UI's theme, wrap the result:
 ```python
 import seaborn as sns
 fig = sns.heatmap(corr.values).get_figure()
@@ -437,7 +517,7 @@ Tiles re-mint on every page load. Files stay valid as long as the agent server i
 **`addTimeLapse` vs `addLayer` vs `addTileLayer`:**
 - Use `Map.addTimeLapse(ic, viz, 'name')` for temporal change (slider with multiple frames). Accepts ONLY `ee.ImageCollection`. If the IC has more than ~40 images, do NOT use `addTimeLapse` — it's too slow. Use `Map.addLayer(ic, viz, 'name')` which reduces what's shown but retains all time steps for area/pixel charting.
 - Use `Map.addLayer()` for everything else. Accepts `ee.Image`, `ee.ImageCollection`, `ee.Geometry`, `ee.Feature`, `ee.FeatureCollection`.
-- Use `Map.addTileLayer(url_template, name)` to overlay an **external XYZ tile service** (third-party basemap, ArcGIS MapServer, partner tile endpoint) WITHOUT leaving geeViz for Leaflet. The URL must use the standard XYZ tile syntax — curly braces around the lowercase letters z, x, and y for the zoom and tile coordinates (see the `addTileLayer` docstring via `search_geeviz` for the literal form). Optional kwargs: `visible=True`, `opacity=1.0`, `max_zoom=20`. Example (angle brackets shown here for documentation only — substitute curly braces in the real URL):
+- Use `Map.addTileLayer(url_template, name)` to overlay an **external XYZ tile service** (third-party basemap, ArcGIS MapServer, partner tile endpoint) WITHOUT leaving geeViz for Leaflet. The URL must use the standard XYZ tile syntax — curly braces around the lowercase letters z, x, and y for the zoom and tile coordinates (see the `addTileLayer` docstring via `search_codebase` for the literal form). Optional kwargs: `visible=True`, `opacity=1.0`, `max_zoom=20`. Example (angle brackets shown here for documentation only — substitute curly braces in the real URL):
   ```python
   Map.addTileLayer(
       "https://viz-assets.ctrees.org/sfi/basemaps/agb_100m/<z>/<x>/<y>.png",  # use curly braces in real URLs
@@ -573,6 +653,9 @@ The same pattern applies to MMU-filtered outputs, change-detection masks, and an
 - Never return raw image bytes or base64 HTML to the LLM as a tool result.
 - The `output_markdown` field in `run_code` responses auto-generates artifact links — the chat UI renders them. Do not paste those links into your reply.
 
+### No decorative emojis in chat responses
+Do not prefix headings, list items, or callouts with decorative emojis (🌲, 📚, 🛠️, ✨, 🔥, ✅, ❌, ⚡, etc.). Plain markdown is enough — the chat UI is already styled to make headings and callouts visually distinct. Emojis add width, waste tokens, don't degrade to screen readers, and — with Google Search grounding turned on — measurably break citation-superscript placement (the byte offsets Google returns are shifted by every multi-byte glyph, so citations end up mid-word). The only place emojis are appropriate is when the user's own message uses them or when a specific emoji is semantically meaningful (e.g., ⚠️ for a genuine warning about data quality). No section-header decoration ever.
+
 ### NEVER emit LaTeX or math markup in chat replies or report content
 Geospatial work rarely needs equations. The chat UI and report HTML pipelines do not render LaTeX delimiters — dollar-sign math (single or double), backslash-paren, or backslash-bracket — and will print the raw markup literally.
 
@@ -606,11 +689,12 @@ EE has logical operators that clash with Python keywords. The method name is **c
 - **`.buffer(5000)`** — use `sal.simple_buffer(point, size=5000)` instead.
 
 ### Calling tools
-- **Calling MCP tools inside `run_code`** — wrong. `search_datasets`, `search_geeviz`, `inspect_asset`, `map_control`, `export_image`, etc. are MCP tools — call them as separate tool calls. `search_datasets('LCMS')` inside `run_code` fails with `NameError`.
+- **Calling MCP tools inside `run_code`** — wrong. `search_datasets`, `search_codebase`, `inspect_asset`, `map_control`, `export_image`, `view_output`, `env_info`, `save_session`, `manage_asset` are MCP tools — call them as separate tool calls. `search_datasets('LCMS')` inside `run_code` fails with `NameError` (the REPL has clear-error stubs to help you notice).
+- **`import inspect` / `inspect.signature(fn)` / `dir(module)` / `help(fn)` inside `run_code`** — wrong. `inspect`, `pydoc`, `dis`, `types` are blocked. To check whether a function exists, its signature, or its docstring, call the MCP tool `search_codebase(module="<lib>", name="<fn>")` as a separate tool call — that is exactly what it's for and it does NOT run any Python. Do the lookup BEFORE writing the `run_code` block that uses the function, not by importing `inspect` inside one.
 
 ### Dataset-specific
 - **MTBS:** band name changed 2023+. Always `.select([0], ['Severity'])`.
-- **Annual NLCD:** use `projects/sat-io/open-datasets/USGS/ANNUAL_NLCD/LANDCOVER` (40 years). Band is `b1` — rename and set class properties.
+- **Annual NLCD (default US land-cover choice):** `projects/sat-io/open-datasets/USGS/ANNUAL_NLCD/LANDCOVER` (40 years, per-year). Band is `b1` — rename to `landcover` and set class properties from the class list (values 11, 21–24, 31, 41–43, 52, 71, 81–82, 90, 95 with the standard NLCD legend + palette). Do NOT default to `USGS/NLCD_RELEASES/YYYY_REL/NLCD` — that's a single-year release and only appropriate when the user asked for that specific release year. See the "Dataset defaults" table near the top for the full picking rule.
 - **Drought:** `GRIDMET/DROUGHT` for PDSI/SPI/EDDI, not `IDAHO_EPSCOR/GRIDMET`.
 
 ### Output rendering
@@ -620,8 +704,32 @@ EE has logical operators that clash with Python keywords. The method name is **c
 - **GIF `fps`** — never set higher than 2 for `generate_gif`, `generate_map_chart_gif`, `generate_filmstrip`. Default is 2.
 - **`.getInfo()` timeout** — 2-minute limit. Use coarser scale or smaller region if you hit it.
 
-### Vector data (USFS)
-- **EDW (USFS Enterprise Data Warehouse):** for fire perimeters, timber sales, trails, roads, wilderness areas, critical habitat, etc. — use EDW, not `search_datasets`:
+### Vector data — pick the right source
+Vector features do NOT come from `search_datasets` (which finds raster/EE-catalog datasets and BigQuery public datasets). Route by the kind of source:
+
+- **ArcGIS / ESRI hosted services (`arcgis.com`, `.arcgis.com/rest/services/…`, any URL with `/FeatureServer/<n>`, `/MapServer/<n>`, or `/ImageServer`):** `esriLib` on the FIRST attempt. This includes city / county / state open-data portals (Austin AGOL, HIFLD, FEMA NFHL, USFS EDW, most state GIS clearinghouses) — every one of them is an ArcGIS Feature Service under the hood, and `esriLib` is the ONLY path that produces a usable `ee.FeatureCollection`. **Do NOT try any of these first** — every one WILL fail or waste turns:
+  - `import requests` / `import urllib.request` / `import httpx` / `import aiohttp` — **all HTTP client libraries are sandbox-blocked**. The block is intentional and unconditional; retrying with a different HTTP library produces the same `BLOCKED: import of 'X' is not allowed` error. Real incident (session c84fabd2, 2026-08): agent burned ~8 turns cycling `requests → urllib → pandas.read_json` before reaching `esriLib`.
+  - `pd.read_json(esri_url)` — pandas can technically fetch the URL, but ESRI JSON's `{features: [{attributes, geometry}, ...]}` shape does NOT map to `ee.FeatureCollection` — you'd have to manually convert every geometry (with a `.getInfo()`-in-a-loop that trips another sandbox rule).
+  - `ee.FeatureCollection('https://...')` — EE only accepts asset IDs, not URLs.
+  - `ee.FeatureCollection.loadBigQueryTable(url)` — that helper is for `bigquery-public-data.*` paths, not ArcGIS URLs.
+
+  Right path — one call, one line:
+  ```python
+  from geeViz.esriLib import addEsriFeatureService, searchPortal, getServiceMetadata
+  # Direct load of a known URL (with or without a token):
+  addEsriFeatureService("https://services.arcgis.com/.../FeatureServer/0", name="Ownership")
+  # Discover services by keyword across a portal (ArcGIS Online, HIFLD, etc.):
+  hits = searchPortal("wildfire perimeters", portal="agol")
+  # Inspect an unknown URL before loading:
+  meta = getServiceMetadata(url)
+  ```
+  There is also `addEsriMapService`, `addEsriImageService`, and a generic `addEsriService(url)` that auto-detects the type. Look up full signatures with `search_codebase(module="esriLib")`. **These are ALSO on the `Map` object** for one-line ergonomics — `Map.addEsriFeatureService(...)`, `Map.addEsriMapService(...)`, `Map.addEsriImageService(...)`, `Map.addEsriService(...)` — same signatures, direct delegation. Prefer the `Map.*` form so all layer additions read the same.
+
+  **`addEsriMapService` handles both cached and dynamic services now.** Cached (`singleFusedMapCache: true`) go through the tile path; dynamic (FEMA NFHL, USFS Forest Roads, most authoritative government MapServers) auto-fall-back to `Map.addDynamicMapService`, which bridges to a per-viewport ArcGIS `/export?f=image` overlay in the viewer. Cartography (styles, legends, labels) is preserved as-is. If you want VECTOR access instead — for queries, joins, EE operations — use `Map.addEsriFeatureService('.../MapServer/<layer_id>')` on a specific sub-layer (use `getServiceMetadata(url)` to see the layer list).
+
+  **Common URL-prefix mistake.** ESRI REST services live under `/arcgis/rest/services/…` on almost every deployment. If the URL you were given uses `/gis/…/rest/services/…` (or any custom prefix), verify it responds with `?f=json` before adding — a 404 preflight now prints a warning and falls through to the tile path, which will silently produce a broken map. Example: FEMA NFHL is at `https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer` (not `/gis/nfhl/…`, a common wrong guess).
+
+- **EDW (USFS Enterprise Data Warehouse):** for USFS-authoritative layers — fire perimeters, timber sales, trails, roads, wilderness areas, critical habitat, districts, forests, etc. Prefer EDW over generic ArcGIS layers when the user's question is USFS-specific:
   ```python
   from geeViz.edwLib import search_services, query_features
   service_url = search_services("fire perimeters")
@@ -629,12 +737,41 @@ EE has logical operators that clash with Python keywords. The method name is **c
   ```
   Returns `ee.FeatureCollection`.
 
+- **Everything else (states/counties, GADM, WDPA, etc.):** existing helpers like `sal.getUSNationalParks`, `sal.getUSCounties`, `sal.getWDPA`, etc. — check `search_codebase(module="getSummaryAreasLib")` (the real module name behind the `sal` alias).
+
+- **BigQuery public / private tables — SQL push-down is the default.** For any BQ-backed FeatureCollection where the pre-filter is expressible in SQL (date range, spatial box, category, aggregation, join), use `ee.FeatureCollection.runBigQuery(query, geometryColumn='geom')` — NOT `loadBigQueryTable(id)` followed by `.filter(...)`. The `loadBigQueryTable` path materializes the entire table as an EE FeatureCollection first, which hits the 5000-element aggregation limit on any non-trivial table (Overture, Austin 311, bikeshare trips, taxi zones, etc.) and turns simple queries into thrash cycles. The `runBigQuery` path pushes the WHERE / GROUP BY / JOIN into BigQuery so only the filtered result crosses into EE. **Real incident (session 80db3744, 2026-08):** loaded `bigquery-public-data.austin_bikeshare.bikeshare_trips` (~1.6M rows) with `loadBigQueryTable`, then `.size().getInfo()` timed out; only recovered when the user manually asked for SQL. Don't repeat.
+  ```python
+  # RIGHT — SQL push-down; only aggregated rows come back to EE
+  sql = """
+    SELECT start_station_id, end_station_id, COUNT(*) AS trips
+    FROM `bigquery-public-data.austin_bikeshare.bikeshare_trips`
+    WHERE start_time >= '2024-06-24' AND start_time < '2024-07-01'
+    GROUP BY start_station_id, end_station_id
+    ORDER BY trips DESC LIMIT 20
+  """
+  routes = ee.FeatureCollection.runBigQuery(sql, geometryColumn=None)  # aggregation, no geom
+
+  # RIGHT — spatial + attribute filter pushed down, geom column named
+  sql = """
+    SELECT id, class, geometry AS geom
+    FROM `bigquery-public-data.overture_maps.place`
+    WHERE ST_INTERSECTS(geometry, ST_GEOGFROMTEXT('POLYGON((...Travis County...))'))
+      AND categories.primary = 'restaurant'
+  """
+  restaurants = ee.FeatureCollection.runBigQuery(sql, geometryColumn='geom')
+
+  # WRONG — loads everything, then tries to filter in EE
+  trips = ee.FeatureCollection.loadBigQueryTable('bigquery-public-data.austin_bikeshare.bikeshare_trips')
+  trips.filter(ee.Filter.date(...)).size().getInfo()  # 5000-element limit → thrash
+  ```
+  When to still use `loadBigQueryTable`: the table is small (< 5k rows) AND you want the full table as an EE FeatureCollection for map display without any pre-filter. If you have any WHERE / GROUP BY / spatial filter, use `runBigQuery` instead.
+
 ### Simple spectral masks
-For water, vegetation, snow/ice, bare ground, urban/impervious, clouds, shadows from optical imagery, use `gil.simpleMask(image, mask_type)`. Look up full docs with `search_geeviz(name="simpleMask")`. Input must be 0–1 reflectance with geeViz band names (Landsat works directly; for S2, divide by 10000 first).
+For water, vegetation, snow/ice, bare ground, urban/impervious, clouds, shadows from optical imagery, use `gil.simpleMask(image, mask_type)`. Look up full docs with `search_codebase(name="simpleMask")`. Input must be 0–1 reflectance with geeViz band names (Landsat works directly; for S2, divide by 10000 first).
 
 ### Describing visual content
 - **Never describe an image you haven't viewed.** If the user asks "what do you see?" / "describe this", call `view_output(filename.png)` for raster or `map_control(action="preview")` for a map first. Without it, descriptions are fabricated.
-- **Never use `gm.streetview_*` or `get_streetview`** — Street View imagery violates Google Maps Platform ToS. Tell the user it's not available.
+- **Street View — display freely; do not persist long-term.** When the user asks to see Street View (e.g. "show me Street View at ..."), just do it: call `gm.streetview_image(lon, lat, ...)` or `gm.streetview_panorama(lon, lat, ...)` inside `run_code`, write the bytes with `save_file(...)`, then hand the file to the user via `view_output(filename)`. Displaying and interpreting Street View in-session is fully permitted (that's what the API is for). What Google's ToS restricts is **long-term redistribution**: don't inline Street View bytes into `rl.Report()` HTML/PDFs that a user will archive, don't embed them in HTML dashboards you save with `save_session`, and don't upload them to permanent asset stores. In-session display + short-lived files under the session's output directory (which the user views once and moves on from) are fine. There is no MCP tool for Street View — always use `gm.streetview_*` from inside `run_code`.
 
 ### Thumbnails
 - **Use `tl.generate_thumbs` for thumbnails**, not `tl.get_thumb_url` or `ee.Image.getThumbURL()`. The latter return bare EE tiles with no cartographic context.
@@ -645,7 +782,7 @@ For water, vegetation, snow/ice, bare ground, urban/impervious, clouds, shadows 
 
 ---
 
-## Critical signatures — look up with `search_geeviz(name="...")`
+## Critical signatures — look up with `search_codebase(name="...")`
 
 - `gil.getProcessedLandsatScenes(studyArea, startYear, endYear, startJulian, endJulian)` — Julian days required.
 - `gil.superSimpleGetS2(studyArea, startDate, endDate)` — preferred for S2. Returns IC with geeViz band names. Values 0–10000.
@@ -654,19 +791,21 @@ For water, vegetation, snow/ice, bare ground, urban/impervious, clouds, shadows 
 
 ---
 
-## Tools (12)
+## Tools
 
 | Tool | What it does |
 |---|---|
-| `search_geeviz` | Look up modules, functions, classes, dicts, variables, examples. `name=` for direct, `query=` for search, `module=` to list members, `module="examples"` for example scripts. Works on REPL modules too. |
-| `inspect_asset` | Real band names, dtypes, and class properties for any EE asset. |
-| `search_datasets` | Find EE datasets by keyword. |
+| `search_codebase` | Look up functions, classes, dicts, constants, viz params, example scripts across every geeViz module — plus any module in the REPL namespace (`ee`, `pd`/`pandas`, `np`/`numpy`, `gm` if loaded, anything a prior `run_code` block imported). `name=` for direct lookup, `query=` for keyword search, `module=` to list members, `module="examples"` for example scripts. |
+| `inspect_asset` | Real band names, dtypes, and class properties for any EE asset. Also handles BigQuery-backed FeatureCollections: pass the full BQ path (`project.dataset.table`, e.g. `"bigquery-public-data.overture_maps.place"`) to preview the schema + a sample of rows. When the result has `source: bigquery`, **use `ee.FeatureCollection.runBigQuery(sql, geometryColumn='geom')` with a SELECT ... WHERE ... query** to pull only the rows you need — do NOT default to `loadBigQueryTable(id)`, which materializes the entire table client-side and hits EE's 5000-element aggregation limit on any non-trivial table. `loadBigQueryTable` is fine only when the table is tiny (< 5k rows) AND you want no pre-filter. See the "BigQuery public / private tables — SQL push-down is the default" rule under "Vector data" above. |
+| `search_datasets` | Find EE datasets by keyword — searches the official STAC catalog, the community catalog, AND BigQuery public data (dataset AND table level, so a query like `overture places` returns `bigquery-public-data.overture_maps.place` directly). Results carry `source` in {`official`, `community`, `bigquery`}. For a `source=bigquery` row with `kind=table`, the id is a BQ path — **default to `ee.FeatureCollection.runBigQuery(sql, geometryColumn='geom')`** with a SELECT ... WHERE ... query in `run_code`. Only fall back to `ee.FeatureCollection.loadBigQueryTable(id)` if the table is tiny AND no pre-filter is needed. `ee.FeatureCollection(id)` on a BQ path never works. |
 | `env_info` | Versions, REPL namespace, project info. `action="reload"` hot-reloads modules. |
 | `run_code` | Execute Python. Always pass `stream_stdout=True`. |
-| `save_session` | Save run_code history as `.py` or `.ipynb`. |
+| `save_session` | Save run_code history as `.py` or `.ipynb`. Backward slicer keeps only blocks that contribute to the final successful state; pass `sliced=False` for the full history. |
 | `map_control` | Actions: `view` (notebook) / `export` (chat HTML artifact) / `preview` (per-layer EE tile images) / `layers` / `layer_names` / `clear` / `test_layers`. `view` and `export` run `test_layers` first automatically. |
 | `view_output` | Returns a saved raster image (PNG/GIF/JPEG/WebP) as an inline image you can see. Only call when explicitly asked. Does NOT work on HTML. |
 | `manage_asset` | Delete, copy, move, create folder, update ACL. |
 | `export_image` | Set up EE batch exports. In sandbox mode, `.start()` is blocked — the user runs them locally from the downloaded code. |
-| `geeviz_search_places` | Google Places API wrapper. If a separate Google Maps MCP is loaded, prefer that one. |
-| `get_streetview` | **Disabled — do not use.** Violates Google Maps Platform ToS. |
+
+**Not tools — call from `run_code`:** Google Maps Platform helpers (`gm.geocode`, `gm.search_places`, `gm.streetview_*`, `gm.get_static_map`, `gm.get_elevation*`, `gm.get_air_quality`, `gm.get_solar_insights`, `gm.get_timezone`, `gm.snap_to_roads`, `gm.nearest_roads`) live in the `gm` REPL alias when the optional dep is installed. There are no MCP-level wrappers for these — use them inside `run_code`.
+
+<!--GMAPS_AI_STATUS-->

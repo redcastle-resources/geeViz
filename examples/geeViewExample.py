@@ -26,15 +26,15 @@
 import os, sys
 
 sys.path.append(os.getcwd())
-import geeViz.geeView as geeView
 
+
+import geeViz.geeView as geeView
 ee = geeView.ee
 Map = geeView.Map
-
+Map.port = 1111
 # Clear any layers added to Map object
 # If map is not cleared, layers are simply appended to the existing list of layers if layers have been added previously
 Map.clearMap()
-Map.port = 1234
 ####################################################################################################
 # Bring in NLCD 2011
 nlcd = ee.Image("USGS/NLCD_RELEASES/2016_REL/2011")
@@ -72,7 +72,7 @@ severityViz = {"min": 1, "max": 6, "palette": mtbsColors, "classLegendDict": mtb
 Map.addLayer(mtbs.max(), severityViz, "MTBS 1984-2017 Highest Severity", True)
 
 # Feature collections can be added to the map as well
-perims = ee.FeatureCollection("projects/gtac-mtbs/assets/perimeters/mtbs_perims_DD")
+perims = ee.FeatureCollection("USFS/GTAC/MTBS/burned_area_boundaries/v1")
 Map.addLayer(perims, {"strokeColor": "00F"}, "MTBS Burn Perimeters", True)
 
 # Smaller feature collections can be added to the map as a geojson vector by specifying 'layerType':'geeVector'

@@ -970,6 +970,15 @@ def set_default_theme(name):
 
 
 def get_default_theme():
+    """Return the module-level default ``Theme`` (dark theme).
+
+    Used by ``reports.py`` and other consumers when no explicit theme
+    argument is passed. Change ``set_default_theme("light")`` to switch
+    process-wide.
+
+    Returns:
+        Theme: The active default theme instance.
+    """
     return _DEFAULT_THEME
 
 
