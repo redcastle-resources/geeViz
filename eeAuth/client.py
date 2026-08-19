@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import os
 import sys
 from contextlib import contextmanager
 from typing import Optional
@@ -63,6 +64,25 @@ CURRENT_SESSION_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 CURRENT_TENANT: contextvars.ContextVar[str] = contextvars.ContextVar(
     "geeViz_ee_tenant", default="",
+)
+
+# Billing tenant slug — distinct from ``CURRENT_TENANT`` (which is the
+# eeCreds credential-name, e.g. "ee-persistent" for ADC or "acme-prod"
+# for a named SA). Agents set this to their fixed deploy-time tenant
+# (e.g. "askterra") so the workload-tag mint carries the right
+# attribution regardless of which cred is currently active. Empty means
+# no separate billing tenant known — the default builder falls back to
+# ``CURRENT_TENANT`` (matches standalone-geeViz behavior).
+CURRENT_BILLING_TENANT: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "geeViz_billing_tenant", default="",
+)
+# Action label for the current EE call (e.g. "map", "compute", "thumb",
+# "export"). Set by the caller so ``_default_workload_tag_builder`` can
+# emit that as the ``action`` part instead of a generic "proxy-default"
+# marker. Empty means no action known — builder still mints, just
+# without an action label.
+CURRENT_ACTION: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "geeViz_ee_action", default="",
 )
 
 # Header name the proxy looks at to pick a credential. Matches the
@@ -196,12 +216,28 @@ class TenantAwareHttp:
                     # ``X-Agent-*`` so they're clearly distinct from
                     # any browser/IAP auth headers the proxy already
                     # inspects.
-                    user = CURRENT_USER_EMAIL.get()
-                    if user:
-                        headers["X-Agent-User-Email"] = user
-                    session = CURRENT_SESSION_ID.get()
-                    if session:
-                        headers["X-Agent-Session-ID"] = session
+                    #
+                    # ``X-Agent-Attrib-Secret`` proves these headers came
+                    # from a process the server itself spawned. Without
+                    # it the proxy MUST NOT believe them: it bills EE
+                    # spend and consumes CDU caps against whatever email
+                    # they name, and the proxy path skips auth for
+                    # apparently-loopback peers — which is a
+                    # client-controlled judgement when uvicorn runs with
+                    # forwarded_allow_ips="*". The server puts the value
+                    # in our environment when it spawns us; when it's
+                    # absent we send no attribution headers at all and
+                    # the call attributes to nobody, which is the safe
+                    # failure.
+                    secret = os.environ.get("GEEVIZ_AGENT_ATTRIB_SECRET", "")
+                    if secret:
+                        user = CURRENT_USER_EMAIL.get()
+                        if user:
+                            headers["X-Agent-User-Email"] = user
+                        session = CURRENT_SESSION_ID.get()
+                        if session:
+                            headers["X-Agent-Session-ID"] = session
+                        headers["X-Agent-Attrib-Secret"] = secret
                     return self._thread_http().request(
                         uri, method, body, headers, **kw
                     )

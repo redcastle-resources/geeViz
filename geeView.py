@@ -1869,30 +1869,47 @@ class mapper:
         # actual DEFAULT, not ``getWorkloadTag()`` — which returns the
         # CURRENT tag (typically whatever the user last set) and would
         # install the wrong value as the browser fallback.
+        _py_default = ""
         try:
             import ee.data as _ee_data
             _state = _ee_data._get_state().workload_tag
             _py_default = (_state._default or "").strip()
-            # Prefer the CURRENT tag when it's set and differs from the
-            # installed default. Rationale: in an agent context, each
-            # tool call scopes a per-user attribution tag via
-            # ``ee.data.setWorkloadTag(wl_<hash>)`` (see the MCP tool
-            # wrapper). The default remains the generic
-            # ``geeviz__<tenant>`` installed at eeCreds init — which
-            # has no ``ee_workload_tags`` mapping and gets silently
-            # skipped by the puller. Baking the CURRENT tag as the JS
-            # default carries the per-user attribution into post-load
-            # browser compute (area chart, inspector click, dynamic
-            # recompute), so a user opening a shared map still logs EE
-            # under the session that produced it. Notebooks are
-            # unaffected: nothing sets a distinct current tag before
-            # Map.view() there, so _cur == _py_default and the default
-            # branch runs unchanged.
-            _py_cur = (_state._tag or "").strip()
-            if _py_cur and _py_cur != _py_default:
-                _py_default = _py_cur
         except Exception:
             _py_default = ""
+        # Prefer the CURRENT tag when it's set and differs from the
+        # installed default. Rationale: in an agent context, each tool
+        # call scopes a per-user attribution tag via
+        # ``ee.data.setWorkloadTag(wl_<hash>)`` (see the MCP tool
+        # wrapper). The default remains the generic ``geeviz__<tenant>``
+        # installed at eeCreds init — which has no ``ee_workload_tags``
+        # mapping and gets silently skipped by the puller. Baking the
+        # CURRENT tag as the JS default carries per-user attribution
+        # into post-load browser compute (area chart, inspector click,
+        # dynamic recompute).
+        #
+        # NOT done behind a proxy. There the current tag IS the
+        # per-user ``wl_<hash>``, and emitting it would publish that
+        # internal attribution id into page source for anyone viewing a
+        # shared map — the exposure this whole branch exists to avoid.
+        # It would also be pointless: the proxy rewrites the query
+        # string on every POST and substitutes its own server-built tag,
+        # so post-load browser compute is attributed server-side to
+        # whoever is actually driving it. Falling through to ``""``
+        # clears the viewer's ``${mode}---viewer-exports`` fallback,
+        # which is what we want.
+        #
+        # Read in its OWN try: ``_state._tag`` is a private attribute
+        # whose shape varies across earthengine-api versions, and
+        # sharing one except with the ``_default`` read above meant a
+        # failure here discarded an already-valid default and silently
+        # untagged every post-load call.
+        if not _EE_API_UPSTREAM:
+            try:
+                _py_cur = (_state._tag or "").strip()
+                if _py_cur and _py_cur != _py_default:
+                    _py_default = _py_cur
+            except Exception:
+                pass
         if _py_default:
             _pd_esc = _py_default.replace("\\", "\\\\").replace('"', '\\"')
             lines += 'try{ee.data.setDefaultWorkloadTag("' + _pd_esc + '");}catch(e){}'
