@@ -32,12 +32,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
 import threading
 from pathlib import Path
 from typing import Any, Optional, Protocol, runtime_checkable
+
+logger = logging.getLogger(__name__)
 
 _TAG_ALLOWED_CHAR = re.compile(r"[^a-z0-9_\-]")
 _TAG_MAX_LEN = 63
@@ -159,6 +162,83 @@ class TagStore(Protocol):
 
     def lookup(self, tag: str) -> Optional[dict[str, Any]]:  # pragma: no cover
         ...
+
+
+class ChainedTagStore:
+    """Write to the first store; read from all of them in order.
+
+    Exists because more than one store can be live on the same machine.
+    A geeViz agent installs a Postgres-backed store, while notebooks and
+    standalone scripts use the sqlite default — so a tag minted under
+    one is invisible to the other's ``lookup``, and the caller sees a
+    bare ``None`` that reads as "this tag was never minted" when the
+    truth is "you asked the wrong store". That is how EE usage ends up
+    labelled unattributed while its mapping sits intact a few
+    directories away.
+
+    The asymmetry is deliberate:
+
+    * ``put`` -> **primary only**. Writing to every backend would make
+      two partial, diverging copies of the mapping and turn a lookup
+      miss into a correctness question ("which one is right?").
+      Attribution needs exactly one writer.
+    * ``lookup`` -> **every backend, in order**, first hit wins. Reads
+      are free of that problem: finding a mapping somewhere is strictly
+      better than not finding it, and the answer is the same wherever
+      it came from because tags are content-addressed (same parts +
+      same secret = same tag).
+
+    A failing backend never breaks the chain — it's logged and skipped,
+    so an unreachable Postgres degrades to "sqlite still answers"
+    instead of taking lookups down with it.
+
+    Example::
+
+        eeCreds.setTagStore(ChainedTagStore(PostgresTagStore(...),
+                                            SQLiteTagStore()))
+    """
+
+    def __init__(self, *stores) -> None:
+        real = [s for s in stores if s is not None]
+        if not real:
+            raise ValueError("ChainedTagStore: at least one store required")
+        self._stores = real
+
+    @property
+    def primary(self):
+        """The store that receives writes."""
+        return self._stores[0]
+
+    def put(self, tag: str, parts: dict[str, Any]) -> None:
+        self._stores[0].put(tag, parts)
+
+    def lookup(self, tag: str) -> Optional[dict[str, Any]]:
+        for i, store in enumerate(self._stores):
+            try:
+                hit = store.lookup(tag)
+            except Exception:
+                logger.exception(
+                    "ChainedTagStore: %s.lookup failed for %r; trying the "
+                    "next store", type(store).__name__, tag,
+                )
+                continue
+            if hit is not None:
+                if i:
+                    # Found somewhere other than where writes go. Worth
+                    # saying out loud: it means this process is reading
+                    # a mapping some OTHER writer produced.
+                    logger.debug(
+                        "ChainedTagStore: %r resolved from fallback %s "
+                        "(primary %s had no row)",
+                        tag, type(store).__name__,
+                        type(self._stores[0]).__name__,
+                    )
+                return hit
+        return None
+
+    def __repr__(self) -> str:
+        names = " -> ".join(type(s).__name__ for s in self._stores)
+        return f"ChainedTagStore({names})"
 
 
 class InMemoryTagStore:
