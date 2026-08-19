@@ -1871,16 +1871,45 @@ class mapper:
         # install the wrong value as the browser fallback.
         try:
             import ee.data as _ee_data
-            _py_default = (_ee_data._get_state().workload_tag._default or "").strip()
+            _state = _ee_data._get_state().workload_tag
+            _py_default = (_state._default or "").strip()
+            # Prefer the CURRENT tag when it's set and differs from the
+            # installed default. Rationale: in an agent context, each
+            # tool call scopes a per-user attribution tag via
+            # ``ee.data.setWorkloadTag(wl_<hash>)`` (see the MCP tool
+            # wrapper). The default remains the generic
+            # ``geeviz__<tenant>`` installed at eeCreds init — which
+            # has no ``ee_workload_tags`` mapping and gets silently
+            # skipped by the puller. Baking the CURRENT tag as the JS
+            # default carries the per-user attribution into post-load
+            # browser compute (area chart, inspector click, dynamic
+            # recompute), so a user opening a shared map still logs EE
+            # under the session that produced it. Notebooks are
+            # unaffected: nothing sets a distinct current tag before
+            # Map.view() there, so _cur == _py_default and the default
+            # branch runs unchanged.
+            _py_cur = (_state._tag or "").strip()
+            if _py_cur and _py_cur != _py_default:
+                _py_default = _py_cur
         except Exception:
             _py_default = ""
         if _py_default:
             _pd_esc = _py_default.replace("\\", "\\\\").replace('"', '\\"')
             lines += 'try{ee.data.setDefaultWorkloadTag("' + _pd_esc + '");}catch(e){}'
+        else:
+            # No Python-side default to push. Explicitly clear the JS
+            # viewer's built-in ``${mode}---viewer-exports`` fallback
+            # (installed by lcms-viewer's ``eeInitSuccessCallback``) so
+            # post-load browser compute (area chart, inspector click,
+            # dynamic recompute) attributes to nothing rather than a
+            # cryptic ``geeviz---viewer-exports`` bucket that has no
+            # matching ``ee_workload_tags`` row and gets skipped by the
+            # puller anyway. Users expect ``""`` when nothing is set.
+            lines += 'try{ee.data.setDefaultWorkloadTag("");}catch(e){}'
         # Clean slate for per-layer workload tags. resetWorkloadTag()
         # (no arg) resets CURRENT back to whichever default is now in
-        # effect — the Python one we just pushed, or the viewer JS's
-        # ``geeviz---viewer-exports`` if nothing was pushed.
+        # effect — the Python one we just pushed, or the empty string
+        # we just installed above. Either way, no ``viewer-exports``.
         lines += "try{ee.data.resetWorkloadTag();}catch(e){}"
         for idDict in self.idDictList:
             # Per-layer workload tag replay. If addLayer was called under
@@ -1889,7 +1918,18 @@ class mapper:
             # bakes <X> into that layer's tile URL. Emits reset when the
             # layer was added under no explicit tag so a preceding layer
             # doesn't leak its tag onto this one.
-            _wt = idDict.get("workloadTag", "")
+            #
+            # Suppressed entirely when an eeAuth proxy is in front of
+            # us (``_EE_API_UPSTREAM`` set). The proxy rewrites the
+            # query string on every POST — stripping whatever the
+            # client sent and substituting its own server-built tag
+            # (see eeAuth/server.py:_rewrite_query_with_workload_tag).
+            # So under a proxy this value is never used for billing;
+            # emitting it only publishes an internal ``wl_...``
+            # attribution id into page source that a viewer can read.
+            # Standalone geeViz keeps emitting it — with no proxy to
+            # substitute one, this IS the only tagging mechanism.
+            _wt = "" if _EE_API_UPSTREAM else idDict.get("workloadTag", "")
             if _wt:
                 _wt_esc = _wt.replace('\\', '\\\\').replace('"', '\\"')
                 lines += 'try{ee.data.setWorkloadTag("' + _wt_esc + '");}catch(e){}'
@@ -1955,10 +1995,13 @@ class mapper:
                 idDict["name"],
                 str(idDict["visible"]).lower(),
             )
-        # Reset back to the viewer's default fallback tag so anything
-        # fired AFTER the layer sequence (area chart, inspector clicks,
-        # dynamic recomputes) attributes to viewer-exports rather than
-        # inheriting the last layer's tag.
+        # Reset back to the current default tag (the Python one we
+        # pushed above, or the empty override if nothing was set) so
+        # anything fired AFTER the layer sequence (area chart, inspector
+        # clicks, dynamic recomputes) attributes to the same default
+        # rather than inheriting the last layer's tag. Notably: never
+        # falls back to the JS viewer's built-in
+        # ``${mode}---viewer-exports`` — that was overridden at eeInit.
         lines += "try{ee.data.resetWorkloadTag();}catch(e){}"
         lines += 'if(layerLoadErrorMessages.length>0){showMessage("Map.addLayer Error List",layerLoadErrorMessages.join("<br>"));};'
         lines += "setTimeout(function(){if(layerLoadErrorMessages.length===0){$('#close-modal-button').click();}}, 2500);"
