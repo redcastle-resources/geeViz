@@ -973,7 +973,13 @@ class mapper:
         self._port = int(port)
         # True once the caller sets Map.port (property setter) or passes
         # a non-default to __init__. See the setter for why it matters.
-        self._port_explicit = int(port) != int(Map._DEFAULT_PORT)
+        #
+        # Read through ``self``, NOT the module-level ``Map`` singleton:
+        # ``Map = mapper()`` is constructed at import time, so this
+        # __init__ runs BEFORE that name is bound and referencing it
+        # here raises NameError — which breaks `import geeViz.geeView`
+        # outright.
+        self._port_explicit = int(port) != int(self._DEFAULT_PORT)
         self.layerNumber = 1
         self.idDictList = []
         self.mapCommandList = []
