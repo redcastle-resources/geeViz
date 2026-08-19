@@ -957,6 +957,11 @@ class mapper:
         # Map.view() prints a runtime hint after it knows the
         # resolved mode.
         self._port = int(value)
+        # Record that a HUMAN chose this port. view() only pins the
+        # eeAuth proxy to it when that's true — otherwise the default
+        # 8001 would be treated as a demand and kill a healthy proxy
+        # listening on the eeAuth default (8889) just to move it.
+        self._port_explicit = True
 
     _DEFAULT_PORT = 8001
 
@@ -966,6 +971,9 @@ class mapper:
         # itself and so internal writes (``_ensure_server`` fallback
         # port pick) can bypass the warning path.
         self._port = int(port)
+        # True once the caller sets Map.port (property setter) or passes
+        # a non-default to __init__. See the setter for why it matters.
+        self._port_explicit = int(port) != int(Map._DEFAULT_PORT)
         self.layerNumber = 1
         self.idDictList = []
         self.mapCommandList = []
@@ -2268,8 +2276,26 @@ class mapper:
                 # port-mismatch respawn check in _ensure_detached). Also
                 # gives attached mode a consistent preferred port —
                 # _find_free_port bumps if it's taken.
+                # Pin the proxy to Map.port ONLY when a human chose it.
+                #
+                # Passing the default unconditionally made 8001 read as a
+                # demand, and eeCreds' default is 8889 — so import-time
+                # init would spawn a proxy on 8889 and view() would
+                # immediately kill it and respawn on 8001. The next
+                # process flipped it back, and any browser tab still
+                # pointed at the previous port died with
+                # ERR_CONNECTION_RESET, which is the exact thing
+                # detached mode exists to avoid.
+                #
+                # ``None`` means "any healthy proxy will do" — reuse
+                # whatever is already listening. In detached mode the
+                # viewer is served BY the proxy, so a pinned port
+                # necessarily moves the proxy; that respawn is intended.
                 status = _eeCreds.ensure_started(
-                    mode=_auth_mode, proxy_port=int(self._port),
+                    mode=_auth_mode,
+                    proxy_port=(int(self._port)
+                                if getattr(self, "_port_explicit", False)
+                                else None),
                 )
                 if status["proxy_url"]:
                     ee_proxy_url = status["proxy_url"]

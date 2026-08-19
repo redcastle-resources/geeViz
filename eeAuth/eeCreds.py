@@ -1718,7 +1718,7 @@ class EECreds:
         )
         return state
 
-    def _ensure_detached(self, proxy_port: int) -> dict:
+    def _ensure_detached(self, proxy_port: "int | None") -> dict:
         """``ensure_started(mode='detached')`` core. Discover tenants,
         compute expected tenant fingerprint, look at the state file:
 
@@ -1781,10 +1781,15 @@ class EECreds:
                         existing_port = _urlparse(url).port
                     except Exception:
                         existing_port = None
-                    if existing_port and int(existing_port) != int(proxy_port):
+                    # Only a PINNED port makes a different one stale.
+                    # ``proxy_port is None`` = "wherever it is, is fine",
+                    # which is what stops import-time init and
+                    # Map.view() from evicting each other's proxy.
+                    if (proxy_port is not None and existing_port
+                            and int(existing_port) != int(proxy_port)):
                         stale_reason = (
                             f"port mismatch (proxy on {existing_port}, "
-                            f"requested {proxy_port})"
+                            f"caller pinned {proxy_port})"
                         )
 
             if stale_reason is None:
@@ -1796,7 +1801,9 @@ class EECreds:
                     "eeCreds: attached to detached proxy %s pid=%s",
                     url, pid,
                 )
-                self._init_ee_against_detached(url)
+                self._init_ee_against_detached(
+                    url, origin="attached to existing detached proxy",
+                )
                 return {
                     "proxy_url": url, "tenants": self.list(),
                     "current": self.current(),
@@ -1810,11 +1817,17 @@ class EECreds:
             self._kill_detached(state)
             self._clear_detached_state()
 
-        # No usable existing proxy — spawn a new one.
-        new_state = self._spawn_detached(proxy_port)
+        # No usable existing proxy — spawn a new one. An unpinned
+        # caller (proxy_port=None) gets the module default; the pin only
+        # ever mattered for deciding whether to REUSE.
+        new_state = self._spawn_detached(
+            _DEFAULT_PROXY_PORT if proxy_port is None else proxy_port
+        )
         self._proxy_url = new_state["url"]
         self._proxy_mode = "detached"
-        self._init_ee_against_detached(new_state["url"])
+        self._init_ee_against_detached(
+            new_state["url"], origin="spawned new detached proxy",
+        )
         return {
             "proxy_url": new_state["url"], "tenants": self.list(),
             "current": self.current(),
@@ -1822,7 +1835,7 @@ class EECreds:
             "attached": False, "pid": new_state["pid"],
         }
 
-    def _init_ee_against_detached(self, url: str) -> None:
+    def _init_ee_against_detached(self, url: str, origin: str = "") -> None:
         """Point ``ee.Initialize`` at the detached proxy URL.
 
         Both the attach-existing and spawn-fresh paths call this so
@@ -1842,7 +1855,9 @@ class EECreds:
             if not self._entries:
                 return
             first = next(iter(self._entries.values()))
-            initialize_via_proxy(url, project=first.project_id or None)
+            initialize_via_proxy(
+                url, project=first.project_id or None, origin=origin,
+            )
             self._install_default_workload_tag()
         except Exception:
             logger.exception(
@@ -2318,7 +2333,7 @@ class EECreds:
         self,
         *,
         mode: str = "attached",
-        proxy_port: int = _DEFAULT_PROXY_PORT,
+        proxy_port: "int | None" = None,
     ) -> dict:
         """Idempotent "I want the proxy running, please" helper used by
         ``Map.view()`` and any other code that wants to ride the eeCreds
@@ -2393,18 +2408,26 @@ class EECreds:
         #   fall through to the normal attached start path.
         if self._proxy_url:
             current_mode = self._proxy_mode or "attached"
-            # Port match test — if the caller pinned a proxy_port and
-            # the running proxy is on a DIFFERENT port, we can't reuse
-            # (they explicitly want another port). Falls through to
-            # the normal start path where _ensure_detached / _launch_proxy
-            # will respawn on the requested port.
+            # Port match test. ``proxy_port is None`` means the caller
+            # doesn't care WHERE the proxy listens — any healthy one is
+            # reusable. Only an explicitly pinned port can force a
+            # respawn somewhere else.
+            #
+            # This used to compare against a defaulted argument, which
+            # made every caller look like it had pinned a port: the
+            # import path defaulted to 8889 and Map.view() to 8001, so
+            # the two killed and respawned each other's proxy on every
+            # run. Port is where a proxy happens to be listening;
+            # reusability is decided by the version + tenant
+            # fingerprint that /health already reports.
             try:
                 from urllib.parse import urlparse as _urlparse
                 current_port = _urlparse(self._proxy_url).port
             except Exception:
                 current_port = None
             port_matches = (
-                current_port is None
+                proxy_port is None
+                or current_port is None
                 or int(current_port) == int(proxy_port)
             )
 
@@ -2468,7 +2491,10 @@ class EECreds:
             }
 
         try:
-            self.start(proxy_port=proxy_port)
+            self.start(
+                proxy_port=(_DEFAULT_PROXY_PORT if proxy_port is None
+                            else proxy_port)
+            )
         except Exception:
             logger.exception(
                 "eeCreds.ensure_started: start() failed; falling back"

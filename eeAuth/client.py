@@ -249,6 +249,7 @@ def initialize_via_proxy(
     proxy_url: str,
     tenant_header: str = DEFAULT_TENANT_HEADER,
     project: Optional[str] = None,
+    origin: str = "",
 ) -> bool:
     """Initialize the Earth Engine SDK to route all REST calls through
     ``proxy_url``.
@@ -282,7 +283,15 @@ def initialize_via_proxy(
             http_transport=TenantAwareHttp(tenant_header=tenant_header),
             project=project or "ee-proxy-placeholder",
         )
+        # ``origin`` says whether this proxy was newly SPAWNED, an
+        # existing one we ATTACHED to, or a re-point of an already-live
+        # session. Without it the line reads identically in all three
+        # cases, which is how a kill-and-respawn on a different port
+        # looked like "two proxies running" in a notebook.
         print(
+            f"[geeViz.eeAuth] EE initialized via proxy: {proxy_url} "
+            f"({origin}, tenant_header={tenant_header})"
+            if origin else
             f"[geeViz.eeAuth] EE initialized via proxy: {proxy_url} "
             f"(tenant_header={tenant_header})",
             file=sys.stderr,
