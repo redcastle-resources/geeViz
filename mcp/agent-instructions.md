@@ -737,7 +737,7 @@ Vector features do NOT come from `search_datasets` (which finds raster/EE-catalo
   ```
   Returns `ee.FeatureCollection`.
 
-- **Everything else (states/counties, GADM, WDPA, etc.):** existing helpers like `sal.getUSNationalParks`, `sal.getUSCounties`, `sal.getWDPA`, etc. — check `search_codebase(module="getSummaryAreasLib")` (the real module name behind the `sal` alias).
+- **Everything else (states/counties, GADM, WDPA, etc.):** existing helpers like `sal.getUSNationalParks`, `sal.getUSCounties`, `sal.getProtectedAreas`, etc. — check `search_codebase(module="getSummaryAreasLib")` (the real module name behind the `sal` alias).
 
 - **BigQuery public / private tables — SQL push-down is the default.** For any BQ-backed FeatureCollection where the pre-filter is expressible in SQL (date range, spatial box, category, aggregation, join), use `ee.FeatureCollection.runBigQuery(query, geometryColumn='geom')` — NOT `loadBigQueryTable(id)` followed by `.filter(...)`. The `loadBigQueryTable` path materializes the entire table as an EE FeatureCollection first, which hits the 5000-element aggregation limit on any non-trivial table (Overture, Austin 311, bikeshare trips, taxi zones, etc.) and turns simple queries into thrash cycles. The `runBigQuery` path pushes the WHERE / GROUP BY / JOIN into BigQuery so only the filtered result crosses into EE. **Real incident (session 80db3744, 2026-08):** loaded `bigquery-public-data.austin_bikeshare.bikeshare_trips` (~1.6M rows) with `loadBigQueryTable`, then `.size().getInfo()` timed out; only recovered when the user manually asked for SQL. Don't repeat.
   ```python
