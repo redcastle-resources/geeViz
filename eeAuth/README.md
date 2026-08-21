@@ -295,15 +295,27 @@ A custom `tenant_resolver` lets you resolve tenancy from IAP identity,
 JWT claims, or wherever else your auth lives. The default reads the
 header then the query param.
 
-A custom `workload_tag_builder` lets you build richer attribution tags
-(user + session + tool etc.). Default builds `ee-proxy__<tenant>`.
+A custom `workload_tag_builder` is only needed for a genuinely different
+tagging *policy* — user + session + tool attribution already works
+without one. The default builder passes a client-set tag through
+untouched and otherwise mints a short reversible `wl_<hex>` tag from the
+tenant, credential, pid and source, plus whatever caller identity the
+`geeViz.eeAuth.client` ContextVars (`CURRENT_USER_EMAIL`,
+`CURRENT_SESSION_ID`, `CURRENT_ACTION`, `CURRENT_BILLING_TENANT`) are
+carrying. Populate those and attribution follows automatically. The old
+`ee-proxy__<tenant>` shape remains only as the last-resort fallback when
+minting raises.
 
 ## Workload tags
 
 Every POST request gets a `workloadTag` query parameter added. EE
 surfaces these in GCP Billing under the
 `goog-earth-engine-workload-tag` label, so spend slices cleanly by
-tenant. See `tags.py` for the tag-construction rules.
+tenant — and, when the attribution ContextVars are set, by user,
+session and action. Because a minted tag is a hash, the `tag -> parts`
+mapping is recorded in a `TagStore`; recover it with
+`eeCreds.lookupWorkloadTag(tag)`. See `tags.py` for the
+tag-construction rules and the available stores.
 
 ## Testing
 

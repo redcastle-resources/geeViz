@@ -29,6 +29,42 @@ Quick start
 
     with tenant_context("training"):
         ee.Image(1).getInfo()  # uses the training SA
+
+Attribution context
+-------------------
+Routing says *which credential* pays; attribution says *who* to charge
+it to. Four ContextVars carry that second answer to the proxy:
+:data:`CURRENT_USER_EMAIL`, :data:`CURRENT_SESSION_ID`,
+:data:`CURRENT_ACTION` and :data:`CURRENT_BILLING_TENANT`. Whatever is
+set when an EE call goes out is stamped onto the outbound request as
+``X-Agent-*`` headers, and the proxy's workload-tag builder folds those
+parts into the tag it mints — so the resulting EE spend can be traced
+back to a real person, session and operation.
+
+Setting them is optional and additive. A standalone geeViz install
+leaves all four empty and gets exactly the historic behavior: no
+attribution headers, and a tag built from credential/pid/source alone.
+They exist for hosts that already know the caller's identity (an agent's
+MCP tool wrapper, a web backend) and would otherwise see every
+programmatic EE call — thumbnails, GIFs, charts, zonal stats — collapse
+into ``anonymous``, because those requests carry no browser Referer,
+session cookie or IAP header to identify them by.
+
+``GEEVIZ_AGENT_ATTRIB_SECRET``
+------------------------------
+The attribution headers are sent **only** when the
+``GEEVIZ_AGENT_ATTRIB_SECRET`` environment variable is set, and the
+value is sent alongside them as ``X-Agent-Attrib-Secret``. The gate is a
+security boundary, not a convenience toggle: those headers name who gets
+billed for EE compute, and the proxy's ``/ee-api`` path skips auth for
+callers that appear to be on loopback. Under
+``forwarded_allow_ips="*"`` "appears to be loopback" is a
+client-controlled judgement — a remote caller can present as loopback
+via ``X-Forwarded-For`` — so an ungated header would let anyone bill
+their usage to a victim's account. The server that spawns geeViz puts
+the secret in the child's environment; when it is absent we send no
+attribution headers at all and the call attributes to nobody, which is
+the safe failure.
 """
 from __future__ import annotations
 
@@ -41,46 +77,50 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ContextVar holding the current tenant id. ``TenantAwareHttp`` reads it
-# on every outbound EE REST call and stamps the routing header. Empty
-# string means "use the proxy's default tenant" (no header sent).
-# User + session context propagated from the calling agent to the
-# outbound EE proxy. Set by the MCP tool wrapper (or the caller of
-# ``initialize_via_proxy`` in a plain-Python setup) from the same
-# workload-tag builder the agent uses. ``TenantAwareHttp`` reads them
-# on every outbound request and stamps them as HTTP headers so the
-# proxy's own workload-tag builder can attribute the call to the
-# right user + session even when the request has no browser Referer,
-# session cookie, or IAP header (i.e., every MCP-generated EE call
-# — thumb, gif, chart, zonal stats, etc.). Without this thread-
-# through, those calls all collapsed into ``anonymous`` in Cloud
-# Monitoring and were invisible in the per-user spend table.
+#: Email of the user the current EE call is being made on behalf of.
+#: Propagated from the calling agent to the outbound EE proxy: set by the
+#: MCP tool wrapper (or the caller of ``initialize_via_proxy`` in a
+#: plain-Python setup) from the same workload-tag builder the agent uses.
+#: ``TenantAwareHttp`` reads it on every outbound request and stamps it as
+#: an HTTP header so the proxy's own workload-tag builder can attribute the
+#: call to the right user even when the request has no browser Referer,
+#: session cookie, or IAP header (i.e., every MCP-generated EE call — thumb,
+#: gif, chart, zonal stats, etc.). Without this thread-through, those calls
+#: all collapsed into ``anonymous`` in Cloud Monitoring and were invisible
+#: in the per-user spend table.
 CURRENT_USER_EMAIL: contextvars.ContextVar[str] = contextvars.ContextVar(
     "current_user_email", default=""
 )
+#: Session the current EE call belongs to — the companion to
+#: :data:`CURRENT_USER_EMAIL`, stamped by the same code path. Lets spend be
+#: sliced per conversation/run, not just per user. Empty means no session
+#: known; the tag is still minted, just without a session part.
 CURRENT_SESSION_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "current_session_id", default=""
 )
 
+#: ContextVar holding the current tenant id. ``TenantAwareHttp`` reads it
+#: on every outbound EE REST call and stamps the routing header. Empty
+#: string means "use the proxy's default tenant" (no header sent).
 CURRENT_TENANT: contextvars.ContextVar[str] = contextvars.ContextVar(
     "geeViz_ee_tenant", default="",
 )
 
-# Billing tenant slug — distinct from ``CURRENT_TENANT`` (which is the
-# eeCreds credential-name, e.g. "ee-persistent" for ADC or "acme-prod"
-# for a named SA). Agents set this to their fixed deploy-time tenant
-# (e.g. "askterra") so the workload-tag mint carries the right
-# attribution regardless of which cred is currently active. Empty means
-# no separate billing tenant known — the default builder falls back to
-# ``CURRENT_TENANT`` (matches standalone-geeViz behavior).
+#: Billing tenant slug — distinct from :data:`CURRENT_TENANT` (which is the
+#: eeCreds credential-name, e.g. "ee-persistent" for ADC or "acme-prod"
+#: for a named SA). Agents set this to their fixed deploy-time tenant
+#: (e.g. "askterra") so the workload-tag mint carries the right
+#: attribution regardless of which cred is currently active. Empty means
+#: no separate billing tenant known — the default builder falls back to
+#: :data:`CURRENT_TENANT` (matches standalone-geeViz behavior).
 CURRENT_BILLING_TENANT: contextvars.ContextVar[str] = contextvars.ContextVar(
     "geeViz_billing_tenant", default="",
 )
-# Action label for the current EE call (e.g. "map", "compute", "thumb",
-# "export"). Set by the caller so ``_default_workload_tag_builder`` can
-# emit that as the ``action`` part instead of a generic "proxy-default"
-# marker. Empty means no action known — builder still mints, just
-# without an action label.
+#: Action label for the current EE call (e.g. "map", "compute", "thumb",
+#: "export"). Set by the caller so ``_default_workload_tag_builder`` can
+#: emit that as the ``action`` part instead of a generic "proxy-default"
+#: marker. Empty means no action known — builder still mints, just
+#: without an action label.
 CURRENT_ACTION: contextvars.ContextVar[str] = contextvars.ContextVar(
     "geeViz_ee_action", default="",
 )
@@ -155,6 +195,22 @@ class TenantAwareHttp:
     only consults the transport for ``request()`` — it doesn't reach into
     ``self.connections`` directly — so per-thread instances are a safe
     drop-in.
+
+    Attribution headers
+    -------------------
+    Besides the tenant header, ``request()`` stamps the ``X-Agent-*``
+    attribution headers built from this module's four ContextVars — but
+    only when ``GEEVIZ_AGENT_ATTRIB_SECRET`` is set in the environment,
+    in which case its value goes out as ``X-Agent-Attrib-Secret`` to
+    prove the headers came from a process the server itself spawned.
+    Those headers decide who gets billed for EE compute and who has CDU
+    caps consumed, and the proxy's ``/ee-api`` path treats
+    apparently-loopback callers as trusted — a judgement the client can
+    influence via ``X-Forwarded-For`` when uvicorn runs with
+    ``forwarded_allow_ips="*"``. Ungated, that would let a remote caller
+    bill their usage to anyone they can name. With no secret present we
+    send no attribution headers and the call attributes to nobody, which
+    is the safe failure. See the module docstring for the full rationale.
     """
     _impl_cls = None  # lazily-defined subclass keyed by header name
 
@@ -267,6 +323,15 @@ def initialize_via_proxy(
             requires one but the proxy overrides per-tenant via
             ``x-goog-user-project``). Default
             ``"ee-proxy-placeholder"``.
+        origin: Human-readable provenance label appended to the
+            "EE initialized via proxy" line printed on stderr — today
+            ``"spawned new detached proxy"`` or ``"attached to existing
+            detached proxy"``. Purely diagnostic; it changes no
+            behavior. Default ``""`` omits the label entirely. Worth
+            passing: without it the line reads identically whether a
+            proxy was started or merely reused, which is how a
+            kill-and-respawn on a different port looked like "two
+            proxies running" in a notebook.
 
     Returns:
         True on success, False if init failed (caller should fall back

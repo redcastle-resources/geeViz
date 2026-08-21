@@ -33,10 +33,16 @@ Tenant routing — the proxy picks the SA in this order:
 3. Default tenant (the registry's ``default`` entry, loaded from
    ``GEE_SERVICE_ACCOUNT_B64``).
 
-Workload tagging — every POST is stamped with a workload tag
-``ee-proxy__<tenant>`` in the query string for billing attribution.
-Pass ``workload_tag_builder=...`` to ``build_proxy_router`` if you want
-to construct your own tag (e.g. include user / session).
+Workload tagging — every POST is stamped with a workload tag in the
+query string for billing attribution. A tag the client already set is
+respected; otherwise the default builder mints a short deterministic
+``wl_<hex>`` (see ``tags.mint_workload_tag``) over the tenant, cred,
+pid, source and whatever caller identity the attribution ContextVars
+carried, and records ``tag -> parts`` in the eeCreds ``TagStore`` so
+``eeCreds.lookupWorkloadTag(tag)`` can recover them. The legacy
+``ee-proxy__<tenant>`` shape survives only as the last-resort fallback
+when minting itself raises. Pass ``workload_tag_builder=...`` to
+``build_proxy_router`` to own that policy entirely.
 """
 from __future__ import annotations
 
@@ -107,10 +113,28 @@ def _default_workload_tag_builder(
     Rule: **if the client already set a tag** (via
     ``ee.data.setWorkloadTag()`` on the Python side, or baked into a
     tile URL returned by ``getMapId``), respect it. Otherwise mint a
-    reversible fallback tag that includes richer parts than plain
+    reversible ``wl_<hex>`` tag that includes richer parts than plain
     ``ee-proxy__<tenant>`` and store the mapping in the eeCreds
     singleton's ``TagStore`` so ``eeCreds.lookupWorkloadTag(tag)`` can
     recover the parts later.
+
+    Caller identity comes from the four ContextVars in
+    ``geeViz.eeAuth.client`` — ``CURRENT_USER_EMAIL``,
+    ``CURRENT_SESSION_ID``, ``CURRENT_ACTION`` and
+    ``CURRENT_BILLING_TENANT``. The first three are read straight out of
+    the context and added as ``user_email`` / ``session_id`` / ``action``
+    parts. ``CURRENT_BILLING_TENANT`` is different: when set it
+    **overrides the ``tenant`` argument**, because that argument is
+    whatever ``tenant_resolver`` produced (a credential name such as
+    "ee-persistent") while the billing tenant is the deploy-time
+    identity that actually pays ("askterra").
+
+    The additive shape is deliberate. Attribution parts join the mint
+    ONLY when they are non-empty, so a standalone geeViz install — where
+    nobody populates the ContextVars — mints exactly the same 4-part
+    (tenant / cred / pid / src) tag it always did. The hash changes only
+    when a real caller identity was propagated, which keeps existing
+    billing breakdowns stable.
 
     Custom builders passed via ``workload_tag_builder=...`` skip this
     entirely and own their own policy — see the agent's
@@ -126,15 +150,53 @@ def _default_workload_tag_builder(
     # 2. Fallback — mint richer parts + persist mapping so the tag is
     #    reversible. Pull the eeCreds singleton lazily to avoid a
     #    circular import at module load.
+    #
+    # Attribution ContextVars: the caller (agent MCP wrapper, notebook
+    # running alongside an agent, any code that populates them) can
+    # thread user/session/action/billing-tenant through to this builder
+    # via ``geeViz.eeAuth.client``'s ContextVars. When set, the mint
+    # includes them as parts so the puller can attribute the row to a
+    # real user + session. When unset, the mint falls back to the
+    # cred/pid/src shape (matches pre-2026.8 standalone behavior).
+    #
+    # ``CURRENT_BILLING_TENANT`` is separate from the ``tenant`` arg
+    # (which comes from ``tenant_resolver`` — usually the header-supplied
+    # cred name like "ee-persistent" for ADC). Billing tenant is the
+    # deploy-time identity ("askterra", "geeviz"); prefer it when set.
     try:
         from geeViz.eeAuth.eeCreds import eeCreds as _singleton
         from geeViz.eeAuth.tags import mint_workload_tag, _default_secret
-        parts = {
-            "tenant": tenant or "default",
+        from geeViz.eeAuth.client import (
+            CURRENT_USER_EMAIL as _CUR_USER,
+            CURRENT_SESSION_ID as _CUR_SESSION,
+            CURRENT_ACTION as _CUR_ACTION,
+            CURRENT_BILLING_TENANT as _CUR_BILL_TENANT,
+        )
+        _ctx_user = (_CUR_USER.get() or "").strip()
+        _ctx_session = (_CUR_SESSION.get() or "").strip()
+        _ctx_action = (_CUR_ACTION.get() or "").strip()
+        _ctx_bill = (_CUR_BILL_TENANT.get() or "").strip()
+        # Prefer the billing tenant when set. Falls back to the arg
+        # (the router's tenant_resolver output) so standalone geeViz
+        # deployments — where nobody sets CURRENT_BILLING_TENANT — get
+        # exactly the same behavior as before.
+        _mint_tenant = _ctx_bill or (tenant or "default")
+        parts: dict = {
+            "tenant": _mint_tenant,
             "cred":   _singleton.current() or "unknown",
             "pid":    os.getpid(),
             "src":    "proxy-default",
         }
+        # Add attribution parts only when they're set — keeps the tag
+        # hash deterministic for the standalone case (which used to
+        # mint with just the 4 fields above) and ONLY changes the hash
+        # when a real caller identity was propagated.
+        if _ctx_user:
+            parts["user_email"] = _ctx_user
+        if _ctx_session:
+            parts["session_id"] = _ctx_session
+        if _ctx_action:
+            parts["action"] = _ctx_action
         secret = _singleton._resolve_tag_secret() if hasattr(
             _singleton, "_resolve_tag_secret"
         ) else _default_secret()
@@ -210,7 +272,11 @@ def build_proxy_router(
         workload_tag_builder: Custom function ``(request, tenant) -> str``
             that returns the workload tag for billing attribution.
             Returning ``""`` disables tagging on this request. Default
-            builds ``ee-proxy__<tenant>``.
+            is :func:`_default_workload_tag_builder`, which passes a
+            client-set tag through untouched and otherwise mints a
+            reversible ``wl_<hex>`` tag and stores its parts. (It falls
+            back to the legacy ``ee-proxy__<tenant>`` shape only if
+            minting raises.)
 
     Mount the returned router on whatever prefix you like — typically
     ``/ee-api``.

@@ -162,7 +162,14 @@ def test_info_without_args_returns_current():
 
 # ─────────────────────── use() ───────────────────────
 def test_use_switches_tenant_immediately():
-    """Plain .use() (no `with`) takes effect right away."""
+    """Plain .use() (no `with`) takes effect right away.
+
+    ``use()`` guards on a live proxy first -- see the ``if not
+    self._proxy_url: raise RuntimeError`` in eeCreds.use(). Switching
+    tenants with no proxy would flip the ContextVar and leave the next
+    EE call spinning against a dead socket, so the guard is asserted
+    here before ``_proxy_url`` is stubbed to exercise the switch.
+    """
     from geeViz.eeAuth import CURRENT_TENANT
     creds = _fresh()
     creds.addCreds(_sa_dict(), "a")
@@ -170,6 +177,16 @@ def test_use_switches_tenant_immediately():
     # set known state before
     token = CURRENT_TENANT.set("")
     try:
+        try:
+            creds.use("b")
+        except RuntimeError as e:
+            assert "no proxy running" in str(e)
+        else:
+            raise AssertionError("use() must refuse when no proxy is running")
+        assert CURRENT_TENANT.get() == "", \
+            "a refused use() must not have touched the ContextVar"
+
+        creds._proxy_url = "http://stub/ee-api"
         creds.use("b")
         assert CURRENT_TENANT.get() == "b"
     finally:
@@ -177,10 +194,17 @@ def test_use_switches_tenant_immediately():
 
 
 def test_use_as_context_manager_restores_previous():
+    """``with creds.use(...)`` pops back to the previous tenant on exit.
+
+    ``_proxy_url`` is stubbed because ``use()`` refuses to switch with no
+    proxy running; that guard has its own coverage in
+    ``test_use_switches_tenant_immediately``.
+    """
     from geeViz.eeAuth import CURRENT_TENANT
     creds = _fresh()
     creds.addCreds(_sa_dict(), "a")
     creds.addCreds(_sa_dict(), "b")
+    creds._proxy_url = "http://stub/ee-api"
     token = CURRENT_TENANT.set("a")
     try:
         with creds.use("b"):

@@ -2357,6 +2357,31 @@ class EECreds:
           drifted.
         - ``"legacy"``: do nothing. Returns immediately with ``""``.
 
+        Args:
+            mode: One of the modes above. ``"auto"`` and ``"proxy"`` are
+                accepted as deprecated aliases for ``"attached"`` and
+                ``"attached_strict"``.
+            proxy_port: Which port the proxy must listen on.
+
+                ``None`` (default) means "I don't care where it
+                listens" — ANY already-running healthy proxy is reused,
+                whatever port it is on. An explicit int PINS the proxy
+                to that port: a healthy proxy on a different port is
+                killed and respawned on the requested one.
+
+                Prefer ``None``. Reusability is decided by the version +
+                tenant fingerprint ``/health`` reports, not by which
+                port a proxy happens to have landed on. This argument
+                used to carry a real default, which made every caller
+                look like it had pinned a port — import-time init
+                defaulted to 8889 and ``Map.view()`` to 8001, so the two
+                spent every run killing and respawning each other's
+                proxy. Pin a port only when something outside this
+                process genuinely requires that address (e.g. detached
+                mode, where the browser loads the viewer from the proxy
+                itself and a user-chosen ``Map.port`` therefore has to
+                move it).
+
         Returns ``{proxy_url, tenants, current, mode, discovered}``.
         ``proxy_url == ""`` means caller should fall back.
         """

@@ -1,5 +1,109 @@
 # geeViz Release Notes
 
+## 2026.8.2 — August 21, 2026
+
+### geeViz.eeAuth
+
+- **The 2026.8.1 tag-store API was never importable.** That release
+  announced `mint_workload_tag`, `TagStore`, `InMemoryTagStore`,
+  `SQLiteTagStore` and `default_tag_store` as public API, but none of
+  them were re-exported from `geeViz/eeAuth/__init__.py` — so
+  `from geeViz.eeAuth import SQLiteTagStore` raised `ImportError`
+  against a release whose notes said to call it. All six names (plus
+  the new `ChainedTagStore`) are now exported and in `__all__`, as are
+  the two attribution ContextVars added below.
+- **New `ChainedTagStore` — write to one store, read from several.**
+  More than one tag store is genuinely live on a dev box: the geeViz
+  agent installs a Postgres-backed store while notebooks, standalone
+  scripts and `python -m geeViz.eeAuth` mint into the sqlite default.
+  A tag minted under one was invisible to the other's lookup, and the
+  caller got a bare `None` that reads as "never minted" when the truth
+  was "you asked the wrong store" — which is how EE usage ended up
+  labeled `unattributed` while its mapping sat intact in
+  `~/.geeViz/workload_tags.db`. The asymmetry is deliberate:
+  - `put` → **primary only**. Writing to every backend would leave two
+    partial, diverging copies and turn a lookup miss into "which one is
+    right?". Attribution needs exactly one writer.
+  - `lookup` → **every backend in order, first hit wins**. Reads have
+    no such hazard, and the answer is the same wherever it came from,
+    because tags are content-addressed: same parts + same secret
+    always produce the same tag.
+- **`ensure_started(proxy_port=...)` now defaults to `None` = "any
+  healthy proxy will do".** Two entry points asked for the proxy with
+  two different ports — `import` → `robust_init` → `ensure_started()`
+  → 8889, and `Map.view()` → `ensure_started(proxy_port=Map.port)` →
+  8001 — and a port difference was treated as staleness, so each
+  killed the other's proxy. Any browser tab still pointed at the
+  previous port died with `ERR_CONNECTION_RESET`, which is precisely
+  what detached mode exists to prevent, plus two spawns and a kill per
+  run each waiting up to 15s on `/health`. Reusability was already
+  decided by the version + tenant fingerprint `/health` reports; port
+  is just where a proxy happens to be listening. Pass an explicit int
+  to pin it.
+- **Attribution headers are gated behind `GEEVIZ_AGENT_ATTRIB_SECRET`.**
+  `X-Agent-User-Email` tells the proxy who to **bill** for EE compute
+  and whose CDU cap to consume, and the `/ee-api` path skips auth for
+  peers that look like loopback — a judgment made from
+  `request.client.host`, which uvicorn derives from a client-supplied
+  `X-Forwarded-For` under `forwarded_allow_ips="*"`. A remote caller
+  could therefore present as loopback and name any victim. The header
+  is now sent only alongside `X-Agent-Attrib-Secret`, a per-process
+  value compared with `hmac.compare_digest`; unsigned attribution is
+  rejected and falls back to anonymous.
+- **The default workload-tag builder now reads attribution
+  ContextVars.** `CURRENT_USER_EMAIL`, `CURRENT_SESSION_ID`,
+  `CURRENT_ACTION` and `CURRENT_BILLING_TENANT` (the last overriding
+  the resolver's `tenant` argument) are folded into the mint **only
+  when set**, so a standalone geeViz install — where nobody sets them
+  — mints exactly the same four-part tag it always did, and the hash
+  changes only when a real caller identity was propagated.
+
+### geeViz.geeView
+
+- **`import geeViz.geeView` raised `NameError: name 'Map' is not
+  defined`.** `mapper.__init__` read `Map._DEFAULT_PORT`, but
+  `Map = mapper()` is constructed at module scope, so `__init__` ran
+  before that name was bound. About as bad as it gets for this
+  package: the import is the entry point for essentially everything.
+  It was also well camouflaged — `eeUsageMonitoring.ipynb` wraps the
+  import in `except Exception: pass` while resolving `PROJECT`, so the
+  breakage surfaced downstream as a confusing gRPC error against the
+  literal placeholder `project='your-project-id'` rather than as the
+  import error it was. Reads the class attribute through `self` now.
+- **The `wl_` workload tag is no longer published to the browser
+  behind a proxy.** `Map.view` baked `ee.data.setWorkloadTag("wl_...")`
+  into the generated viewer JS, and the default-tag path promoted the
+  same value into `setDefaultWorkloadTag(...)`. Behind an eeAuth proxy
+  that value is dead weight — the proxy rewrites the query string on
+  every POST and attributes server-side — so emitting it changed no
+  billing outcome and only exposed an internal attribution id in page
+  source, where anyone opening a shared map could read it. Standalone
+  geeViz still emits it: with no proxy to substitute one, that is the
+  only tagging mechanism, and dropping it there would silently untag
+  every notebook and script map.
+- **`Map.port` no longer evicts the eeAuth proxy.** The two constants
+  name different things and are unchanged — in detached mode one
+  process serves both `/geeView` and `/ee-api`, but in every other
+  mode geeView runs its own daemon on `Map.port` and reverse-proxies
+  `/ee-api` to the eeAuth proxy on its own port, so collapsing them to
+  one number would make those two servers collide. The proxy is now
+  pinned to `Map.port` only when a human set it explicitly.
+- **`_state._tag` is read in its own `try`.** It shared an `except`
+  with the `_default` read, so a failure on that private attribute —
+  its shape varies across `earthengine-api` versions — discarded an
+  already-valid default and silently untagged all post-load browser
+  compute.
+
+### geeViz.mcp
+
+- **`sal.getWDPA` → `sal.getProtectedAreas`.** The agent instructions
+  listed `sal.getWDPA` among "existing helpers". No such function
+  exists anywhere in the package; the real one is
+  `getProtectedAreas(area=None, iucn_cat=None, desig_type=None,
+  name=None)` in `getSummaryAreasLib.py`. An agent following that line
+  emits a call that `AttributeError`s — which also contradicts rule 1
+  of the same document: "Never guess ... function names."
+
 ## 2026.8.1 — August 13, 2026
 
 ### geeViz.eeAuth
@@ -7,7 +111,7 @@
 - **New workload-tag library primitives.** `geeViz.eeAuth.tags` now
   ships:
   - `mint_workload_tag(parts: dict, *, secret: str) -> "wl_<hex>"` —
-    deterministic short hash of a canonicalised parts dict. Same
+    deterministic short hash of a canonicalized parts dict. Same
     parts + secret always yield the same tag, so re-mints collapse
     to one row in whatever store you pair it with.
   - `TagStore` Protocol with `put(tag, parts)` / `lookup(tag) -> parts`.
@@ -29,7 +133,7 @@
     EE calls fail fast with a clear "not initialized" error instead
     of hanging on the dead proxy URL.
 - **Default builder respects client-set tags.** The proxy's
-  `_default_workload_tag_builder` now honours a `workloadTag`
+  `_default_workload_tag_builder` now honors a `workloadTag`
   already in `request.query_params` (from `ee.data.setWorkloadTag`
   on the Python side or baked into a `getMapId` tile URL) rather
   than blindly overwriting it. When no client tag is present, the
@@ -754,7 +858,7 @@ references). All fixed with no behavior change:
 - **Moved `geeViz.chartingLib` to `geeViz.outputLib.charts`.** The old `geeViz.chartingLib` import path continues to work for backward compatibility, but new code should use `from geeViz.outputLib import charts as cl`.
 - **New module: `geeViz.outputLib.thumbs`** — thumbnail, GIF, filmstrip, and map+chart generation with basemaps, legends, scalebars, and inset maps. Available as `tl` in the MCP REPL namespace.
 - **New module: `geeViz.outputLib.reports`** — automated report generation with parallel EE data fetching, charts, tables, thumbnails, GIFs, and LLM narratives. Available as `rl` in the MCP REPL namespace.
-- **New chart types in `summarize_and_chart`:** `"donut"` (thematic pie/donut chart) and `"scatter"` (scatter plot with optional thematic colouring via `thematic_band_name`).
+- **New chart types in `summarize_and_chart`:** `"donut"` (thematic pie/donut chart) and `"scatter"` (scatter plot with optional thematic coloring via `thematic_band_name`).
 - **New function: `generate_map_chart()`** in `geeViz.outputLib.thumbs` — produces a combined map thumbnail + chart (bar/donut/scatter for `ee.Image`, delegates to GIF for `ee.ImageCollection`).
 - **Gamma support in `auto_viz` continuous stretch** — new `gamma` parameter (default 1.6) for gamma correction when auto-detecting continuous visualization parameters.
 

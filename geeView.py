@@ -903,14 +903,31 @@ class mapper:
     - `refresh()` — re-run the last `view()` with a fresh token
 
     Args:
-        port (int, default 8001): Port for the in-process http.server
-            used for notebook iframe display. Auto-picks a free port
-            if unavailable.
+        port (int, default 8001): Port `view()` should use, and a
+            request to pin the eeAuth proxy there. Setting it
+            explicitly — either `mapper(port=…)` with a non-default
+            value or `Map.port = …` — marks the port as
+            human-chosen, which makes `view()` pin the eeAuth proxy to
+            it and respawn any healthy proxy listening elsewhere. Leave
+            it alone and the proxy stays on its own default (8889),
+            which is usually what you want. Note that in the default
+            detached mode the in-process `http.server` is never
+            started at all — the detached proxy serves both
+            `/geeView/*` and `/ee-api/*` — so the port only backs a
+            local server in the attached/legacy paths, where an
+            unavailable port is replaced by a free one.
 
     Attributes:
-        port (int, default 8001): Port for the in-process http.server
-            used for notebook iframe display. Auto-picks a free port
-            if unavailable.
+        port (int, default 8001): Port `view()` should use, and a
+            request to pin the eeAuth proxy there. Assigning to it
+            marks the port as human-chosen, so `view()` pins the eeAuth
+            proxy to it and respawns any healthy proxy listening
+            elsewhere; left alone, the proxy stays on its own default
+            (8889). In the default detached mode no in-process
+            `http.server` is started — the detached proxy serves both
+            `/geeView/*` and `/ee-api/*` — so the port only backs a
+            local server in the attached/legacy paths, where an
+            unavailable port is replaced by a free one.
 
         proxy_url (str, default None): Vertex AI Workbench proxy URL used
             when `view()` runs inside a Workbench notebook. Auto-prompted
@@ -948,10 +965,28 @@ class mapper:
 
     @property
     def port(self) -> int:
+        """Port `view()` will use.
+
+        Reads back whatever is currently in effect, which is not
+        necessarily what was set: in attached/legacy mode `view()`
+        overwrites it with the port the picker actually bound when the
+        requested one was busy.
+        """
         return self._port
 
     @port.setter
     def port(self, value: int) -> None:
+        """Set the port and record that a human asked for it.
+
+        The side effect is the point: assigning here flips
+        `_port_explicit` to True, which is what makes `view()` pin the
+        eeAuth proxy to this port and respawn a healthy proxy that is
+        listening somewhere else. Without that flag `view()` passes
+        `proxy_port=None` and reuses any healthy proxy wherever it
+        already is. So `Map.port = 8001` is NOT a no-op even though
+        8001 is the default value — it converts the default into a
+        demand.
+        """
         # No warning here — Map.port IS honored in attached mode.
         # If the user is on detached and the port ends up ignored,
         # Map.view() prints a runtime hint after it knows the
@@ -966,10 +1001,25 @@ class mapper:
     _DEFAULT_PORT = 8001
 
     def __init__(self, port: int = _DEFAULT_PORT):
-        # Stored on ``_port`` so the deprecated public ``port`` setter
-        # (see property above) can log a warning without recursing into
-        # itself and so internal writes (``_ensure_server`` fallback
-        # port pick) can bypass the warning path.
+        """Construct the mapper.
+
+        Args:
+            port (int, default 8001): Port for `view()`. Unlike the
+                `Map.port` setter, passing a port here only counts as
+                an explicit human choice when it DIFFERS from the
+                default — `mapper(port=8001)` leaves the port
+                unpinned (any healthy eeAuth proxy is reused wherever
+                it sits), while `Map.port = 8001` pins it and forces a
+                respawn. The asymmetry is intentional: `Map = mapper()`
+                is constructed at import time with the default, and
+                treating that as a demand would kill a healthy proxy on
+                every import.
+        """
+        # Stored on ``_port`` so the public ``port`` setter (see property
+        # above) can run its side effects without recursing into itself,
+        # and so internal writes — the ``_ensure_server`` fallback port
+        # pick, which the port picker chose rather than the user — can
+        # bypass those side effects and NOT flip ``_port_explicit``.
         self._port = int(port)
         # True once the caller sets Map.port (property setter) or passes
         # a non-default to __init__. See the setter for why it matters.

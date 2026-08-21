@@ -614,11 +614,28 @@ def test_ensure_started_mode_legacy_does_nothing():
 
 
 def test_ensure_started_mode_invalid_raises():
+    """An unrecognized mode must fail loudly, and the message must name
+    every mode the user could have meant.
+
+    The canonical names are now ``attached`` / ``attached_strict`` /
+    ``detached`` / ``legacy``; ``auto`` and ``proxy`` survive as
+    deprecated aliases. The invariant being protected is that the error
+    is self-documenting -- it echoes the bad value and advertises the
+    full accepted set, aliases included -- not the exact wording of the
+    pre-rename ``auto/proxy/legacy`` string.
+    """
     creds = _fresh()
     try:
         creds.ensure_started(mode="banana")
     except ValueError as e:
-        assert "auto/proxy/legacy" in str(e)
+        msg = str(e)
+        assert "banana" in msg, f"error must echo the bad value; got {msg!r}"
+        for canonical in ("attached", "attached_strict", "detached", "legacy"):
+            assert canonical in msg, \
+                f"error must advertise mode {canonical!r}; got {msg!r}"
+        for alias in ("auto", "proxy"):
+            assert alias in msg, \
+                f"error must advertise deprecated alias {alias!r}; got {msg!r}"
         return
     raise AssertionError("expected ValueError on invalid mode")
 
@@ -661,7 +678,14 @@ def test_ensure_started_mode_proxy_raises_when_no_creds():
 
 
 def test_ensure_started_mode_auto_falls_back_silently_with_no_creds():
-    """mode='auto' returns empty proxy_url so caller falls back to legacy."""
+    """mode='auto' returns empty proxy_url so caller falls back to legacy.
+
+    ``auto`` is now a deprecated alias for ``attached``, so the reported
+    mode is the canonical name it normalizes to. The invariant is the
+    silent fallback (empty ``proxy_url``, no exception) plus the alias
+    still resolving to the in-process mode -- verified by asserting the
+    alias and the canonical name produce the same status.
+    """
     creds = _fresh()
     with patch.dict(os.environ, {}, clear=False):
         for k in list(os.environ):
@@ -669,8 +693,12 @@ def test_ensure_started_mode_auto_falls_back_silently_with_no_creds():
                 os.environ.pop(k, None)
         with _patch_no_creds_anywhere():
             status = creds.ensure_started(mode="auto")
+            canonical = _fresh().ensure_started(mode="attached")
     assert status["proxy_url"] == ""
-    assert status["mode"] == "auto"
+    assert status["mode"] == "attached", \
+        f"'auto' must normalize to the canonical 'attached'; got {status!r}"
+    assert canonical["mode"] == status["mode"]
+    assert canonical["proxy_url"] == status["proxy_url"]
 
 
 def test_ensure_started_auto_discovers_and_would_start_with_creds():
@@ -678,16 +706,27 @@ def test_ensure_started_auto_discovers_and_would_start_with_creds():
     Stub the actual port-binding to keep the test hermetic."""
     creds = _fresh()
     # Stub _launch_proxy so we don't actually bind a port. Set _proxy_url
-    # so the post-start state looks valid.
-    def _fake_launch(self, host, port):
+    # so the post-start state looks valid. The stub has to mirror the
+    # real signature -- ``start()`` passes workload_tag_builder= through.
+    def _fake_launch(self, host, port, workload_tag_builder=None):
         self._proxy_url = f"http://{host}:{port}/ee-api"
     with patch.object(type(creds), "_launch_proxy", _fake_launch), \
          patch.dict(os.environ, {
             "GEE_SERVICE_ACCOUNT_B64": _sa_b64(),
          }, clear=False):
-        # Also stub ee_init since we don't have real ee credentials
-        from geeViz.eeAuth import client as _cl
-        with patch.object(_cl, "initialize_via_proxy", return_value=True):
+        # Also stub ee_init since we don't have real ee credentials.
+        # eeCreds does ``from .client import initialize_via_proxy`` at
+        # module scope, so the name that ``start()`` actually calls lives
+        # on the eeCreds module -- patching client.* would leave the real
+        # one bound and send the test at a live socket.
+        # NB: ``geeViz.eeAuth.eeCreds`` as an *attribute* of the package
+        # is the singleton instance, not the module -- go through
+        # sys.modules to get the module object itself.
+        import geeViz.eeAuth.eeCreds  # noqa: F401  (populates sys.modules)
+        _ee_creds_mod = sys.modules["geeViz.eeAuth.eeCreds"]
+        with patch.object(
+            _ee_creds_mod, "initialize_via_proxy", return_value=True
+        ):
             status = creds.ensure_started(mode="auto")
     assert status["proxy_url"].startswith("http://"), \
         f"auto mode should have started proxy, got {status!r}"
@@ -773,6 +812,15 @@ def test_multiple_creds_first_is_default():
 
 
 def test_multiple_creds_use_switches():
+    """With three creds registered, .use() switches between them and the
+    ``with`` form pops back to whichever was current before.
+
+    ``use()`` now refuses to switch unless a proxy is actually running
+    (eeCreds.py's ``if not self._proxy_url: raise RuntimeError``) --
+    without one the ContextVar would flip and the next EE call would
+    hang against a dead socket. So the test asserts the guard fires
+    first, then stubs ``_proxy_url`` to exercise the switching itself.
+    """
     from geeViz.eeAuth import CURRENT_TENANT
     creds = _fresh()
     creds.addCreds(_sa_dict(), "a")
@@ -780,6 +828,18 @@ def test_multiple_creds_use_switches():
     creds.addCreds(_sa_dict(), "c")
     token = CURRENT_TENANT.set("")
     try:
+        # Guard: no proxy running → refuse rather than silently point
+        # EE at nothing.
+        try:
+            creds.use("b")
+        except RuntimeError as e:
+            assert "no proxy running" in str(e)
+        else:
+            raise AssertionError("use() must refuse when no proxy is running")
+        assert CURRENT_TENANT.get() == "", \
+            "a refused use() must not have touched the ContextVar"
+
+        creds._proxy_url = "http://stub/ee-api"
         creds.use("b")
         assert CURRENT_TENANT.get() == "b"
         with creds.use("c"):

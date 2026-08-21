@@ -30,6 +30,7 @@ Developed by [RedCastle Resources](https://www.redcastleresources.com/), geeViz 
 - Built-in charting & analysis tools (point/polygon, time series, area stats)
 - **Inline zonal summary & charting** (`geeViz.outputLib.charts`, formerly `geeViz.chartingLib`) — run zonal stats and produce Plotly charts (time series, bar, grouped bar, donut, scatter, per-feature time series subplots, Sankey) directly in notebooks
 - **Summary area retrieval** (`geeViz.getSummaryAreasLib`) — 15 functions returning filtered `ee.FeatureCollection` objects for political boundaries, USFS units, census geographies, buildings, roads, and protected areas
+- **Keyless Earth Engine authentication** (`geeViz.eeAuth`) — discovers whatever credentials you already have (persistent `earthengine authenticate`, gcloud ADC, or an attached service account), and runs a small local proxy so the map viewer never receives an access token. Also mints workload tags so EE compute can be attributed per user/session
 - Jupyter/Colab support and standalone scripting
 - Supports Landsat, Sentinel-2, MODIS, LCMS, LCMAP, and more
 - Extensive examples and ready-to-run wrappers
@@ -76,6 +77,12 @@ The fastest way to get started:
     ```sh
     earthengine authenticate
     ```
+
+That is the only auth step most users need. From there `geeViz.eeAuth`
+takes over: it discovers those credentials on import, and if it can't
+find them it falls back to gcloud ADC or an attached service account
+rather than failing. See the [eeAuth docs](https://geeviz.org/) for the
+proxy, tenancy, and workload-tagging details.
 
 ---
 

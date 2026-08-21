@@ -33,7 +33,9 @@ Layout
 ------
 - :mod:`geeViz.eeAuth.eeCreds`  — high-level ``eeCreds`` singleton & API
 - :mod:`geeViz.eeAuth.registry` — lower-level env-var-driven SA cache
-- :mod:`geeViz.eeAuth.tags`     — workload-tag construction (EE billing attribution)
+- :mod:`geeViz.eeAuth.tags`     — workload-tag construction + the tag
+                                   stores that make a tag reversible
+                                   later (EE billing attribution)
 - :mod:`geeViz.eeAuth.client`   — initialize the ``ee`` SDK to route through a proxy
 - :mod:`geeViz.eeAuth.server`   — FastAPI proxy app (mountable in your own
                                    FastAPI app OR runnable standalone)
@@ -105,6 +107,12 @@ from .registry import (
 from .tags import (
     build_workload_tag,
     sanitize_workload_tag_part,
+    mint_workload_tag,
+    TagStore,
+    InMemoryTagStore,
+    SQLiteTagStore,
+    ChainedTagStore,
+    default_tag_store,
 )
 from .client import (
     initialize_via_proxy,
@@ -115,6 +123,8 @@ from .client import (
     CURRENT_TENANT,
     CURRENT_USER_EMAIL,
     CURRENT_SESSION_ID,
+    CURRENT_ACTION,
+    CURRENT_BILLING_TENANT,
 )
 from .server import (
     build_proxy_router,
@@ -145,9 +155,16 @@ __all__ = [
     "get_registry",
     "reset_registry",
     "DEFAULT_TENANT",
-    # Tags
+    # Tags — construction
     "build_workload_tag",
     "sanitize_workload_tag_part",
+    "mint_workload_tag",
+    # Tags — stores (mint here, look the parts back up later)
+    "TagStore",
+    "InMemoryTagStore",
+    "SQLiteTagStore",
+    "ChainedTagStore",
+    "default_tag_store",
     # Client-side EE init
     "initialize_via_proxy",
     "tenant_context",
@@ -155,11 +172,14 @@ __all__ = [
     "reset_tenant",
     "TenantAwareHttp",
     "CURRENT_TENANT",
+    # Attribution ContextVars — set these to tell the proxy who to bill
     "CURRENT_USER_EMAIL",
     "CURRENT_SESSION_ID",
+    "CURRENT_ACTION",
+    "CURRENT_BILLING_TENANT",
     # Server-side proxy
     "build_proxy_router",
     "create_proxy_app",
 ]
 
-__version__ = "2026.8.1"
+__version__ = "2026.8.2"

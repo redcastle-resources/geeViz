@@ -27,6 +27,47 @@ get collapsed to a single ``_`` during sanitization (so an input like
 ``run__code`` becomes ``run_code``). Underscores from sources like tool
 names — ``run_code``, ``map_control`` — pass through intact because
 they're already singletons.
+
+Tag stores
+----------
+63 characters isn't enough to spell out a real identity tuple (user
+email + session id + action + tenant), so :func:`mint_workload_tag`
+hashes the parts into a short ``wl_<hex>`` tag instead. That tag is not
+reversible on its own — recovering who a billing row belongs to needs
+the ``tag -> parts`` mapping written down somewhere. That "somewhere" is
+this module's store layer:
+
+- :class:`TagStore` — the ``put`` / ``lookup`` Protocol every store
+  implements. Implementations must be thread-safe and idempotent on
+  ``put``.
+- :class:`InMemoryTagStore` — process-local dict. Fine for one-shot
+  scripts and tests; the mapping dies with the process.
+- :class:`SQLiteTagStore` — single file, typically
+  ``~/.geeViz/workload_tags.db``. Survives kernel restarts and reruns.
+  Not suitable for multi-instance deployments, where each instance
+  would keep its own file and miss the others' tags.
+- :class:`ChainedTagStore` — several stores treated as one.
+- :func:`default_tag_store` — the store used when nobody configured one.
+
+:class:`ChainedTagStore` is the newest piece and the least obvious,
+because its two operations deliberately disagree about scope:
+
+- ``put`` writes to the **primary (first) store only**. Attribution
+  needs exactly one writer; fanning writes out to every backend would
+  create diverging partial copies and turn a lookup miss into "which
+  copy is right?".
+- ``lookup`` reads from **every backend in order**, first hit wins (a
+  failing backend is logged and skipped rather than breaking the
+  chain). Reads have no such problem — tags are content-addressed, so
+  the same parts and secret always produce the same tag and it does not
+  matter which backend answered.
+
+That asymmetry exists because more than one store can be live on a
+machine at once — an agent writing to Postgres beside a notebook using
+the sqlite default. Without chaining, a tag minted under one is simply
+invisible to the other's ``lookup``, and the caller gets a bare ``None``
+that reads as "never minted" when the truth is "you asked the wrong
+store".
 """
 from __future__ import annotations
 
@@ -122,7 +163,7 @@ def mint_workload_tag(
     """Deterministic short tag from a parts dict + secret.
 
     Returns ``wl_<hex>`` where the hex is a ``digest_size``-byte blake2b of
-    the canonicalised parts (default 16 hex chars → collision probability
+    the canonicalized parts (default 16 hex chars → collision probability
     ~10⁻⁹ at millions of tags). Same input always yields the same tag.
 
     The tag is NOT reversible on its own — pair with a ``TagStore`` that
@@ -139,7 +180,7 @@ def mint_workload_tag(
     tag = f"{_TAG_PREFIX}_{h}"
     # Belt-and-suspenders: minted tags are guaranteed valid but pass them
     # through build_workload_tag anyway so any future format tweak stays
-    # consistent with the sanitiser.
+    # consistent with the sanitizer.
     return build_workload_tag(tag)
 
 
@@ -173,7 +214,7 @@ class ChainedTagStore:
     one is invisible to the other's ``lookup``, and the caller sees a
     bare ``None`` that reads as "this tag was never minted" when the
     truth is "you asked the wrong store". That is how EE usage ends up
-    labelled unattributed while its mapping sits intact a few
+    labeled unattributed while its mapping sits intact a few
     directories away.
 
     The asymmetry is deliberate:
