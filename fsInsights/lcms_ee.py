@@ -44,6 +44,15 @@ _CURRENT = "projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11"
 #: Earlier releases, for reproducing a prior analysis. Newer releases
 #: moved out of the ``USFS/GTAC`` namespace, so this is a lookup rather
 #: than a formatted path.
+#:
+#: Worth knowing before pinning: **study-area coverage is not
+#: monotonic.** ``2024-10`` covers CONUS, AK, HAWAII and PRUSVI, while
+#: the newer ``2025-11`` covers only CONUS and AK. Work in Hawaii or
+#: Puerto Rico has to pin an OLDER release — the opposite of the usual
+#: advice, and easy to get wrong by reaching for "latest".
+#:
+#: ``2025-6`` is absent on purpose: it is a tree-canopy release with no
+#: Change / Land_Cover / Land_Use products.
 _BY_RELEASE = {
     "2025-11": _CURRENT,
     "2024-10": "USFS/GTAC/LCMS/v2024-10",
@@ -54,9 +63,25 @@ _BY_RELEASE = {
     "2020-6": "USFS/GTAC/LCMS/v2020-6",
 }
 
-#: Thematic bands. Everything else in the asset is a per-class raw
-#: probability or the QA bitmask, none of which belong in a class-area
-#: summary.
+#: Study areas per release, for the coverage question above. Only the
+#: releases whose coverage differs from the current one are listed.
+RELEASE_STUDY_AREAS = {
+    "2025-11": ("CONUS", "AK"),
+    "2025-6":  ("CONUS", "AK"),
+    "2024-10": ("CONUS", "AK", "HAWAII", "PRUSVI"),
+    "2023-9":  ("CONUS", "SEAK", "HAWAII", "PRUSVI"),
+    "2022-8":  ("CONUS", "SEAK", "PRUSVI"),
+}
+
+#: Thematic bands carried by the LCMS product releases. Everything else
+#: in those assets is a per-class raw probability or the QA bitmask,
+#: none of which belong in a class-area summary.
+#:
+#: Note this is NOT every product the LCMS *API* publishes. Release
+#: ``2025-6`` is a tree-canopy release carrying only
+#: ``NLCD_Percent_Tree_Canopy_Cover``, which is continuous rather than
+#: thematic and lives in a different Earth Engine collection — it is
+#: served by the API path, not by this module.
 PRODUCTS = ("Change", "Land_Cover", "Land_Use")
 
 

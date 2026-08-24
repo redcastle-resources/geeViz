@@ -39,6 +39,13 @@ logger = logging.getLogger(__name__)
 
 _CACHE: Dict[str, Any] = {}
 
+#: Columns every summary frame carries, empty or not. An empty
+#: DataFrame built from [] has NO columns, so the caller's next line
+#: -- almost always a column selection -- raises a bare KeyError that
+#: names none of the real problem.
+_SUMMARY_COLUMNS = ("year", "class_name", "square_meters", "acres",
+                    "hectares", "product", "area", "source")
+
 
 def _result(payload: Any) -> Any:
     """Unwrap the ``{"Result": ...}`` envelope and normalize its nesting.
@@ -63,31 +70,100 @@ def _result(payload: Any) -> Any:
     return payload
 
 
-def lcms_releases(*, refresh: bool = False) -> List[dict]:
+def lcms_releases(*, product: str = "", refresh: bool = False) -> List[dict]:
     """Every published LCMS release, newest first.
 
     Each entry carries ``VersionNumber``, ``StartYear``, ``EndYear``,
     ``Products`` and ``StudyAreas``.
+
+    **Releases are not interchangeable**, in two ways that bite:
+
+    * **Products differ.** ``2025-11`` carries ``Change`` /
+      ``Land_Cover`` / ``Land_Use``; ``2025-6`` is a tree-canopy release
+      carrying only ``NLCD_Percent_Tree_Canopy_Cover``. "The latest
+      release" is therefore ambiguous unless you say latest *of what* —
+      see :func:`latest_release`.
+    * **Study areas differ, and not monotonically.** ``2024-10`` covers
+      CONUS, AK, HAWAII and PRUSVI; ``2025-11`` covers only CONUS and
+      AK. Work in Hawaii or Puerto Rico has to pin an *older* release,
+      which is the opposite of the usual advice.
+
+    Note also that ``2022-8`` reports ``SummaryAreaCount = 0`` — it has
+    no summary areas, so the API cannot answer area queries against it
+    even though it lists products.
+
+    Args:
+        product: Keep only releases that publish this product.
     """
     if refresh or "releases" not in _CACHE:
         _CACHE["releases"] = _result(get_json(f"{LCMS_BASE}/release/")) or []
-    return _CACHE["releases"]
+    rels = _CACHE["releases"]
+    if product:
+        rels = [r for r in rels
+                if any(str(p.get("Name", "")).lower() == product.lower()
+                       for p in (r.get("Products") or []))]
+    return rels
 
 
-def latest_release() -> str:
-    """Resolve ``latest`` to a concrete version string, e.g. ``2025-11``.
+def release_products(release: str = "") -> List[str]:
+    """Product names published by one release (default: newest overall)."""
+    for r in lcms_releases():
+        if not release or str(r.get("VersionNumber")) == str(release):
+            return [str(p.get("Name")) for p in (r.get("Products") or [])]
+    return []
 
-    Worth doing explicitly. Caching results under the key ``latest``
-    means a new release silently changes the answer to a question asked
-    last year; pinning to the resolved version keeps an old analysis
+
+def latest_release(product: str = "") -> str:
+    """Resolve to a concrete version string, e.g. ``2025-11``.
+
+    Args:
+        product: Resolve to the newest release **carrying this
+            product**. Without it you get the newest release overall,
+            which may not publish what you are about to ask for —
+            ``2025-6`` is newer than ``2024-10`` but has no
+            ``Land_Cover``.
+
+    Pinning matters beyond that. Caching under the key ``latest`` means
+    a new release silently changes the answer to a question asked last
+    year; resolving to a version once keeps an old analysis
     reproducible.
     """
-    rels = lcms_releases()
-    for r in rels:
+    for r in lcms_releases(product=product):
         v = r.get("VersionNumber")
         if v:
             return str(v)
+    if product:
+        raise ValueError(
+            f"no LCMS release publishes product {product!r}. Available "
+            f"products by release: "
+            + "; ".join(f"{r.get('VersionNumber')}="
+                        f"{[p.get('Name') for p in (r.get('Products') or [])]}"
+                        for r in lcms_releases())
+        )
     return "latest"
+
+
+def _check_product(product: str, release: str = "") -> None:
+    """Raise if ``release`` does not publish ``product``.
+
+    Caught locally because the API's answer is an "Invalid Summary Area"
+    ParameterError, which points at the *area* — sending the reader to
+    check a county name when the real problem is that they asked a
+    tree-canopy release for land cover.
+    """
+    have = release_products(release)
+    if not have:
+        return  # unknown release; let the API speak
+    if not any(p.lower() == product.lower() for p in have):
+        carriers = [str(r.get("VersionNumber"))
+                    for r in lcms_releases(product=product)]
+        raise ValueError(
+            f"release {release or latest_release()!r} does not publish "
+            f"{product!r} - it has {have}. "
+            + (f"Releases with {product!r}: {carriers} "
+               f"(pass release='{carriers[0]}')"
+               if carriers else f"No release publishes {product!r}.")
+        )
 
 
 def _release_path(release: str = "") -> str:
@@ -111,7 +187,12 @@ def lcms_classes(product: str, release: str = "") -> "Any":
 
     Returns a ``pandas.DataFrame`` with ``class_name``, ``class_value``
     and ``palette``.
+
+    Raises:
+        ValueError: The release does not publish this product, naming
+            the releases that do.
     """
+    _check_product(product, release)
     for p in lcms_products(release):
         if str(p.get("Name", "")).lower() == product.lower():
             return _frame([{
@@ -229,6 +310,12 @@ def lcms_summary(product: str = "Land_Cover", *,
         ``square_meters``, ``acres``, ``hectares``, ``product``,
         ``area``, ``source``.
     """
+    # Product/release compatibility first. The API answers a mismatch
+    # with an "Invalid Summary Area" ParameterError, which points at the
+    # area name and sends the reader off checking a county spelling when
+    # the real problem is asking a tree-canopy release for land cover.
+    _check_product(product, release)
+
     if geometry is not None:
         return _summary_from_ee(product, geometry, scale=scale,
                                 year=year, startyear=startyear,
@@ -280,7 +367,7 @@ def lcms_summary(product: str = "Land_Cover", *,
                     "area": area_name,
                     "source": "lcms-api",
                 })
-    return _frame(records)
+    return _frame(records, columns=_SUMMARY_COLUMNS)
 
 
 def _summary_from_ee(product: str, geometry: Any, *, scale: int,
@@ -319,9 +406,7 @@ def _summary_from_ee(product: str, geometry: Any, *, scale: int,
                      for c in crows if c.get("class_value") is not None}
 
     records = []
-    for img in _iter_year_images(coll, years):
-        yr, image = img
-        band = image.bandNames().get(0)
+    for yr, image in _iter_year_images(coll, years):
         areas = ee.Image.pixelArea().addBands(image.rename("cls")).reduceRegion(
             reducer=ee.Reducer.sum().group(groupField=1, groupName="cls"),
             geometry=region, scale=scale, maxPixels=1e13, bestEffort=True,
@@ -339,8 +424,20 @@ def _summary_from_ee(product: str, geometry: Any, *, scale: int,
                 "area": "(geometry)",
                 "source": "earth-engine",
             })
-        del band
-    return _frame(records)
+
+    if not records:
+        # Almost always an AOI outside the release's coverage. Say so —
+        # and still return a frame WITH the expected columns, because an
+        # empty DataFrame has no columns at all and the caller's very
+        # next line is usually a column selection that would raise a
+        # bare KeyError naming none of the real problem.
+        logger.warning(
+            "fsInsights: LCMS/%s returned no pixels for this geometry. "
+            "Check it falls inside the release's study areas - release "
+            "2025-11 covers only CONUS and AK, while 2024-10 also covers "
+            "HAWAII and PRUSVI.", product,
+        )
+    return _frame(records or [], columns=_SUMMARY_COLUMNS)
 
 
 def _year_filter(year, startyear, endyear):
@@ -354,19 +451,35 @@ def _year_filter(year, startyear, endyear):
 
 
 def _iter_year_images(coll, years):
-    """Yield ``(year, ee.Image)`` for the requested years."""
+    """Yield ``(year, ee.Image)`` for the requested years.
+
+    **Mosaics across study areas rather than taking ``.first()``.** A
+    single year holds one image per study area — filtering 2024 in the
+    2025-11 release returns two, AK and CONUS — so ``.first()`` picks an
+    arbitrary one. It picked AK, which meant an Oregon geometry reduced
+    to nothing and produced an empty frame. The study areas do not
+    overlap, so mosaicking them is both correct and the only way a
+    geometry can select its own coverage.
+
+    ``year`` is an integer property; filtering with the string ``"2024"``
+    silently matches zero images.
+    """
     import ee
+
     if years is None:
         info = coll.aggregate_array("year").getInfo()
         years = sorted({int(y) for y in (info or [])})
     for y in years:
-        img = ee.Image(coll.filter(ee.Filter.eq("year", int(y))).first())
-        yield int(y), img
+        subset = coll.filter(ee.Filter.eq("year", int(y)))
+        yield int(y), subset.mosaic()
 
 
-def _frame(records: List[dict]):
+def _frame(records: List[dict], columns=None):
+    """Build a DataFrame, keeping the column contract even when empty."""
     try:
         import pandas as pd
+        if not records and columns:
+            return pd.DataFrame(columns=list(columns))
         return pd.DataFrame(records)
     except Exception:  # pragma: no cover
         return records

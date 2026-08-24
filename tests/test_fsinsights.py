@@ -286,3 +286,182 @@ def test_runtime_messages_are_ascii():
     for plots, se in ((0, 0.0), (1, 99.0), (4, 54.9), (None, None)):
         reason = fia._reason(se, plots, 30.0, 30)
         reason.encode("cp1252")  # raises if non-encodable
+
+
+# ── Releases are not interchangeable ─────────────────────────────────────
+
+_RELEASES = [
+    {"VersionNumber": "2025-11",
+     "Products": [{"Name": "Change"}, {"Name": "Land_Cover"},
+                  {"Name": "Land_Use"}],
+     "StudyAreas": [{"StudyArea": "AK"}, {"StudyArea": "CONUS"}]},
+    {"VersionNumber": "2025-6",
+     "Products": [{"Name": "NLCD_Percent_Tree_Canopy_Cover"}],
+     "StudyAreas": [{"StudyArea": "CONUS"}, {"StudyArea": "AK"}]},
+    {"VersionNumber": "2024-10",
+     "Products": [{"Name": "Change"}, {"Name": "Land_Cover"},
+                  {"Name": "Land_Use"}],
+     "StudyAreas": [{"StudyArea": "PRUSVI"}, {"StudyArea": "HAWAII"},
+                    {"StudyArea": "AK"}, {"StudyArea": "CONUS"}]},
+]
+
+
+@pytest.fixture
+def stub_releases(monkeypatch):
+    """Pin the release list so these tests never touch the network."""
+    monkeypatch.setitem(lcms._CACHE, "releases", _RELEASES)
+    yield
+    lcms._CACHE.pop("releases", None)
+
+
+def test_releases_filter_by_product(stub_releases):
+    """2025-6 is a tree-canopy release with no Land_Cover at all."""
+    lc = [r["VersionNumber"] for r in lcms.lcms_releases(product="Land_Cover")]
+    assert lc == ["2025-11", "2024-10"]
+
+    tcc = [r["VersionNumber"] for r in
+           lcms.lcms_releases(product="NLCD_Percent_Tree_Canopy_Cover")]
+    assert tcc == ["2025-6"]
+
+
+def test_latest_release_is_ambiguous_without_a_product(stub_releases):
+    """"Latest" differs per product, which is the whole trap.
+
+    2025-6 is newer than 2024-10 but publishes no Land_Cover, so
+    resolving "latest" without naming a product can select a release
+    that cannot answer the question about to be asked.
+    """
+    assert lcms.latest_release("Land_Cover") == "2025-11"
+    assert lcms.latest_release("NLCD_Percent_Tree_Canopy_Cover") == "2025-6"
+
+
+def test_latest_release_rejects_unknown_product(stub_releases):
+    with pytest.raises(ValueError) as exc:
+        lcms.latest_release("Not_A_Product")
+    assert "no LCMS release publishes" in str(exc.value)
+
+
+def test_product_release_mismatch_names_the_fix(stub_releases):
+    """The error must name a release that WOULD work.
+
+    Left to the API this surfaces as "Invalid Summary Area", which
+    points at the county name and sends the reader to check a spelling
+    when the real problem is the release.
+    """
+    with pytest.raises(ValueError) as exc:
+        lcms._check_product("Land_Cover", "2025-6")
+    msg = str(exc.value)
+    assert "2025-6" in msg and "does not publish" in msg
+    assert "2025-11" in msg, "should name a release that carries it"
+
+
+def test_matching_product_and_release_passes(stub_releases):
+    lcms._check_product("Land_Cover", "2025-11")
+    lcms._check_product("NLCD_Percent_Tree_Canopy_Cover", "2025-6")
+
+
+def test_unknown_release_defers_to_the_api(stub_releases):
+    """An unrecognized release is not our call to reject."""
+    lcms._check_product("Land_Cover", "1999-1")
+
+
+def test_release_products_lists_what_a_release_carries(stub_releases):
+    assert lcms.release_products("2025-6") == ["NLCD_Percent_Tree_Canopy_Cover"]
+    assert "Land_Cover" in lcms.release_products("2024-10")
+
+
+def test_study_area_coverage_is_not_monotonic():
+    """Newer is not always broader.
+
+    2024-10 covers HAWAII and PRUSVI; 2025-11 does not. Work in those
+    areas has to pin an OLDER release, which is the opposite of the
+    usual advice and easy to get wrong by reaching for "latest".
+    """
+    from geeViz.fsInsights.lcms_ee import RELEASE_STUDY_AREAS
+
+    newer = set(RELEASE_STUDY_AREAS["2025-11"])
+    older = set(RELEASE_STUDY_AREAS["2024-10"])
+    assert {"HAWAII", "PRUSVI"} <= older
+    assert not ({"HAWAII", "PRUSVI"} & newer)
+
+
+def test_mismatch_message_is_ascii(stub_releases):
+    """cp1252 consoles mangle an em-dash in a raised message."""
+    with pytest.raises(ValueError) as exc:
+        lcms._check_product("Land_Cover", "2025-6")
+    str(exc.value).encode("cp1252")
+
+
+# ── Earth Engine path: study-area mosaicking ─────────────────────────────
+
+class _FakeFiltered:
+    def __init__(self, tag): self.tag = tag
+    def mosaic(self): return f"mosaic({self.tag})"
+    def first(self): return f"first({self.tag})"
+
+
+class _FakeColl:
+    """Stands in for a year-filtered LCMS collection.
+
+    One year holds one image PER STUDY AREA, which is the whole point:
+    filtering 2024 in release 2025-11 returns two images, AK and CONUS.
+    """
+    def __init__(self): self.filtered_with = None
+    def filter(self, f):
+        self.filtered_with = f
+        return _FakeFiltered("AK+CONUS")
+    def aggregate_array(self, prop): return self
+    def getInfo(self): return [2023, 2024]
+
+
+def test_year_images_mosaic_rather_than_take_first(monkeypatch):
+    """`.first()` picks an arbitrary study area, which was the bug.
+
+    An Oregon geometry against the AK image reduces to nothing, so
+    lcms_summary returned an empty frame and the caller's column
+    selection raised a bare KeyError. Study areas do not overlap, so
+    mosaicking is correct and lets the geometry select its own coverage.
+    """
+    import types
+    fake_ee = types.SimpleNamespace(
+        Filter=types.SimpleNamespace(eq=lambda k, v: (k, v)))
+    monkeypatch.setitem(sys.modules, "ee", fake_ee)
+
+    coll = _FakeColl()
+    out = list(lcms._iter_year_images(coll, [2024]))
+    assert out == [(2024, "mosaic(AK+CONUS)")], (
+        "must mosaic across study areas, not take .first()")
+
+
+def test_year_filter_uses_an_int(monkeypatch):
+    """`year` is an integer property; the string '2024' matches nothing."""
+    import types
+    fake_ee = types.SimpleNamespace(
+        Filter=types.SimpleNamespace(eq=lambda k, v: (k, v)))
+    monkeypatch.setitem(sys.modules, "ee", fake_ee)
+
+    coll = _FakeColl()
+    list(lcms._iter_year_images(coll, ["2024"]))
+    assert coll.filtered_with == ("year", 2024)
+    assert isinstance(coll.filtered_with[1], int)
+
+
+# ── Empty results keep their column contract ─────────────────────────────
+
+def test_empty_frame_still_has_columns():
+    """An empty DataFrame built from [] has NO columns.
+
+    The caller's next line is almost always a column selection, which
+    then raises a KeyError naming none of the real problem (an AOI
+    outside the release's coverage).
+    """
+    df = lcms._frame([], columns=lcms._SUMMARY_COLUMNS)
+    assert len(df) == 0
+    assert list(df.columns) == list(lcms._SUMMARY_COLUMNS)
+    df[["year", "class_name", "acres", "source"]]  # must not raise
+
+
+def test_populated_frame_has_the_same_columns():
+    df = lcms._frame([{c: None for c in lcms._SUMMARY_COLUMNS}],
+                     columns=lcms._SUMMARY_COLUMNS)
+    assert set(lcms._SUMMARY_COLUMNS) <= set(df.columns)

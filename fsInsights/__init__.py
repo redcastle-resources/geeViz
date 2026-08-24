@@ -47,6 +47,8 @@ from .lcms import (
     lcms_summary,
     lcms_summary_areas,
     lcms_vis_params,
+    latest_release,
+    release_products,
 )
 from .fia import (
     FIAValidationError,
@@ -85,6 +87,8 @@ __all__ = [
     "lcms_summary_areas",
     "lcms_summary",
     "lcms_vis_params",
+    "latest_release",
+    "release_products",
     # Cache management
     "refresh_all",
     "cache_dir",
