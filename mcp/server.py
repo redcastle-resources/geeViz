@@ -5740,6 +5740,194 @@ def _make_serializable(obj):
 # Report tools removed -- use rl.Report() in run_code instead.
 
 
+# ---------------------------------------------------------------------------
+# Tools 13-15: Forest Service data services (FIA + LCMS)
+#
+# Three tools, not ten, matching the reduction that took this server from
+# 21 tools to 12. The discovery tool is the load-bearing one: FIA's
+# parameter space is 752 x 96 x 96 x 1129, which no model can guess its
+# way through, and every wrong guess costs a turn plus a slow round trip.
+# ---------------------------------------------------------------------------
+
+@app.tool(annotations=_READ_ONLY)
+def search_fia(query: str = "", kind: str = "attributes",
+               state: str = "", growth_only: bool = False,
+               max_results: int = 20) -> str:
+    """Search the FIA vocabulary: estimate attributes, groupings, evaluations.
+
+    **Call this before fia_estimate — always.** FIA's ``/fullreport``
+    takes an attribute, two groupings and an evaluation drawn from 752 /
+    96 / 1,129 options respectively. Guessing a parameter produces an
+    opaque server error, not a helpful one.
+
+    Resolved from catalogs bundled with geeViz, so this is instant and
+    works with no network — including while FIADB-API is down, which it
+    intermittently is.
+
+    Args:
+        query: Free text. For ``attributes``, matched against the
+            description and estimate group ("carbon", "net growth
+            volume", "mortality"). For ``groupings``, against the label
+            and database column ("species", "county", "ownership").
+        kind: ``"attributes"`` (what to estimate), ``"groupings"`` (how
+            to break it out), or ``"evaluations"`` (which inventory).
+        state: For ``kind="evaluations"`` — state name prefix.
+        growth_only: For ``kind="evaluations"`` — keep only evaluations
+            with growth accounting, required by every growth, removals
+            and mortality attribute.
+        max_results: Cap on rows returned.
+
+    Returns:
+        JSON. Attributes carry ``snum``, ``description``, ``units`` and
+        ``eval_typ``; groupings carry the exact ``label`` string that
+        ``fia_estimate`` needs; evaluations carry ``wc`` and
+        ``growth_acct``.
+    """
+    try:
+        from geeViz import fsInsights as _fs
+    except Exception as exc:
+        return json.dumps({"error": f"fsInsights unavailable: {exc}"})
+
+    kind = (kind or "attributes").lower()
+    try:
+        if kind.startswith("attr"):
+            df = _fs.find_attributes(query, limit=max_results)
+        elif kind.startswith("group"):
+            df = _fs.find_groupings(query, limit=max_results)
+        elif kind.startswith("eval"):
+            df = _fs.find_evaluations(state, growth_only=growth_only,
+                                      limit=max_results)
+        else:
+            return json.dumps({
+                "error": f"kind must be 'attributes', 'groupings' or "
+                         f"'evaluations', got {kind!r}"})
+    except Exception as exc:
+        return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
+
+    rows = df.to_dict("records") if hasattr(df, "to_dict") else list(df)
+    return json.dumps({"kind": kind, "query": query, "count": len(rows),
+                       "results": rows}, default=str)
+
+
+@app.tool(annotations=_READ_ONLY)
+def fia_estimate(wc: int, snum: int, rselected: str = "",
+                 cselected: str = "", max_results: int = 60) -> str:
+    """Run an FIA estimate. Returns values WITH their sampling error.
+
+    Get ``wc``, ``snum`` and the grouping strings from ``search_fia``
+    first — the grouping arguments are exact display strings, so a near
+    miss fails.
+
+    **You must not report any value from this tool without its standard
+    error.** FIA is a probability sample, not a census. Rows carry
+    ``se_pct`` and ``plots``, and ``unreliable`` is set when the cell is
+    too thin to report (SE > 30% or fewer than 30 plots, with ``n = 0``
+    and ``n = 1`` called out separately because a zero-plot cell reports
+    a *zero* standard error — reading as maximum precision when it means
+    no information).
+
+    Do not report a row where ``unreliable`` is true. Say the estimate
+    is too uncertain to give, and name why from ``unreliable_reason``.
+    "Alabama has 15,748 acres of white pine" is a confident falsehood
+    built from correct data when the truth is 15,748 +/- 54.9% from four
+    plots.
+
+    Args:
+        wc: Evaluation group from ``search_fia(kind="evaluations")``.
+        snum: Attribute number from ``search_fia(kind="attributes")``.
+        rselected: Row grouping — exact ``label`` from ``search_fia``.
+        cselected: Column grouping. Optional; cross-tabulating thins the
+            plot count per cell fast, so expect more flagged rows.
+        max_results: Cap on rows returned.
+
+    Returns:
+        JSON with ``rows``, plus ``reliable_count`` / ``unreliable_count``
+        and the ``forest_definition`` the API actually applied.
+    """
+    try:
+        from geeViz import fsInsights as _fs
+    except Exception as exc:
+        return json.dumps({"error": f"fsInsights unavailable: {exc}"})
+
+    try:
+        df = _fs.estimate(wc=wc, snum=snum, rselected=rselected,
+                          cselected=cselected)
+    except Exception as exc:
+        # Validation errors name the fix; upstream errors say it is not
+        # the caller's fault. Both are more useful than a raw traceback.
+        return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
+
+    rows = df.to_dict("records") if hasattr(df, "to_dict") else list(df)
+    n_bad = sum(1 for r in rows if r.get("unreliable"))
+    fd = rows[0].get("forest_definition") if rows else ""
+    return json.dumps({
+        "count": len(rows),
+        "reliable_count": len(rows) - n_bad,
+        "unreliable_count": n_bad,
+        "forest_definition": fd,
+        "note": ("Every value carries se_pct and plots. Do not report a "
+                 "row with unreliable=true; give the reason instead."),
+        "rows": rows[:max_results],
+        "truncated": len(rows) > max_results,
+    }, default=str)
+
+
+@app.tool(annotations=_READ_ONLY)
+def lcms_summary(product: str = "Land_Cover", state: str = "",
+                 county: str = "", region: str = "", forest: str = "",
+                 district: str = "", year: int = 0,
+                 max_results: int = 80) -> str:
+    """LCMS land cover / land use / change areas for a named area.
+
+    Wall-to-wall 30 m maps, 1985-2025. Complements FIA: LCMS answers
+    *what changed and where*, FIA answers *what is there, plus or minus
+    error*.
+
+    Only the 3,643 precomputed areas are available here — 3,137 counties,
+    502 ranger districts, and CONUS / All-Lands rollups. Arbitrary
+    geometry is not served by this API; that needs Earth Engine, via
+    ``run_code`` with ``geeViz.fsInsights.lcms_summary(geometry=...)``.
+
+    Args:
+        product: ``"Land_Cover"``, ``"Land_Use"`` or ``"Change"``.
+        state: State name. Required alongside ``county``.
+        county: County name.
+        region, forest, district: Forest Service units. ``district``
+            requires ``forest``.
+        year: A single year, or 0 for the full 1985-2025 series.
+        max_results: Cap on rows returned.
+
+    Returns:
+        JSON rows of ``year``, ``class_name``, ``acres``, ``hectares``.
+
+    Note:
+        Do not equate these areas with FIA area estimates. One is a
+        classified map, the other a probability sample; comparing them
+        conflates map accuracy with sampling error. Report them
+        separately and say which is which.
+    """
+    try:
+        from geeViz import fsInsights as _fs
+    except Exception as exc:
+        return json.dumps({"error": f"fsInsights unavailable: {exc}"})
+
+    try:
+        df = _fs.lcms_summary(product, state=state, county=county,
+                              region=region, forest=forest,
+                              district=district,
+                              year=(year or None))
+    except Exception as exc:
+        return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
+
+    rows = df.to_dict("records") if hasattr(df, "to_dict") else list(df)
+    return json.dumps({
+        "product": product,
+        "count": len(rows),
+        "rows": rows[:max_results],
+        "truncated": len(rows) > max_results,
+    }, default=str)
+
+
 # Entry point
 # ---------------------------------------------------------------------------
 
