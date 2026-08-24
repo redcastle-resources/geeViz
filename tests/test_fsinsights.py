@@ -465,3 +465,131 @@ def test_populated_frame_has_the_same_columns():
     df = lcms._frame([{c: None for c in lcms._SUMMARY_COLUMNS}],
                      columns=lcms._SUMMARY_COLUMNS)
     assert set(lcms._SUMMARY_COLUMNS) <= set(df.columns)
+
+
+# ── align: class-name validation ─────────────────────────────────────────
+
+_LC_CLASSES = [
+    "Trees", "Tall Shrubs (AK Only)", "Tall Shrubs & Trees Mix (AK Only)",
+    "Shrubs", "Shrubs & Trees Mix", "Grass/Forb/Herb",
+    "Grass/Forb/Herb & Shrubs Mix", "Grass/Forb/Herb & Trees Mix",
+    "Barren & Trees Mix", "Barren & Shrubs Mix",
+    "Barren & Grass/Forb/Herb Mix", "Barren or Impervious",
+    "Snow or Ice", "Water", "Non-Processing Area Mask",
+]
+
+
+@pytest.fixture
+def stub_lc_classes(monkeypatch):
+    import pandas as pd
+
+    from geeViz.fsInsights import align as _align
+    monkeypatch.setattr(
+        _align, "lcms_classes",
+        lambda product, release="": pd.DataFrame({"class_name": _LC_CLASSES}))
+
+
+def test_default_tree_classes_are_all_real(stub_lc_classes):
+    """Every TREE_CLASSES entry must exist, or it contributes zero acres.
+
+    'Tall Shrubs & Trees Mix' looks correct but the real class carries an
+    '(AK Only)' suffix. The wrong name matches nothing, is invisible
+    across CONUS where the class never occurs, and quietly understates
+    tree area throughout Alaska.
+    """
+    from geeViz.fsInsights import align as _align
+    assert _align._warn_unknown_classes(_align.TREE_CLASSES) == []
+
+
+def test_the_ak_only_suffix_is_part_of_the_name(stub_lc_classes):
+    """Guard the specific mistake, so a future 'tidy-up' cannot reintroduce it."""
+    from geeViz.fsInsights import align as _align
+    assert "Tall Shrubs & Trees Mix (AK Only)" in _align.TREE_CLASSES
+    assert _align._warn_unknown_classes(("Tall Shrubs & Trees Mix",)) == [
+        "Tall Shrubs & Trees Mix"]
+
+
+def test_unknown_class_names_are_reported(stub_lc_classes):
+    from geeViz.fsInsights import align as _align
+    unknown = _align._warn_unknown_classes(("Trees", "Treez", "Nope"))
+    assert unknown == ["Treez", "Nope"]
+
+
+def test_absent_but_real_class_is_not_flagged(stub_lc_classes):
+    """A class real but absent from a county is normal, not an error."""
+    from geeViz.fsInsights import align as _align
+    assert _align._warn_unknown_classes(("Tall Shrubs (AK Only)",)) == []
+
+
+def test_class_validation_never_breaks_the_call(monkeypatch):
+    """A validation nicety must not take down the real work."""
+    from geeViz.fsInsights import align as _align
+
+    def boom(*a, **k):
+        raise RuntimeError("network gone")
+
+    monkeypatch.setattr(_align, "lcms_classes", boom)
+    assert _align._warn_unknown_classes(("Trees",)) == []
+
+
+# ── align: caveats travel with the numbers ───────────────────────────────
+
+def test_caveats_available_without_a_live_comparison():
+    """Static facts about the datasets, not properties of one call.
+
+    Gating them behind a successful FIA fetch meant the caveats vanished
+    exactly when a reader had only one number and might quote it alone.
+    """
+    from geeViz.fsInsights.align import COMPARISON_CAVEATS
+
+    assert len(COMPARISON_CAVEATS) >= 4
+    joined = " ".join(COMPARISON_CAVEATS).lower()
+    assert "map accuracy" in joined and "sampling error" in joined
+    assert "harvested" in joined, "the definitional difference must be stated"
+
+
+def test_caveats_are_ascii():
+    from geeViz.fsInsights.align import COMPARISON_CAVEATS
+    " ".join(COMPARISON_CAVEATS).encode("cp1252")
+
+
+def test_release_with_no_summary_areas_is_rejected_locally(monkeypatch):
+    """A release can publish a product and still answer nothing.
+
+    2022-8 reports SummaryAreaCount=0. Left to the API that surfaces as
+    "Invalid Summary Area for LCMS Release 2022-8" -- blaming the county
+    name, wrong in exactly the way the product mismatch was.
+    """
+    rels = [
+        {"VersionNumber": "2025-11", "SummaryAreaCount": 3643,
+         "Products": [{"Name": "Land_Cover"}]},
+        {"VersionNumber": "2022-8", "SummaryAreaCount": 0,
+         "Products": [{"Name": "Land_Cover"}]},
+    ]
+    monkeypatch.setitem(lcms._CACHE, "releases", rels)
+    try:
+        with pytest.raises(ValueError) as exc:
+            lcms._check_product("Land_Cover", "2022-8")
+        msg = str(exc.value)
+        assert "no summary areas" in msg
+        assert "2025-11" in msg, "must name a usable release"
+        # A release that DOES have areas still passes.
+        lcms._check_product("Land_Cover", "2025-11")
+    finally:
+        lcms._CACHE.pop("releases", None)
+
+
+def test_duplicate_attribute_descriptions_are_both_returned():
+    """FIA's catalog really does contain duplicates; do not hide them.
+
+    snum 209 and 956 are identical across every field. Collapsing them
+    would conceal a real property of the upstream catalog.
+    """
+    a209, a956 = fs.get_attribute(209), fs.get_attribute(956)
+    assert a209 and a956
+    assert a209["ATTRIBUTE_DESCR"] == a956["ATTRIBUTE_DESCR"]
+    assert a209["EVAL_TYP"] == a956["EVAL_TYP"]
+
+    hits = fs.find_attributes("net growth sawlog", limit=200)
+    nums = set(hits["snum"])
+    assert {209, 956} <= nums, "both duplicates should be searchable"

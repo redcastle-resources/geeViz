@@ -243,6 +243,16 @@ def find_attributes(query: str = "", *, land_basis: str = "",
         an attribute — number, description, units, and the evaluation
         type it requires. The full record is available via
         :func:`get_attribute`.
+
+    Note:
+        **FIA's own catalog contains duplicate descriptions** — 7 of the
+        752 appear more than once. ``snum`` 209 and 956, for instance,
+        are identical across description, estimate group, evaluation
+        type, estimation basis and tree portion. Both are returned
+        rather than silently de-duplicated, because they are distinct
+        attribute numbers upstream and collapsing them would hide a real
+        property of the catalog. Where descriptions match on every
+        field, either number should produce the same estimate.
     """
     rows = load_catalog("snum")
     terms = [t for t in query.lower().split() if t]

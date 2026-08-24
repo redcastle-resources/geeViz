@@ -151,6 +151,31 @@ def _check_product(product: str, release: str = "") -> None:
     check a county name when the real problem is that they asked a
     tree-canopy release for land cover.
     """
+    # A release can publish the product and still be unable to answer,
+    # because it has no summary areas at all — 2022-8 reports
+    # SummaryAreaCount = 0. Left to the API that surfaces as "Invalid
+    # Summary Area for LCMS Release 2022-8", which blames the county and
+    # is wrong in the same way the product mismatch was.
+    for r in lcms_releases():
+        if release and str(r.get("VersionNumber")) == str(release):
+            # Only an EXPLICIT zero counts. A missing key means the
+            # release list did not report a count, which is unknown
+            # rather than empty — treating it as empty would reject
+            # perfectly good releases on incomplete metadata.
+            count = r.get("SummaryAreaCount")
+            if count is not None and int(count) == 0:
+                usable = [str(x.get("VersionNumber"))
+                          for x in lcms_releases(product=product)
+                          if x.get("SummaryAreaCount")]
+                raise ValueError(
+                    f"release {release!r} has no summary areas "
+                    f"(SummaryAreaCount=0), so it cannot answer area "
+                    f"queries even though it publishes {product!r}. "
+                    + (f"Usable releases: {usable} "
+                       f"(pass release='{usable[0]}')" if usable else "")
+                )
+            break
+
     have = release_products(release)
     if not have:
         return  # unknown release; let the API speak

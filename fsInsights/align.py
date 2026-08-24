@@ -32,7 +32,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from .fia import estimate
-from .lcms import lcms_summary
+from .lcms import lcms_classes, lcms_summary
 
 logger = logging.getLogger(__name__)
 
@@ -43,16 +43,79 @@ logger = logging.getLogger(__name__)
 #: stand stays forest land in FIA while LCMS may map it as grass or
 #: barren in the same year. That divergence is real signal, and it is
 #: exactly what a naive join would hide.
+#:
+#: The ``(AK Only)`` suffix is part of the real class name, not a
+#: comment. Writing it without the suffix looks correct, matches nothing,
+#: and silently drops the class — invisible in CONUS where it never
+#: occurs, and an understatement of tree area everywhere in Alaska. That
+#: is why :func:`lcms_tree_area` validates these names against the API's
+#: class list rather than trusting this tuple.
 TREE_CLASSES = (
     "Trees",
-    "Tall Shrubs & Trees Mix",
+    "Tall Shrubs & Trees Mix (AK Only)",
     "Shrubs & Trees Mix",
     "Grass/Forb/Herb & Trees Mix",
     "Barren & Trees Mix",
 )
 
+#: Why LCMS and FIA can legitimately disagree. Module-level on purpose:
+#: these are static facts about the two datasets, not properties of any
+#: one comparison, so they must be readable even when the FIA half of a
+#: comparison could not be fetched. Gating them behind a successful call
+#: meant the caveats vanished exactly when a reader had one number and
+#: might quote it alone.
+COMPARISON_CAVEATS = (
+    "LCMS area is map-derived; FIA area is a design-based estimate. The "
+    "difference mixes map accuracy with sampling error and is not an "
+    "error term for either.",
+    "FIA 'forest land' is a land-use definition based on stocking and "
+    "potential; LCMS land cover describes present canopy. A recently "
+    "harvested stand stays forest land in FIA while LCMS may map it as "
+    "grass or barren the same year.",
+    "Reference periods differ: an FIA evaluation spans several years of "
+    "panels, while an LCMS year is a single annual map.",
+    "Minimum mapping unit and edge handling differ, which matters most "
+    "in fragmented landscapes.",
+)
+
+
 #: FIA attribute 2 — "Area of forest land, in acres".
 FOREST_AREA_SNUM = 2
+
+
+def _warn_unknown_classes(classes, release: str = "") -> list:
+    """Warn about requested class names that are not real LCMS classes.
+
+    The distinction that matters: a class *absent from this county* is
+    normal and silent, while a class *that does not exist in the product
+    at all* is a typo or a rename and must be loud. Only the second is
+    reported here.
+
+    Without this, a wrong name is a silent undercount. ``'Tall Shrubs &
+    Trees Mix'`` looks right but the real class carries an ``(AK Only)``
+    suffix — matching nothing, invisible across CONUS where the class
+    never occurs, and quietly understating tree area throughout Alaska.
+    Sums that are wrong but plausible are the worst kind.
+
+    Returns the unknown names, so callers can assert on them in tests.
+    """
+    try:
+        official = set(lcms_classes("Land_Cover", release)["class_name"])
+    except Exception:
+        # Never let a validation nicety break the actual call.
+        logger.debug("fsInsights.align: could not verify class names",
+                     exc_info=True)
+        return []
+
+    unknown = [c for c in classes if c not in official]
+    if unknown:
+        logger.warning(
+            "fsInsights.align: %d requested class name(s) do not exist in "
+            "LCMS Land_Cover and will contribute ZERO acres: %s. Real "
+            "classes: %s",
+            len(unknown), unknown, sorted(official),
+        )
+    return unknown
 
 
 def lcms_tree_area(state: str = "", county: str = "", *,
@@ -73,6 +136,8 @@ def lcms_tree_area(state: str = "", county: str = "", *,
         ``source``, ``estimator``.
     """
     classes = tuple(tree_classes or TREE_CLASSES)
+    _warn_unknown_classes(classes, release)
+
     df = lcms_summary("Land_Cover", state=state, county=county,
                       region=region, forest=forest, district=district,
                       year=year, release=release)
@@ -82,7 +147,7 @@ def lcms_tree_area(state: str = "", county: str = "", *,
     treed = df[df["class_name"].isin(classes)]
     if treed.empty:
         logger.warning(
-            "fsInsights.align: no LCMS classes matched %s — available: %s",
+            "fsInsights.align: no LCMS classes matched %s - present here: %s",
             classes, sorted(df["class_name"].unique()),
         )
 
@@ -166,21 +231,7 @@ def compare_area(*, wc: int, state: str = "", county: str = "",
             "fia_plots": fia_plots,
             "difference_acres": diff,
             "difference_pct_of_fia": pct,
-            "caveats": [
-                "LCMS area is map-derived; FIA area is a design-based "
-                "estimate. The difference mixes map accuracy with "
-                "sampling error and is not an error term for either.",
-                "FIA 'forest land' is a land-use definition based on "
-                "stocking and potential; LCMS land cover describes "
-                "present canopy. A recently harvested stand stays "
-                "forest land in FIA while LCMS may map it as grass or "
-                "barren the same year.",
-                "Reference periods differ: an FIA evaluation spans "
-                "several years of panels, while an LCMS year is a "
-                "single annual map.",
-                "Minimum mapping unit and edge handling differ, which "
-                "matters most in fragmented landscapes.",
-            ],
+            "caveats": list(COMPARISON_CAVEATS),
         },
     }
 
