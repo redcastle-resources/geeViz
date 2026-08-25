@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
-print('Importing geeViz MCP Server from', __file__)
+print('Importing geeViz MCP Server from', __file__, file=sys.stderr, flush=True)
 # ---------------------------------------------------------------------------
 # CLI argument parsing (before heavy imports so --help is instant)
 # ---------------------------------------------------------------------------
@@ -708,10 +708,10 @@ try:
             "quality, solar, timezone, roads) remain available."
         )
     _SERVER_INSTRUCTIONS = _SERVER_INSTRUCTIONS.replace("<!--GMAPS_AI_STATUS-->", _ai_block)
-    print(f"[geeViz MCP] Loaded instructions: {len(_SERVER_INSTRUCTIONS)} chars, {len(_SERVER_INSTRUCTIONS.split())} words (gmaps AI: {'ENABLED' if _ai_on else 'DISABLED'})")
+    print(f"[geeViz MCP] Loaded instructions: {len(_SERVER_INSTRUCTIONS)} chars, {len(_SERVER_INSTRUCTIONS.split())} words (gmaps AI: {'ENABLED' if _ai_on else 'DISABLED'})", file=sys.stderr, flush=True)
 except Exception:
     _SERVER_INSTRUCTIONS = None
-    print("[geeViz MCP] WARNING: No agent instructions loaded")
+    print("[geeViz MCP] WARNING: No agent instructions loaded", file=sys.stderr, flush=True)
 
 app = FastMCP(
     "geeViz",
@@ -1330,7 +1330,17 @@ def _build_module_tree():
     _MODULE_MAP = fq_map
     n_mods = len(set(e["fq"] for e in tree.values()))
     n_examples = len(example_members)
-    print(f"[geeViz MCP] Module tree: {n_mods} modules, {n_examples} examples indexed (zero imports)")
+    # stderr, NOT stdout: this server speaks JSON-RPC over stdio, and
+    # _build_module_tree() runs from _ensure_initialized_locked() — i.e.
+    # lazily, on the FIRST tool call, not at import. Printing to stdout
+    # there injects a non-JSON line into the protocol stream mid-session,
+    # desyncs the client's parser, and the in-flight request never gets a
+    # matching response. It surfaces as:
+    #   McpError: Timed out while waiting for response to ClientRequest.
+    #             Waited 300.0 seconds.
+    # which reads like a hung EE call but is a corrupted pipe.
+    print(f"[geeViz MCP] Module tree: {n_mods} modules, {n_examples} examples indexed (zero imports)",
+          file=sys.stderr, flush=True)
 
 
 def _get_module(entry):
@@ -1339,7 +1349,7 @@ def _get_module(entry):
         try:
             entry["mod"] = importlib.import_module(entry["fq"])
         except Exception as exc:
-            print(f"[geeViz MCP] Failed to import {entry['fq']}: {exc}")
+            print(f"[geeViz MCP] Failed to import {entry['fq']}: {exc}", file=sys.stderr, flush=True)
             return None
     return entry["mod"]
 
