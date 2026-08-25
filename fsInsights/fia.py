@@ -206,7 +206,9 @@ def estimate(wc: int, snum: int, *,
 
     payload = get_json(f"{FIA_BASE}/fullreport", params=params)
     return _to_frame(payload, max_se_pct=max_se_pct, min_plots=min_plots,
-                     snum_hint=snum)
+                     snum_hint=snum,
+                     selections=(bool(pselected), bool(rselected),
+                                 bool(cselected)))
 
 
 def _reason(se_pct, plots, max_se_pct, min_plots) -> str:
@@ -231,8 +233,34 @@ def _reason(se_pct, plots, max_se_pct, min_plots) -> str:
     return ""
 
 
+def _grp_assignment(selections: Optional[tuple]) -> Dict[str, Optional[str]]:
+    """Map page/row/column onto the GRP keys NJSON will actually use.
+
+    NJSON numbers its grouping columns GRP1..GRPn over the selections
+    that were SENT, in p, r, c order — not into fixed slots. So with
+    ``rselected`` and ``cselected`` but no ``pselected``, the row lands
+    in ``GRP1`` and the column in ``GRP2``.
+
+    ``selections`` is ``(has_p, has_r, has_c)``. When it is None (a
+    caller invoking ``_to_frame`` directly, or a recorded payload in a
+    test) fall back to the all-three layout, which is what the raw key
+    names suggest.
+    """
+    if selections is None:
+        return {"page": "GRP1", "row": "GRP2", "column": "GRP3"}
+    has_p, has_r, has_c = (bool(x) for x in selections)
+    out: Dict[str, Optional[str]] = {"page": None, "row": None, "column": None}
+    n = 0
+    for key, present in (("page", has_p), ("row", has_r), ("column", has_c)):
+        if present:
+            n += 1
+            out[key] = f"GRP{n}"
+    return out
+
+
 def _to_frame(payload: Any, *, max_se_pct: float, min_plots: int,
-              snum_hint: Any = None) -> "Any":
+              snum_hint: Any = None,
+              selections: Optional[tuple] = None) -> "Any":
     """Flatten an FIA report into tidy rows.
 
     Handles both response shapes:
@@ -283,14 +311,22 @@ def _to_frame(payload: Any, *, max_se_pct: float, min_plots: int,
     records: List[dict] = []
 
     # ── NJSON (current) ─────────────────────────────────────────────────
-    # Flat ``estimates`` list. GRP1/GRP2/GRP3 correspond positionally to
-    # pselected / rselected / cselected -- verified by issuing a request
-    # with three DIFFERENT selections and reading them back:
-    #   pselected="All live stocking" -> GRP1 "`0001 Overstocked"
-    #   rselected="Ownership group"   -> GRP2 "`0001 National Forest"
-    #   cselected="Forest type group" -> GRP3 "`0180 Pinyon / juniper group"
-    # Getting this backwards would silently transpose every table, so it
-    # is pinned by a test rather than inferred from the names.
+    # Flat ``estimates`` list keyed GRP1..GRPn.
+    #
+    # The GRP numbers are POSITIONAL OVER THE GROUPINGS ACTUALLY SENT, in
+    # p, r, c order -- they are not fixed slots. Verified against live
+    # responses:
+    #
+    #   pselected + rselected + cselected -> GRP1=p, GRP2=r, GRP3=c
+    #   rselected + cselected (no p)      -> GRP1=r, GRP2=c
+    #   rselected only                    -> GRP1=r
+    #
+    # Assuming fixed slots is wrong the moment pselected is omitted --
+    # which is the common case. It put the COLUMN value in ``row`` and
+    # left ``column`` empty, silently transposing the table while still
+    # producing plausible-looking numbers. Caught by the example
+    # notebook, whose cells came back with column=None.
+    grp_for = _grp_assignment(selections)
     estimates = out.get("estimates")
     if isinstance(estimates, list) and estimates:
         meta = out.get("metadata") or {}
@@ -315,9 +351,9 @@ def _to_frame(payload: Any, *, max_se_pct: float, min_plots: int,
             plots = int(plots) if plots is not None else None
             reason = _reason(se, plots, max_se_pct, min_plots)
             records.append({
-                "row": r.get("GRP2"),
-                "column": r.get("GRP3"),
-                "page": r.get("GRP1"),
+                "row": r.get(grp_for["row"]) if grp_for["row"] else None,
+                "column": r.get(grp_for["column"]) if grp_for["column"] else None,
+                "page": r.get(grp_for["page"]) if grp_for["page"] else None,
                 "estimate": est,
                 "se_pct": se,
                 "plots": plots,
@@ -329,6 +365,45 @@ def _to_frame(payload: Any, *, max_se_pct: float, min_plots: int,
                 "evaluation": eval_label,
                 "forest_definition": fd_echo,
             })
+
+        # ── Totals and marginals ────────────────────────────────────────
+        # Legacy JSON carried a "Total" row inline; NJSON moves them to
+        # separate ``totals`` (grand total) and ``subtotals`` (per-group
+        # marginals) keys. Callers filtering ``df['row'] == 'Total'`` --
+        # which the example notebook does -- got an empty frame until
+        # these were re-emitted.
+        def _add(row_label, col_label, rec):
+            if not isinstance(rec, dict):
+                return
+            e = rec.get("ESTIMATE")
+            s_ = rec.get("SE_PERCENT")
+            p_ = rec.get("PLOT_COUNT")
+            e = float(e) if e is not None else None
+            s_ = float(s_) if s_ is not None else None
+            p_ = int(p_) if p_ is not None else None
+            why = _reason(s_, p_, max_se_pct, min_plots)
+            records.append({
+                "row": row_label, "column": col_label, "page": None,
+                "estimate": e, "se_pct": s_, "plots": p_, "units": units,
+                "unreliable": bool(why), "unreliable_reason": why,
+                "attribute": attr_name, "snum": attr_nbr,
+                "evaluation": eval_label, "forest_definition": fd_echo,
+            })
+
+        subs = out.get("subtotals")
+        if isinstance(subs, dict):
+            # A marginal over the ROW grouping varies by row and is
+            # totalled across columns -> column='Total', and vice versa.
+            if grp_for["row"]:
+                for rec in subs.get(grp_for["row"]) or []:
+                    _add(rec.get(grp_for["row"]), "Total", rec)
+            if grp_for["column"]:
+                for rec in subs.get(grp_for["column"]) or []:
+                    _add("Total", rec.get(grp_for["column"]), rec)
+
+        for rec in out.get("totals") or []:
+            _add("Total", "Total", rec)
+
         return _frame(records)
 
     # ── Legacy nested row/column (outputFormat=JSON) ────────────────────

@@ -175,6 +175,41 @@ def fia_forest_area(wc: int, *, rselected: str = "",
     return df
 
 
+def _select_county(fi, county: str):
+    """Narrow a county-grouped FIA frame to one county.
+
+    FIA county labels look like ``` `41013 4113 OR Crook ``` — a
+    backtick-prefixed code, the state/county numeric, the state
+    abbreviation, then the name — so matching is a case-insensitive
+    substring test on the name rather than equality.
+
+    The county's aggregate row is relabelled ``Total`` so the caller
+    keeps ONE extraction path: without a county the state total already
+    arrives as ``row == "Total"``, and with one this makes the county
+    total arrive the same way. Returns the frame unchanged when the name
+    matches nothing, which keeps a typo visible as "no FIA half" rather
+    than silently substituting the state.
+    """
+    if not hasattr(fi, "empty") or getattr(fi, "empty", True):
+        return fi
+    name = str(county).strip().lower()
+    if not name:
+        return fi
+    hit = fi[fi["row"].astype(str).str.lower().str.contains(name, na=False)]
+    if not len(hit):
+        logger.warning(
+            "fsInsights.compare_area: county %r matched no FIA county row; "
+            "returning the frame unfiltered rather than silently comparing "
+            "against the whole state", county,
+        )
+        return hit  # empty -> caller reports "not enough data", not a wrong number
+    # Prefer the marginal (column == 'Total'); fall back to the sole row
+    # when the request had no column grouping.
+    marg = hit[hit["column"].astype(str) == "Total"]
+    pick = marg if len(marg) else hit
+    return pick.assign(row="Total")
+
+
 def compare_area(*, wc: int, state: str = "", county: str = "",
                  year: Optional[int] = None,
                  tree_classes: Optional[tuple] = None,
@@ -198,7 +233,26 @@ def compare_area(*, wc: int, state: str = "", county: str = "",
     """
     lc = lcms_tree_area(state=state, county=county, year=year,
                         tree_classes=tree_classes, release=release)
-    fi = fia_forest_area(wc)
+
+    # Both halves must cover the SAME footprint. ``county`` was being
+    # applied to the LCMS side only, so a county request compared that
+    # county's mapped acres against the WHOLE STATE's FIA estimate --
+    # Crook County, OR came out as 613,203 vs 29,754,801 acres, reported
+    # as a confident "-97.9% difference". Nothing errored; the number was
+    # simply meaningless.
+    #
+    # It stayed hidden because the FIA half was returning nothing at all
+    # (upstream JSON was broken), so the comparison bailed out with "Not
+    # enough data to compare" instead of printing a wrong answer. Fixing
+    # FIA is what exposed it.
+    #
+    # Group by county and keep the requested one; without a county the
+    # state-level total is the right footprint and needs no grouping.
+    if county:
+        fi = fia_forest_area(wc, rselected="County code and name")
+        fi = _select_county(fi, county)
+    else:
+        fi = fia_forest_area(wc)
 
     lcms_acres = None
     try:

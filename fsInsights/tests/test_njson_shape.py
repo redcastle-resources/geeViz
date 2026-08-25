@@ -83,15 +83,84 @@ def _rows(payload, **kw):
 
 # ── GRP ordering: the transposition hazard ───────────────────────────────
 
-def test_grp2_is_the_row_and_grp3_is_the_column():
-    """Pinned against a live response, not inferred from the names.
-
-    If these swap, every table silently transposes.
-    """
-    r = _rows(NJSON)[0]
-    assert r["row"] == "`0001 National Forest"          # rselected -> GRP2
-    assert r["column"] == "`0180 Pinyon / juniper group"  # cselected -> GRP3
+def test_all_three_selections_map_p_r_c_to_grp1_2_3():
+    """Pinned against a live response, not inferred from the names."""
+    r = _rows(NJSON, selections=(True, True, True))[0]
     assert r["page"] == "`0001 Overstocked"              # pselected -> GRP1
+    assert r["row"] == "`0001 National Forest"           # rselected -> GRP2
+    assert r["column"] == "`0180 Pinyon / juniper group"  # cselected -> GRP3
+
+
+# GRP numbering is positional over the selections SENT, so dropping
+# pselected shifts everything down one. Recorded live for
+# rselected='County code and name', cselected='Forest type group'.
+NJSON_RC = {
+    "metadata": {"FIAorRPA": "FIADEF", "evalGrps": ["Alabama 012023"],
+                 "numEstDesc": "0002 Area of forest land, in acres"},
+    "estimates": [
+        {"GRP1": "`01001 1001 AL Autauga",
+         "GRP2": "`0140 Longleaf / slash pine group",
+         "ESTIMATE": 12345.0, "SE_PERCENT": 20.0, "PLOT_COUNT": 40},
+    ],
+    "subtotals": {
+        "GRP1": [{"GRP1": "`01001 1001 AL Autauga", "ESTIMATE": 304659.33,
+                  "SE_PERCENT": 13.48, "PLOT_COUNT": 56}],
+        "GRP2": [{"GRP2": "`0140 Longleaf / slash pine group",
+                  "ESTIMATE": 1184334.0, "SE_PERCENT": 6.07,
+                  "PLOT_COUNT": 258}],
+    },
+    "totals": [{"ESTIMATE": 22963960.0, "SE_PERCENT": 0.51,
+                "PLOT_COUNT": 4241}],
+}
+
+
+def test_two_selections_shift_row_to_grp1_and_column_to_grp2():
+    """The bug this exists for.
+
+    Assuming fixed slots put the COLUMN value into ``row`` and left
+    ``column`` as None whenever pselected was omitted -- the common
+    case. The table transposed while still looking plausible.
+    """
+    rows = _rows(NJSON_RC, selections=(False, True, True))
+    detail = [r for r in rows if r["row"] != "Total" and r["column"] != "Total"]
+    assert detail, "expected at least one detail cell"
+    d = detail[0]
+    assert d["row"] == "`01001 1001 AL Autauga"                 # rselected -> GRP1
+    assert d["column"] == "`0140 Longleaf / slash pine group"   # cselected -> GRP2
+    assert d["page"] is None                                     # no pselected
+
+
+def test_single_selection_puts_the_row_in_grp1():
+    payload = {"estimates": [{"GRP1": "`0140 Longleaf", "ESTIMATE": 1.0,
+                              "SE_PERCENT": 5.0, "PLOT_COUNT": 99}]}
+    r = _rows(payload, selections=(False, True, False))[0]
+    assert r["row"] == "`0140 Longleaf"
+    assert r["column"] is None
+
+
+def test_column_marginals_are_emitted_as_total_rows():
+    """Legacy JSON carried "Total" inline; NJSON moves it to subtotals.
+
+    Callers filtering df['row'] == 'Total' (the example notebook does)
+    got an empty frame until these were re-emitted.
+    """
+    rows = _rows(NJSON_RC, selections=(False, True, True))
+    totals = [r for r in rows if r["row"] == "Total" and r["column"] != "Total"]
+    assert totals, "column marginals must appear as row='Total'"
+    lf = [r for r in totals
+          if "Longleaf" in str(r["column"])][0]
+    # Matches the documented Alabama example in fia.py's docstring.
+    assert lf["estimate"] == pytest.approx(1184334.0)
+    assert lf["plots"] == 258
+
+
+def test_grand_total_is_emitted_and_matches_the_documented_example():
+    rows = _rows(NJSON_RC, selections=(False, True, True))
+    g = [r for r in rows if r["row"] == "Total" and r["column"] == "Total"]
+    assert len(g) == 1
+    assert g[0]["estimate"] == pytest.approx(22963960.0)
+    assert g[0]["plots"] == 4241
+    assert g[0]["se_pct"] == pytest.approx(0.51)
 
 
 def test_se_pct_uses_se_percent_not_absolute_se():
