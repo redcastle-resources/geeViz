@@ -321,7 +321,13 @@ def printEE(eeObject, message=""):
         print(message, eeObject.getInfo())
         print()
 
-    t = Thread(target=printIt, args=(eeObject,))
+    # getInfo() is an EE call. This helper is typically invoked from user
+    # code that is ITSELF already running on a worker thread, so without
+    # carrying the context forward the identity is lost one level deeper
+    # and the call bills to nobody. See geeViz.eeAuth.threadctx.
+    from geeViz.eeAuth.threadctx import run_in_context as _ric
+
+    t = Thread(target=_ric(printIt), args=(eeObject,))
     t.start()
 
 

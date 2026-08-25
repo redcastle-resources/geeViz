@@ -3047,7 +3047,15 @@ async def run_code(code: str, timeout: int = 120, reset: bool = False,
             _TL_STDOUT.unregister()
             _TL_STDERR.unregister()
 
-    thread = threading.Thread(target=_exec, daemon=True)
+    # Run user code inside a snapshot of THIS task's context so the
+    # attribution ContextVars (user email, session id, tenant) survive
+    # the hop onto the worker thread. Without this every EE call made by
+    # user code reached the ee-proxy with no X-Agent-* headers and was
+    # logged ``via=ANONYMOUS`` — the proxy then minted an unattributed
+    # workload tag, so run_code compute (the bulk of EE spend) was billed
+    # to nobody. See geeViz.eeAuth.threadctx.
+    from geeViz.eeAuth.threadctx import run_in_context as _ric
+    thread = threading.Thread(target=_ric(_exec), daemon=True)
     thread.start()
 
     # Heartbeat loop: poll every 1s, timeout only after `timeout` seconds
@@ -3338,7 +3346,10 @@ def inspect_asset(
                 _result_box[0] = ee_obj.getInfo()
             except Exception as _exc:
                 _result_box[1] = str(_exc)
-        t = threading.Thread(target=_run, daemon=True)
+        # getInfo() is an EE call; carry the caller's attribution context
+        # onto the worker thread or it bills to nobody (see threadctx).
+        from geeViz.eeAuth.threadctx import run_in_context as _ric
+        t = threading.Thread(target=_ric(_run), daemon=True)
         t.start()
         t.join(timeout=timeout)
         if t.is_alive():
@@ -3462,8 +3473,13 @@ def inspect_asset(
                         results_map[key] = f"__ERROR__:{exc}"
 
             threads = []
+            # One context snapshot PER thread: contextvars.Context.run
+            # refuses re-entry, so a single shared wrapper would raise on
+            # the second query. See threadctx's "one wrapper per thread".
+            from geeViz.eeAuth.threadctx import run_in_context as _ric
             for key, ee_obj in queries.items():
-                t = threading.Thread(target=_run_query, args=(key, ee_obj), daemon=True)
+                t = threading.Thread(
+                    target=_ric(_run_query), args=(key, ee_obj), daemon=True)
                 t.start()
                 threads.append(t)
 
