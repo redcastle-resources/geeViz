@@ -211,6 +211,18 @@ This is the **#1 mistake to avoid.** If data represents classes (land cover, cha
 Map.addLayer(data, {'autoViz': True, 'canAreaChart': True}, 'Name')
 # WRONG — never for thematic data
 Map.addLayer(data, {'min': 10, 'max': 100}, 'Name')
+
+# CORRECT — anything out of a reducer must have its class properties reattached,
+# because .mosaic()/.median()/.reduce() return an image with NO user properties
+# and autoViz reads the palette FROM those properties. Silent failure: the layer
+# adds fine and renders in grayscale, so nothing complains until you see the map.
+yr = col.filter(ee.Filter.eq('year', 1985)).mosaic()
+yr = ee.Image(yr.copyProperties(col.first()))          # <-- REQUIRED
+Map.addLayer(yr.select(['Land_Cover']), {'autoViz': True, 'canAreaChart': True}, '1985')
+
+# WRONG — loses Land_Cover_class_values/_names/_palette; colors come out wrong
+yr = col.filter(ee.Filter.eq('year', 1985)).mosaic()
+Map.addLayer(yr.select(['Land_Cover']), {'autoViz': True, 'canAreaChart': True}, '1985')
 ```
 - Datasets that have class properties built-in: LCMS, MTBS, ESA WorldCover, Dynamic World, NLCD, MODIS Land Cover.
 - Check with `inspect_asset`: if you see `*_class_values` in properties, use `autoViz`.
