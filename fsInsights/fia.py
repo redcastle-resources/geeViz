@@ -174,7 +174,23 @@ def estimate(wc: int, snum: int, *,
     params: Dict[str, Any] = {
         "wc": wc,
         "snum": snum,
-        "outputFormat": "JSON",
+        # NJSON, not JSON. ``/fullreport`` with outputFormat=JSON is broken
+        # server-side: EVALIDator raises "Key Error / Received an Error:
+        # 'row'" while building the nested row/column structure and hands
+        # back an HTML error page under HTTP 200. Confirmed against API
+        # v2.1.7 (2026-07-30) / FIADB_1.9.4.00 -- the SAME query returns a
+        # full report as HTML, NHTML, CSV, XML or NJSON, so this is a bug
+        # in that one serializer rather than an outage or a bad request.
+        #
+        # NJSON is also the better shape for us: a flat ``estimates`` list
+        # carrying SE_PERCENT and PLOT_COUNT directly, instead of
+        # cellSE/cellPlotNumerator nested two levels deep.
+        #
+        # Note the asymmetry -- the PARAMETER endpoints
+        # (/fullreport/parameters/<name>, used by vocab.py) are the
+        # reverse: JSON works there and NJSON returns an error page. Do
+        # not "unify" these two on one format.
+        "outputFormat": "NJSON",
         "FIAorRPA": fd,
     }
     if rselected:
@@ -189,7 +205,8 @@ def estimate(wc: int, snum: int, *,
         params["strFilter"] = str_filter
 
     payload = get_json(f"{FIA_BASE}/fullreport", params=params)
-    return _to_frame(payload, max_se_pct=max_se_pct, min_plots=min_plots)
+    return _to_frame(payload, max_se_pct=max_se_pct, min_plots=min_plots,
+                     snum_hint=snum)
 
 
 def _reason(se_pct, plots, max_se_pct, min_plots) -> str:
@@ -214,17 +231,46 @@ def _reason(se_pct, plots, max_se_pct, min_plots) -> str:
     return ""
 
 
-def _to_frame(payload: Any, *, max_se_pct: float, min_plots: int) -> "Any":
-    """Flatten ``EVALIDatorOutput``'s row/column tree into tidy rows."""
-    out = payload.get("EVALIDatorOutput") if isinstance(payload, dict) else None
-    if not isinstance(out, dict):
+def _to_frame(payload: Any, *, max_se_pct: float, min_plots: int,
+              snum_hint: Any = None) -> "Any":
+    """Flatten an FIA report into tidy rows.
+
+    Handles both response shapes:
+
+    * **NJSON** (what ``estimate`` now requests) — a flat object with an
+      ``estimates`` list at the top level and no wrapper.
+    * **legacy JSON** — everything nested under ``EVALIDatorOutput`` as a
+      row/column tree.
+    """
+    if not isinstance(payload, dict):
         raise ValueError(
-            "unexpected FIA response shape — expected an 'EVALIDatorOutput' "
-            f"object, got {type(payload).__name__}"
+            "unexpected FIA response shape — expected a JSON object, "
+            f"got {type(payload).__name__}"
         )
 
-    attr_name = out.get("numeratorName") or ""
+    # NJSON has no wrapper; fall back to the payload itself so the shared
+    # extraction below works for both. Requiring 'EVALIDatorOutput' here
+    # is what made the NJSON switch fail with a confusing "got dict".
+    out = payload.get("EVALIDatorOutput")
+    if not isinstance(out, dict):
+        if "estimates" not in payload:
+            raise ValueError(
+                "unexpected FIA response shape — expected either an "
+                "'EVALIDatorOutput' object (legacy JSON) or a top-level "
+                f"'estimates' list (NJSON), got keys: "
+                f"{sorted(payload.keys())[:8]}"
+            )
+        out = payload
+
+    meta_early = out.get("metadata") or {}
+    attr_name = (out.get("numeratorName")
+                 or str(meta_early.get("numEstDesc") or "") or "")
+    # NJSON does not echo the attribute number, so fall back to the snum
+    # the caller asked for. Without this, attr_nbr is None -> _units_for
+    # returns "" and every row loses its units label.
     attr_nbr = out.get("numeratorAttributeNumber")
+    if attr_nbr is None:
+        attr_nbr = snum_hint
     inventories = out.get("selectedInventories") or {}
     states = inventories.get("stateInventory") or []
     # The API echoes back the definition it actually applied, e.g.
@@ -235,6 +281,59 @@ def _to_frame(payload: Any, *, max_se_pct: float, min_plots: int) -> "Any":
     units = _units_for(attr_nbr)
 
     records: List[dict] = []
+
+    # ── NJSON (current) ─────────────────────────────────────────────────
+    # Flat ``estimates`` list. GRP1/GRP2/GRP3 correspond positionally to
+    # pselected / rselected / cselected -- verified by issuing a request
+    # with three DIFFERENT selections and reading them back:
+    #   pselected="All live stocking" -> GRP1 "`0001 Overstocked"
+    #   rselected="Ownership group"   -> GRP2 "`0001 National Forest"
+    #   cselected="Forest type group" -> GRP3 "`0180 Pinyon / juniper group"
+    # Getting this backwards would silently transpose every table, so it
+    # is pinned by a test rather than inferred from the names.
+    estimates = out.get("estimates")
+    if isinstance(estimates, list) and estimates:
+        meta = out.get("metadata") or {}
+        # NJSON reports the applied definition as metadata.FIAorRPA;
+        # legacy put it at top level as FIAorRPAfilter.
+        fd_echo = str(meta.get("FIAorRPA") or fd_echo or "")
+        eval_grps = meta.get("evalGrps")
+        eval_label = ("; ".join(str(g) for g in eval_grps)
+                      if isinstance(eval_grps, list) and eval_grps
+                      else "; ".join(str(s) for s in states))
+        for r in estimates:
+            if not isinstance(r, dict):
+                continue
+            est = r.get("ESTIMATE")
+            # SE_PERCENT is already a percentage -- the reliability floors
+            # compare against max_se_pct, so do NOT substitute the
+            # absolute SE field here.
+            se = r.get("SE_PERCENT")
+            plots = r.get("PLOT_COUNT")
+            est = float(est) if est is not None else None
+            se = float(se) if se is not None else None
+            plots = int(plots) if plots is not None else None
+            reason = _reason(se, plots, max_se_pct, min_plots)
+            records.append({
+                "row": r.get("GRP2"),
+                "column": r.get("GRP3"),
+                "page": r.get("GRP1"),
+                "estimate": est,
+                "se_pct": se,
+                "plots": plots,
+                "units": units,
+                "unreliable": bool(reason),
+                "unreliable_reason": reason,
+                "attribute": attr_name,
+                "snum": attr_nbr,
+                "evaluation": eval_label,
+                "forest_definition": fd_echo,
+            })
+        return _frame(records)
+
+    # ── Legacy nested row/column (outputFormat=JSON) ────────────────────
+    # Retained as a fallback: if the upstream JSON serializer is repaired,
+    # or a deployment pins the older format, this still parses correctly.
     for row in out.get("row", []) or []:
         row_label = row.get("content")
         cols = row.get("column") or [row]
