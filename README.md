@@ -31,6 +31,8 @@ Developed by [RedCastle Resources](https://www.redcastleresources.com/), geeViz 
 - **Inline zonal summary & charting** (`geeViz.outputLib.charts`, formerly `geeViz.chartingLib`) — run zonal stats and produce Plotly charts (time series, bar, grouped bar, donut, scatter, per-feature time series subplots, Sankey) directly in notebooks
 - **Summary area retrieval** (`geeViz.getSummaryAreasLib`) — 15 functions returning filtered `ee.FeatureCollection` objects for political boundaries, USFS units, census geographies, buildings, roads, and protected areas
 - **Keyless Earth Engine authentication** (`geeViz.eeAuth`) — discovers whatever credentials you already have (persistent `earthengine authenticate`, gcloud ADC, or an attached service account), and runs a small local proxy so the map viewer never receives an access token. Also mints workload tags so EE compute can be attributed per user/session
+- **Forest Service data services** (`geeViz.fsInsights`) — FIA and LCMS behind one interface. FIA answers *what is in the forest, and how much, with a standard error*; LCMS answers *what changed, and where*. Neither needs authentication, and FIA's 752 estimate attributes, 96 grouping variables and 1,129 evaluations are searchable offline from bundled catalogs
+- **Wildland fire modeling** (`geeViz.fireLib`) — fuels, terrain, Rothermel surface fire behavior and cost-distance spread, all pixel-wise in Earth Engine. Draws an explicit line at what a stateless tile engine can do: propagation via `ee.Image.cumulativeCost` needs no timestep loop, and the real simulators (FSim, FlamMap, FARSITE) stay outside
 - Jupyter/Colab support and standalone scripting
 - Supports Landsat, Sentinel-2, MODIS, LCMS, LCMAP, and more
 - Extensive examples and ready-to-run wrappers
@@ -186,6 +188,7 @@ The tools are organized into categories:
 | **Asset Inspection** | `inspect_asset` — bands, CRS, scale, date range, properties |
 | **Map Control** | `map_control` — view, export, preview per-layer tiles, list layers, or clear the interactive map |
 | **Exports & Asset Management** | `export_image` — to asset / Drive / Cloud Storage; `manage_asset` — delete / copy / move / create / update ACL |
+| **Forest Service Data** | `search_fia` — find FIA attributes, grouping variables, or evaluations offline; `fia_estimate` — a design-based estimate with its sampling error; `lcms_summary` — LCMS land cover / land use / change areas |
 | **Environment** | `env_info` — versions, namespace, project info; `view_output` — read back a saved raster (PNG/GIF/JPEG/WebP) as an inline image |
 
 Charting (`cl.summarize_and_chart()`), thumbnails (`tl.generate_thumbs()`), report generation (`rl.*`), EDW queries (`edwLib.*`), and Google Maps helpers (`gm.geocode()`, `gm.search_places()`, `gm.streetview_*`, `gm.interpret_image()`, `gm.label_image()`, etc.) are accessed via `run_code` — one execution primitive plus a rich pre-loaded namespace beats a proliferation of narrow wrappers.

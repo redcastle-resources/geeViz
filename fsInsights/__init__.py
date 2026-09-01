@@ -97,3 +97,5 @@ __all__ = [
     "UpstreamError",
     "UpstreamUnavailable",
 ]
+
+__version__ = "2026.9.1"

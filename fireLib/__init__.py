@@ -91,3 +91,5 @@ __all__ = [
     "transmission_matrix",
     "calibrate_cost_units",
 ]
+
+__version__ = "2026.9.1"
