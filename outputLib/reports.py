@@ -1555,7 +1555,8 @@ class Report:
             return None
         try:
             import plotly.io as pio
-            img_bytes = pio.to_image(fig, format="png", width=width, height=height)
+            from geeViz.outputLib._render import fig_to_png as _fig_to_png
+            img_bytes = _fig_to_png(fig, width=width, height=height)
             b64 = base64.b64encode(img_bytes).decode()
             return f"data:image/png;base64,{b64}"
         except Exception as e:

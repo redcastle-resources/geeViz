@@ -966,7 +966,12 @@ def save_chart_png(fig, filename, width=900, height=600,
 
         themed_fig = copy.deepcopy(fig)
         _themes.apply_plotly_theme(themed_fig, _t)
-        img_bytes = pio.to_image(themed_fig, format="png", width=width, height=height)
+        # Via _render.fig_to_png, not pio.to_image directly: kaleido 1.0
+        # needs a Chrome it no longer bundles, and the HTML branch a few
+        # lines above already answers that case with an instruction
+        # rather than a traceback. Both branches now do.
+        from geeViz.outputLib._render import fig_to_png as _fig_to_png
+        img_bytes = _fig_to_png(themed_fig, width=width, height=height)
 
     # Try MCP sandbox save_file first, fall back to direct write.
     # Walk up the call stack to find save_file in any caller's namespace

@@ -3600,7 +3600,8 @@ def generate_map_chart(
         if chart_height is None:
             chart_height = max(300, int(chart_width / _CHART_ASPECT))
 
-    chart_png_bytes = fig.to_image(format="png", width=chart_width, height=chart_height)
+    from geeViz.outputLib._render import fig_to_png as _fig_to_png
+    chart_png_bytes = _fig_to_png(fig, width=chart_width, height=chart_height)
     chart_img = Image.open(io.BytesIO(chart_png_bytes)).convert("RGBA")
 
     # --- Compose map + chart ---
@@ -3964,7 +3965,8 @@ def generate_map_chart_gif(
         from geeViz.outputLib import themes as _themes
         _themes.apply_plotly_theme(fig, "dark", bg_color=bg_color)
 
-        chart_png = fig.to_image(format="png", width=fw, height=chart_height)
+        from geeViz.outputLib._render import fig_to_png as _fig_to_png
+        chart_png = _fig_to_png(fig, width=fw, height=chart_height)
         chart_pngs.append(Image.open(io.BytesIO(chart_png)).convert("RGBA"))
 
     # --- Step 5: Assemble frames: title + map + chart + legend ---
