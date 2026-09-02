@@ -207,3 +207,90 @@ def fig_to_png(fig, *, width=None, height=None, scale=None, **kwargs) -> bytes:
             "Cannot render this Plotly chart to PNG: no Chrome found.\n"
             + where + _install_hint()
         ) from exc
+
+
+def figs_to_pngs(figs, *, width=None, height=None, scale=None) -> list:
+    """Rasterize MANY figures in ONE browser session.
+
+    ``generate_map_chart_gif`` builds one chart per frame, and calling
+    :func:`fig_to_png` in that loop launches, drives and tears down a
+    browser per frame — 40 launches for a 40-year collection. Beyond the
+    obvious cost, every teardown is a chance to hit choreographer's
+    "Couldn't close or kill browser subprocess", which on Windows fires
+    often enough to make the function unreliable. Fewer sessions is both
+    faster and steadier.
+
+    ``plotly.io.write_images`` (kaleido >= 1.0) does the whole list in
+    one session and documents itself as "much faster". It writes to
+    paths — passing ``BytesIO`` objects silently produces EMPTY buffers,
+    which is worse than an error, so this writes to a temp directory and
+    reads the bytes back.
+
+    Falls back to rendering one at a time if the batch path is missing
+    or fails, so a plotly without it still works, just slower.
+
+    Returns:
+        list[bytes]: PNG bytes, in the order given.
+    """
+    figs = list(figs)
+    if not figs:
+        return []
+
+    import plotly.io as pio
+
+    if hasattr(pio, "write_images"):
+        import os
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="geeviz_charts_")
+        try:
+            paths = [os.path.join(tmp, f"c{i:04d}.png")
+                     for i in range(len(figs))]
+            kw = {"format": "png"}
+            for k, v in (("width", width), ("height", height),
+                         ("scale", scale)):
+                if v is not None:
+                    kw[k] = v
+            failure = None
+            try:
+                pio.write_images(figs, paths, **kw)
+            except Exception as exc:                     # noqa: BLE001
+                if _is_missing_chrome(exc):
+                    raise            # fig_to_png below gives the real message
+                failure = exc
+
+            # Read whatever landed, EVEN IF the call raised. kaleido
+            # tears the browser down in __aexit__, after the images are
+            # written, and choreographer raises "Couldn't close or kill
+            # browser subprocess" there — reliably on Windows. Treating
+            # that as a render failure threw away a complete set of
+            # good PNGs and fell back to rendering them again one at a
+            # time, which hit the same teardown and finally gave up. The
+            # images are on disk; a browser that will not exit is a
+            # cleanup problem, not a rendering one.
+            out = []
+            for p in paths:
+                try:
+                    with open(p, "rb") as f:
+                        out.append(f.read())
+                except OSError:
+                    out.append(b"")
+            if len(out) == len(figs) and all(out):
+                if failure is not None:
+                    logger.warning(
+                        "geeViz: browser cleanup failed after rendering "
+                        "(%s) — the charts rendered fine, continuing.",
+                        failure,
+                    )
+                return out
+            logger.warning(
+                "geeViz: batch chart render produced %d/%d images%s; "
+                "falling back to one at a time",
+                sum(1 for b in out if b), len(figs),
+                f" ({failure})" if failure else "",
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    return [fig_to_png(f, width=width, height=height, scale=scale)
+            for f in figs]

@@ -3913,7 +3913,7 @@ def generate_map_chart_gif(
         is_stacked = True
 
     # --- Step 4: Render per-frame cumulative chart as PNG ---
-    chart_pngs = []
+    chart_figs = []
     for i in range(n):
         sub_df = df.iloc[:i + 1]
         sub_x = list(sub_df.index)
@@ -3965,9 +3965,19 @@ def generate_map_chart_gif(
         from geeViz.outputLib import themes as _themes
         _themes.apply_plotly_theme(fig, "dark", bg_color=bg_color)
 
-        from geeViz.outputLib._render import fig_to_png as _fig_to_png
-        chart_png = _fig_to_png(fig, width=fw, height=chart_height)
-        chart_pngs.append(Image.open(io.BytesIO(chart_png)).convert("RGBA"))
+        # Collected, not rasterized here. Rendering inside this loop
+        # launched and tore down a browser PER FRAME — 40 of them for a
+        # 40-year collection. Slow, and every teardown is a chance to
+        # hit choreographer's "Couldn't close or kill browser
+        # subprocess", which is frequent enough on Windows to make this
+        # function unreliable. One session for the whole list instead.
+        chart_figs.append(fig)
+
+    from geeViz.outputLib._render import figs_to_pngs as _figs_to_pngs
+    chart_pngs = [
+        Image.open(io.BytesIO(b)).convert("RGBA")
+        for b in _figs_to_pngs(chart_figs, width=fw, height=chart_height)
+    ]
 
     # --- Step 5: Assemble frames: title + map + chart + legend ---
     bg_rgba = _resolve_color(bg_color) + (255,)

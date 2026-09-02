@@ -178,19 +178,56 @@ def test_the_message_says_build_time_for_containers(R):
 
 # ── every rasterizing site goes through the helper ─────────────────────
 
-@pytest.mark.parametrize("mod,count", [
-    ("charts.py", 1), ("reports.py", 1), ("thumbs.py", 2),
-])
-def test_no_module_calls_to_image_directly(mod, count):
+@pytest.mark.parametrize("mod", ["charts.py", "reports.py", "thumbs.py"])
+def test_no_module_calls_to_image_directly(mod):
     """Four sites failed identically because each called to_image bare.
-    One helper means one place to fix the next such change."""
+    One helper means one place to fix the next such change.
+
+    Accepts either entry point: thumbs.py uses the single-figure
+    fig_to_png in one place and the batch figs_to_pngs in the frame
+    loop, so counting "fig_to_png(" alone under-reports it.
+    """
     src = (ROOT / "outputLib" / mod).read_text(encoding="utf-8")
     code = [ln for ln in src.splitlines()
             if not ln.lstrip().startswith("#")]
     bare = [ln for ln in code
             if re.search(r"\bto_image\(", ln) and "fig_to_png" not in ln]
     assert not bare, f"{mod} still calls to_image directly: {bare}"
-    assert src.count("fig_to_png(") >= count
+    # The call sites alias the import (``as _fig_to_png``), so a \b
+    # before "fig" never matches — the preceding underscore is a word
+    # character.
+    assert re.search(r"figs?_to_pngs?\(", src), (
+        f"{mod} does not route through the render helper")
+
+
+def test_the_frame_loop_renders_in_one_browser_session():
+    """Rendering inside the loop launched a browser PER FRAME — 40 for a
+    40-year collection. Slow, and each teardown is another chance to hit
+    choreographer's "Couldn't close or kill browser subprocess"."""
+    src = (ROOT / "outputLib" / "thumbs.py").read_text(encoding="utf-8")
+    i = src.index("def generate_map_chart_gif")
+    body = src[i:i + 30000]
+    loop = body.index("for i in range(n):")
+    after = body.index("figs_to_pngs(", loop)
+    assert "fig_to_png(" not in body[loop:after], (
+        "single-figure render is still inside the per-frame loop")
+
+
+def test_a_teardown_failure_does_not_discard_rendered_images():
+    """kaleido tears the browser down in __aexit__, AFTER writing the
+    images, and choreographer raises there reliably on Windows.
+
+    Treating that as a render failure threw away a complete set of good
+    PNGs, re-rendered them one at a time, hit the same teardown again,
+    and finally gave up — observed on a real 40-frame run, which now
+    completes.
+    """
+    render = (ROOT / "outputLib" / "_render.py").read_text(encoding="utf-8")
+    body = render[render.index("def figs_to_pngs"):]
+    assert "failure = exc" in body, "the exception is not deferred"
+    assert body.index("failure = exc") < body.index("for p in paths:"), (
+        "images are read before the failure is deferred")
+    assert "cleanup problem, not a rendering one" in body
 
 
 def test_kaleido_is_a_core_dependency():
