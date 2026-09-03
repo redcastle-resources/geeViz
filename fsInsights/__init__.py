@@ -57,6 +57,7 @@ from .fia import (
     validate,
 )
 from .align import (
+    COMPARISON_CAVEATS,
     compare_area,
     fia_forest_area,
     lcms_tree_area,
@@ -105,6 +106,7 @@ __all__ = [
     # unreachable as ``fs.compare_area`` until now — align.py was never
     # imported here, so the package's own headline feature was dead on
     # the front door while search_codebase happily advertised it.
+    "COMPARISON_CAVEATS",
     "compare_area",
     "fia_forest_area",
     "lcms_tree_area",
