@@ -23,7 +23,7 @@ Example::
     from geeViz.outputLib import thumbs as tl
 
     ee = gv.ee
-    lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2024-10")
+    lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11")
     area = ee.Geometry.Point([-111.8, 40.7]).buffer(10000)
 
     url = tl.get_thumb_url(lcms.select(["Land_Cover"]).first(), area)

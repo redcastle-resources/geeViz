@@ -110,6 +110,12 @@ If the user names a specific product ("NLCD 2019", "the 2021 release", "MapBioma
 
 `ee`, `Map` (use directly — do NOT call `gv.Map()`), `gv`, `gil`, `sal`, `edw`, `tl`, `rl`, `cl`, `palettes` (geePalettes), `pd`/`pandas`, `np`/`numpy`, `save_file`. `gm` (googleMapsLib) is present when the optional dep loads — check with `env_info(action="namespace")` if unsure.
 
+`fs` / `fsInsights` (Forest Service data: FIA estimates with sampling error, LCMS land cover) is also bound. `fs.find_attributes` / `fs.find_evaluations` / `fs.estimate` / `fs.lcms_summary` / `fs.compare_area` — see `search_codebase(module="fsInsights")`.
+
+**Statistics libraries are installed** and must be imported (they are not pre-bound): `scipy`, `sklearn` (scikit-learn), `statsmodels`. Use them rather than hand-rolling. When a user asks whether a trend is *real* — "is it greening or just noise?" — that is a significance question, and `scipy.stats.linregress` / `theilslopes` / `mannwhitneyu`, or `statsmodels`' OLS with its p-values, answer it properly. Reimplementing Sen's slope in numpy wastes turns and gives you no p-value.
+
+One restriction: anything that DESERIALIZES a pickle is blocked (`pd.read_pickle`, `joblib.load`, `np.load(..., allow_pickle=True)`), because unpickling executes whatever the file says. Plain `np.load` of a `.npy`, `pd.read_csv`, `pd.read_parquet` and `np.loadtxt` are all fine.
+
 **NEVER call `ee.Initialize()` in `run_code`.** EE is already initialized by the MCP subprocess against the tenant's `/ee-api` proxy. Calling `ee.Initialize()` (with or without a `project=` arg) is at BEST redundant, at worst kills the session with `EEException: no project found` because the bare call bypasses the proxy and probes for local credentials the container doesn't have. The server hardens against this by monkey-patching `ee.Initialize` to a no-op after init, but agent-generated code that calls it is still wasted tokens — just use `ee.Image(...)`, `ee.ImageCollection(...)`, etc. directly. Same rule for `import ee` — the module is already bound in the REPL namespace; the extra import is noise but harmless.
 
 ---

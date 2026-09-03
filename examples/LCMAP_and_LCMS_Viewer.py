@@ -104,7 +104,7 @@ change_viz = {"min": 1985, "max": 2022, "palette": ["00F", "F0F"]}
 # https://developers.google.com/earth-engine/datasets/catalog/USFS_GTAC_LCMS_v20201-7 (CONUS and Southeastern AK)
 # https://developers.google.com/earth-engine/datasets/catalog/USFS_GTAC_LCMS_v2020-6 (Puerto Rico and US Virgin Islands
 # An in-depth look at the model predictor variables that go into making LCMS maps can be found here:https://apps.fs.usda.gov/lcms-viewer/lcms-base-learner.html
-lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2022-8").filter(ee.Filter.eq("study_area", "CONUS"))
+lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter(ee.Filter.eq("study_area", "CONUS"))
 ####################################################################################################
 
 ####################################################################################################

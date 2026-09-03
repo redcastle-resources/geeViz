@@ -30,7 +30,7 @@ from geeViz.outputLib import charts as cl
 
 ee = gv.ee
 roi = ee.Geometry.Rectangle([-106, 39.5, -105, 40.5])
-lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2024-10").select("Land_Cover")
+lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").select("Land_Cover")
 
 df, fig = cl.summarize_and_chart(lcms, roi, stacked=True)
 fig.write_html("landcover.html", include_plotlyjs="cdn")

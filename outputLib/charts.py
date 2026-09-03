@@ -14,7 +14,7 @@ Quick start:
 >>> study_area = ee.Geometry.Polygon(
 ...     [[[-106, 39.5], [-105, 39.5], [-105, 40.5], [-106, 40.5]]]
 ... )
->>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2024-10")
+>>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11")
 >>> df, fig = cl.summarize_and_chart(
 ...     lcms.select(['Land_Cover']),
 ...     study_area,
@@ -1487,7 +1487,7 @@ def get_obj_info(ee_obj, band_names=None, max_class_label_length=30):
         >>> import geeViz.geeView as gv
         >>> from geeViz.outputLib import charts as cl
         >>> ee = gv.ee
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2024-10")
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11")
         >>> info = cl.get_obj_info(lcms.select(['Land_Cover']))
         >>> print(info['is_thematic'])
         True
@@ -2246,7 +2246,7 @@ def zonal_stats(
         >>> study_area = ee.Geometry.Polygon(
         ...     [[[-106, 39.5], [-105, 39.5], [-105, 40.5], [-106, 40.5]]]
         ... )
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2024-10")
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11")
         >>> df = cl.zonal_stats(
         ...     lcms.select(['Land_Cover']),
         ...     study_area,
@@ -2438,7 +2438,7 @@ def prepare_sankey_data(
         >>> study_area = ee.Geometry.Polygon(
         ...     [[[-106, 39.5], [-105, 39.5], [-105, 40.5], [-106, 40.5]]]
         ... )
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2024-10")
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11")
         >>> info = cl.get_obj_info(lcms.select(['Land_Use']))
         >>> sankey_df, matrix_dict = cl.prepare_sankey_data(
         ...     lcms.select(['Land_Use']),
@@ -2664,7 +2664,7 @@ def chart_time_series(
         >>> study_area = ee.Geometry.Polygon(
         ...     [[[-106, 39.5], [-105, 39.5], [-105, 40.5], [-106, 40.5]]]
         ... )
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2024-10")
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11")
         >>> # Step 1: get the data
         >>> info = cl.get_obj_info(lcms.select(['Land_Cover']))
         >>> df = cl.zonal_stats(
@@ -3348,7 +3348,7 @@ def chart_grouped_bar(
         >>> import geeViz.geeView as gv
         >>> from geeViz.outputLib import charts as cl
         >>> ee = gv.ee
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2024-10")
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11")
         >>> fires = ee.FeatureCollection(
         ...     "USFS/GTAC/MTBS/burned_area_boundaries/v1"
         ... ).sort("BurnBndAc", False).limit(5)
@@ -3768,7 +3768,7 @@ def summarize_and_chart(
         >>> study_area = ee.Geometry.Polygon(
         ...     [[[-106, 39.5], [-105, 39.5], [-105, 40.5], [-106, 40.5]]]
         ... )
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2024-10")
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11")
         >>> result = cl.summarize_and_chart(
         ...     lcms.select(['Land_Cover']),
         ...     study_area,

@@ -186,7 +186,7 @@ studyArea = hi_big_island_lava  # water_mask.clip(clean_or_combo).reduceToVector
 # 13: Snow or Ice
 # 14: Water
 # 15: Non-Processing Area Mask
-# lcmsLC = ee.ImageCollection("USFS/GTAC/LCMS/v2020-5").select(['Land_Cover']).mode()
+# lcmsLC = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").select(['Land_Cover']).mode()
 # lcmsTreeMask = lcmsLC.eq(1).selfMask()
 # studyArea = lcmsTreeMask.clip(uinta_tree).reduceToVectors(scale = 30)
 

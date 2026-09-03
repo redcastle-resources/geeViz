@@ -268,7 +268,7 @@ forests = ee.FeatureCollection([
 ])
 # Pass the ImageCollection directly — summarize_and_chart auto-mosaics tiled data internally
 # Never use .first() on tiled collections like LCMS — it may grab a tile that doesn't cover the study area
-lcms_2023 = ee.ImageCollection('USFS/GTAC/LCMS/v2024-10').filter(ee.Filter.calendarRange(2023,2023,'year')).select(['Land_Cover'])
+lcms_2023 = ee.ImageCollection('projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11').filter(ee.Filter.calendarRange(2023,2023,'year')).select(['Land_Cover'])
 df, fig = cl.summarize_and_chart(lcms_2023, forests, scale=30, feature_label='name', title='LCMS Land Cover 2023 - 4 National Forests')
 print('Shape:', df.shape)
 print(df.to_markdown())
@@ -302,7 +302,7 @@ print('Type:', type(verdet))
         ("run_code", run_code, {"code": """
 from geeViz.outputLib import charts as cl
 louisiana_coast = ee.Geometry.Point([-90.0, 29.5]).buffer(30000)
-lcms = ee.ImageCollection('USFS/GTAC/LCMS/v2024-10')
+lcms = ee.ImageCollection('projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11')
 sankey_df, fig, matrix_dict = cl.summarize_and_chart(
     lcms, louisiana_coast, sankey=True, transition_periods=[1990, 2005, 2024],
     sankey_band_name='Land_Use', min_percentage=0.5, scale=30,
@@ -545,7 +545,7 @@ print('Step 2 - Recovery trajectory:')
 print(df_recovery.to_markdown())
 
 # Step 3: LCMS land cover Sankey pre/post fire
-lcms = ee.ImageCollection('USFS/GTAC/LCMS/v2024-10')
+lcms = ee.ImageCollection('projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11')
 sankey_df, fig_sankey, matrix_dict = cl.summarize_and_chart(
     lcms, paradise, sankey=True, transition_periods=[2017, 2023],
     sankey_band_name='Land_Cover', min_percentage=0.5, scale=30,

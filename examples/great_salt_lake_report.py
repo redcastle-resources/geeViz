@@ -28,7 +28,7 @@ startYear = 1985
 endYear = 2024
 
 # LCMS Land Cover
-lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2024-10")
+lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11")
 
 # Annual NLCD Land Cover
 nlcd_lc = ee.ImageCollection("projects/sat-io/open-datasets/USGS/ANNUAL_NLCD/LANDCOVER")

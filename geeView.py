@@ -1710,7 +1710,7 @@ class mapper:
         >>> import geeViz.geeView as gv
         >>> Map = gv.Map
         >>> ee = gv.ee
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter(ee.Filter.calendarRange(2010, 2023, "year"))
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter(ee.Filter.calendarRange(2010, 2025, "year"))
         >>> Map.addTimeLapse(lcms.select(["Land_Cover"]), {"autoViz": True, "mosaic": True}, "LCMS Land Cover Time Lapse")
         >>> Map.addTimeLapse(lcms.select(["Change"]), {"autoViz": True, "mosaic": True}, "LCMS Change Time Lapse")
         >>> Map.addTimeLapse(lcms.select(["Land_Use"]), {"autoViz": True, "mosaic": True}, "LCMS Land Use Time Lapse")
@@ -1796,7 +1796,7 @@ class mapper:
         >>> import geeViz.geeView as gv
         >>> Map = gv.Map
         >>> ee = gv.ee
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms, {"autoViz": True, "canAreaChart": True, "areaChartParams": {"line": True, "sankey": True}}, "LCMS")
         >>> mtbsBoundaries = ee.FeatureCollection("USFS/GTAC/MTBS/burned_area_boundaries/v1")
         >>> mtbsBoundaries = mtbsBoundaries.map(lambda f: f.set("system:time_start", f.get("Ig_Date")))
@@ -2254,7 +2254,7 @@ class mapper:
                 IFrame in pixels.
 
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms, {"autoViz": True, "canAreaChart": True, "areaChartParams": {"line": True, "sankey": True}}, "LCMS")
         >>> Map.turnOnInspector()
         >>> Map.view()
@@ -2610,7 +2610,7 @@ class mapper:
         Removes all map layers and commands - useful if running geeViz in a notebook and don't want layers/commands from a prior code block to still be included.
 
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms, {"autoViz": True}, "LCMS") # Layer
         >>> Map.turnOnInspector() # Command
         >>> Map.clearMap() # Clear map layer and commands
@@ -2627,7 +2627,7 @@ class mapper:
         Removes all map layers - useful if running geeViz in a notebook and don't want layers from a prior code block to still be included, but want commands to remain.
 
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms, {"autoViz": True}, "LCMS") # Layer - this will be removed
         >>> Map.turnOnInspector() # Command - this will remain (even though there will be no layers to query)
         >>> Map.clearMapLayers() # Clear map layer only and leave commands
@@ -2641,7 +2641,7 @@ class mapper:
         Removes all map commands - useful if running geeViz in a notebook and don't want commands from a prior code block to still be included, but want layers to remain.
 
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms, {"autoViz": True}, "LCMS") # Layer
         >>> Map.turnOnInspector() # Command - this will be removed
         >>> Map.clearMapCommands() # Clear map comands only and leave layers
@@ -3457,7 +3457,7 @@ class mapper:
             title (str, default geeViz Data Explorer): The title to appear in the header on the left sidebar as well as the title of the viewer webpage.
 
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms, {"autoViz": True}, "LCMS")
         >>> Map.turnOnInspector()
         >>> Map.setMapTitle("<h2>A Custom Title!!!</h2>")  # Set custom map title
@@ -3477,7 +3477,7 @@ class mapper:
             title (str, default geeViz Data Explorer): The title to appear in the header on the left sidebar as well as the title of the viewer webpage.
 
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms, {"autoViz": True}, "LCMS")
         >>> Map.turnOnInspector()
         >>> Map.setMapTitle("<h2>A Custom Title!!!</h2>")  # Set custom map title
@@ -3498,7 +3498,7 @@ class mapper:
         >>> from geeViz.geeView import *
         >>> crs = gil.common_projections["NLCD_AK"]["crs"]
         >>> transform = gil.common_projections["NLCD_AK"]["transform"]
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="SEAK"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="AK"')
         >>> Map.addLayer(lcms, {"autoViz": True}, "LCMS")
         >>> Map.turnOnInspector()
         >>> Map.setQueryCRS(crs)
@@ -3598,7 +3598,7 @@ class mapper:
             defaultQueryDateFormat (str, default "YYYY-MM-dd"): The date format string to use for query outputs with dates. To simplify date outputs, "YYYY" is often used instead of the default.
 
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms.select([1]), {"autoViz": True}, "LCMS Land Cover")
         >>> Map.addLayer(lcms.select([0]), {"autoViz": True}, "LCMS Change")
         >>> Map.turnOnInspector()
@@ -3620,7 +3620,7 @@ class mapper:
             color (str, default "FFFF00"): Set the default query box color shown on the map by providing a hex color.
 
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms.select([1]), {"autoViz": True}, "LCMS Land Cover")
         >>> Map.turnOnInspector()
         >>> Map.setQueryBoxColor("0FF")
@@ -3651,7 +3651,7 @@ class mapper:
         Set the location of query outputs to an info window popup over the map
 
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms.select([1]), {"autoViz": True}, "LCMS Land Cover")
         >>> Map.turnOnInspector()
         >>> Map.setQueryToInfoWindow()
@@ -3664,7 +3664,7 @@ class mapper:
         Set the location of query outputs to the right sidebar above the legend
 
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms.select([1]), {"autoViz": True}, "LCMS Land Cover")
         >>> Map.turnOnInspector()
         >>> Map.setQueryToSidePane()
@@ -3679,7 +3679,7 @@ class mapper:
         Turn on the query inspector tool upon map loading. This is used frequently so map layers can be queried as soon as the map viewer loads.
 
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms.select([1]), {"autoViz": True}, "LCMS Land Cover")
         >>> Map.turnOnInspector()
         >>> Map.view()
@@ -3694,7 +3694,7 @@ class mapper:
         Turn on automatic area charting upon map loading. This will automatically update charts by summarizing any visible layers with "canAreaChart" : True any time the map finishes panning or zooming.
 
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms.select([1]), {"autoViz": True,'canAreaChart':True}, "LCMS Land Cover")
         >>> Map.turnOnAutoAreaCharting()
         >>> Map.view()
@@ -3708,7 +3708,7 @@ class mapper:
         Turn on area charting by a user defined area upon map loading. This will update charts by summarizing any visible layers with "canAreaChart" : True when the user draws an area to summarize and hits the `Chart Selected Areas` button in the user interface under `Area Tools -> User-Defined Area`.
 
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms.select([1]), {"autoViz": True,'canAreaChart':True}, "LCMS Land Cover")
         >>> Map.turnOnUserDefinedAreaCharting()
         >>> Map.view()
@@ -3722,7 +3722,7 @@ class mapper:
         Turn on area charting by a user selected area upon map loading. This will update charts by summarizing any visible layers with "canAreaChart" : True when the user selects selection areas to summarize and hits the `Chart Selected Areas` button in the user interface under `Area Tools -> Select an Area on Map`.
 
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms.select([1]), {"autoViz": True,'canAreaChart':True}, "LCMS Land Cover")
         >>> mtbsBoundaries = ee.FeatureCollection("USFS/GTAC/MTBS/burned_area_boundaries/v1")
         >>> mtbsBoundaries = mtbsBoundaries.map(lambda f: f.set("system:time_start", f.get("Ig_Date")))
@@ -3793,7 +3793,7 @@ class mapper:
         >>> import geeViz.geeView as gv
         >>> Map = gv.Map
         >>> ee = gv.ee
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms.select(["Change_Raw_Probability.*"]), {"reducer": ee.Reducer.stdDev(), "min": 0, "max": 10}, "LCMS Change Prob")
         >>> Map.addAreaChartLayer(lcms, {"line": True, "layerType": "ImageCollection"}, "LCMS All Thematic Classes Line", True)
         >>> Map.addAreaChartLayer(lcms, {"sankey": True}, "LCMS All Thematic Classes Sankey", True)
@@ -3843,7 +3843,7 @@ class mapper:
         >>> import geeViz.geeView as gv
         >>> Map = gv.Map
         >>> ee = gv.ee
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms.select(["Change_Raw_Probability.*"]), {"reducer": ee.Reducer.stdDev(), "min": 0, "max": 10}, "LCMS Change Prob")
         >>> Map.addAreaChartLayer(lcms, {"line": True, "layerType": "ImageCollection"}, "LCMS All Thematic Classes Line", True)
         >>> Map.addAreaChartLayer(lcms, {"sankey": True}, "LCMS All Thematic Classes Sankey", True)
@@ -3865,7 +3865,7 @@ class mapper:
             maxLength (int, default 30): Maximum number of characters in a Y axis label.
 
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms.select([1]), {"autoViz": True}, "LCMS Land Cover")
         >>> Map.setYLabelMaxLength(10)  # Double-click on map to inspect area. Change to a larger number and rerun to see how Y labels are impacted
         >>> Map.turnOnInspector()
@@ -3884,7 +3884,7 @@ class mapper:
             maxLength (int, default 10): Maximum number of characters in each line of a Y axis label. Will break total characters (setYLabelMaxLength) until maxLines (setYLabelMaxLines) is reached
 
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms.select([1]), {"autoViz": True}, "LCMS Land Cover")
         >>> Map.setYLabelBreakLength(5)  # Double-click on map to inspect area. Change to a larger number and rerun to see how Y labels are impacted
         >>> Map.turnOnInspector()
@@ -3903,7 +3903,7 @@ class mapper:
             maxLines (int, default 5): The maximum number of lines each y-axis label can have. Will simply exclude any remaining lines.
 
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms.select([1]), {"autoViz": True}, "LCMS Land Cover")
         >>> Map.setYLabelMaxLines(3)  # Double-click on map to inspect area. Change to a larger number and rerun to see how Y labels are impacted
         >>> Map.turnOnInspector()
@@ -3922,7 +3922,7 @@ class mapper:
             fontSize (int, default 10): The font size used on the y-axis labels for query charting.
 
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms.select([1]), {"autoViz": True}, "LCMS Land Cover")
         >>> Map.setYLabelFontSize(8)  # Double-click on map to inspect area. Change to a different number and rerun to see how Y labels are impacted
         >>> Map.turnOnInspector()
@@ -3942,7 +3942,7 @@ class mapper:
             canReorderLayers (bool, default True): Set whether layers can be reordered by dragging layer user interface objects. By default all non timelapse and non geojson layers can be reordereed by dragging.
 
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms.select([2]), {"autoViz": True}, "LCMS Land Use")
         >>> Map.addLayer(lcms.select([1]), {"autoViz": True}, "LCMS Land Cover")
         >>> Map.addLayer(lcms.select([0]), {"autoViz": True}, "LCMS Change")
@@ -3962,7 +3962,7 @@ class mapper:
 
         >>> #%%
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms.select([2]), {"autoViz": True}, "LCMS Land Use")
         >>> Map.addLayer(lcms.select([1]), {"autoViz": True}, "LCMS Land Cover")
         >>> Map.turnOnInspector()
@@ -3982,7 +3982,7 @@ class mapper:
 
         >>> #%%
         >>> from geeViz.geeView import *
-        >>> lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").filter('study_area=="CONUS"')
+        >>> lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").filter('study_area=="CONUS"')
         >>> Map.addLayer(lcms.select([2]), {"autoViz": True}, "LCMS Land Use",False)
         >>> Map.addLayer(lcms.select([1]), {"autoViz": True}, "LCMS Land Cover",False)
         >>> Map.turnOnInspector()

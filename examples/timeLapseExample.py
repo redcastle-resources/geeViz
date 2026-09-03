@@ -85,9 +85,9 @@ hansenYearsCli = hansenYears.getInfo()
 Map.addTimeLapse(hansenC, {"min": hansenStartYear, "max": hansenEndYear, "palette": declineYearPalette, "years": hansenYearsCli}, "Hansen Loss Time Lapse")
 
 # Bring in LCMS
-lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9").select(["Change"])
+lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11").select(["Change"])
 lcmsStartYear = 1985
-lcmsEndYear = 2023
+lcmsEndYear = 2025
 lcmsYears = ee.List.sequence(lcmsStartYear, lcmsEndYear)
 
 

@@ -80,7 +80,7 @@ def getMostRecentChange(c, code):
 ### Bring in LCMS annual outputs ###
 #############################################################################
 
-lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2023-9")
+lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11")
 bandNames = lcms.first().bandNames().getInfo()
 lcms_props = lcms.first().toDictionary().getInfo()
 print("Available study areas:", lcms.aggregate_histogram("study_area").keys().getInfo())

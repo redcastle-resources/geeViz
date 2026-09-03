@@ -57,7 +57,7 @@ async def main():
         ("run_code", run_code, {"code": """
 from geeViz.outputLib import charts as cl
 study = ee.Geometry.Point([-82.55, 35.60]).buffer(10000)
-lcms = ee.ImageCollection('USFS/GTAC/LCMS/v2024-10').select(['Land_Cover'])
+lcms = ee.ImageCollection('projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11').select(['Land_Cover'])
 df, fig = cl.summarize_and_chart(lcms, study, scale=30, title='LCMS Land Cover - Asheville, NC')
 print('Shape:', df.shape)
 print(df.head(3).to_markdown())
@@ -90,7 +90,7 @@ from geeViz.outputLib import charts as cl
 counties = ee.FeatureCollection('TIGER/2018/Counties')
 slc = counties.filter(ee.Filter.And(ee.Filter.eq('NAME','Salt Lake'), ee.Filter.eq('STATEFP','49')))
 study_area = slc.geometry()
-lcms = ee.ImageCollection('USFS/GTAC/LCMS/v2024-10')
+lcms = ee.ImageCollection('projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11')
 sankey_df, fig, matrix_dict = cl.summarize_and_chart(
     lcms, study_area, sankey=True, transition_periods=[1990, 2010, 2024],
     sankey_band_name='Land_Use', min_percentage=0.5, scale=30,
@@ -125,7 +125,7 @@ print(df.head(5).to_markdown())
         ("run_code", run_code, {"code": """
 from geeViz.outputLib import charts as cl
 phoenix = ee.Geometry.Point([-112.07, 33.45]).buffer(20000)
-lcms = ee.ImageCollection('USFS/GTAC/LCMS/v2024-10').select(['Land_Cover'])
+lcms = ee.ImageCollection('projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11').select(['Land_Cover'])
 df, fig = cl.summarize_and_chart(lcms, phoenix, scale=30, title='LCMS Land Cover - Phoenix, AZ')
 print('Shape:', df.shape)
 print(df.head(3).to_markdown())
@@ -204,7 +204,7 @@ print(df.to_markdown())
         ("run_code", run_code, {"code": """
 from geeViz.outputLib import charts as cl
 denver = ee.Geometry.Point([-104.99, 39.74]).buffer(15000)
-lcms_2021 = ee.ImageCollection('USFS/GTAC/LCMS/v2024-10').filter(ee.Filter.calendarRange(2021,2021,'year')).first().select(['Land_Cover'])
+lcms_2021 = ee.ImageCollection('projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11').filter(ee.Filter.calendarRange(2021,2021,'year')).first().select(['Land_Cover'])
 nlcd_2021 = ee.Image('USGS/NLCD_RELEASES/2021_REL/NLCD/2021').select(['landcover'])
 df_lcms, _ = cl.summarize_and_chart(lcms_2021, denver, scale=30, title='LCMS 2021 - Denver')
 df_nlcd, _ = cl.summarize_and_chart(nlcd_2021, denver, scale=30, title='NLCD 2021 - Denver')
@@ -249,7 +249,7 @@ print('Hybrid composite bands:', composites.first().bandNames().getInfo()[:10])
         ("run_code", run_code, {"code": """
 # Just verify the geometry and image setup, don't actually export
 colorado = ee.FeatureCollection('TIGER/2018/States').filter(ee.Filter.eq('NAME','Colorado')).geometry()
-lcms_2023 = ee.ImageCollection('USFS/GTAC/LCMS/v2024-10').filter(ee.Filter.calendarRange(2023,2023,'year')).first().select(['Land_Cover'])
+lcms_2023 = ee.ImageCollection('projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11').filter(ee.Filter.calendarRange(2023,2023,'year')).first().select(['Land_Cover'])
 clipped = lcms_2023.clip(colorado)
 print('Image bands:', clipped.bandNames().getInfo())
 print('Geometry type:', colorado.type().getInfo())
@@ -290,7 +290,7 @@ fc = ee.FeatureCollection([
     ee.Feature(ynp, {'name': 'Yellowstone NP'}),
     ee.Feature(gtnp, {'name': 'Grand Teton NP'}),
 ])
-lcms_2023 = ee.ImageCollection('USFS/GTAC/LCMS/v2024-10').filter(ee.Filter.calendarRange(2023,2023,'year')).first().select(['Land_Cover'])
+lcms_2023 = ee.ImageCollection('projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11').filter(ee.Filter.calendarRange(2023,2023,'year')).first().select(['Land_Cover'])
 df, fig = cl.summarize_and_chart(lcms_2023, fc, scale=30, feature_label='name', title='Forest Cover Comparison 2023')
 print(df.to_markdown())
 """}),
@@ -336,7 +336,7 @@ print('MTBS 2021 bands:', burn_2021.bandNames().getInfo())
     # ================================================================
     await run_test(19, "Extract LCMS time series at exact point", [
         ("run_code", run_code, {"code": """
-lcms_ts = ee.ImageCollection('USFS/GTAC/LCMS/v2024-10').select(['Land_Cover','Land_Use'])
+lcms_ts = ee.ImageCollection('projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11').select(['Land_Cover','Land_Use'])
 """}),
         ("extract_and_chart", extract_and_chart, {
             "collection_var": "lcms_ts",
@@ -726,7 +726,7 @@ print(df.to_markdown())
         ("run_code", run_code, {"code": """
 from geeViz.outputLib import charts as cl
 tahoe = ee.Geometry.Point([-120.0, 39.0]).buffer(20000)
-lcms_lc = ee.ImageCollection('USFS/GTAC/LCMS/v2023-9').select('Land_Cover')
+lcms_lc = ee.ImageCollection('projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11').select('Land_Cover')
 df, fig = cl.summarize_and_chart(lcms_lc, tahoe, scale=30, stacked=True, title='LCMS Land Cover Proportions - Lake Tahoe')
 print('Shape:', df.shape)
 print(df.head(10).to_markdown())

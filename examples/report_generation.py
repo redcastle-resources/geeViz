@@ -46,7 +46,7 @@ name = ' | '.join(study_area.aggregate_histogram('NAMELSAD').keys().getInfo())
 
 # %%
 # LCMS — filter out non-processing and stable classes for cleaner charts
-lcms = ee.ImageCollection("USFS/GTAC/LCMS/v2024-10")
+lcms = ee.ImageCollection("projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11")
 
 # MTBS burn severity — select by index and rename for consistent band naming
 mtbs = ee.ImageCollection("USFS/GTAC/MTBS/annual_burn_severity_mosaics/v1").select(
