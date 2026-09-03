@@ -110,10 +110,18 @@ class SandboxTrustTests(unittest.TestCase):
         acceptable; the point is EE / gm init does NOT die on
         ``PermissionError`` in either code path.
         """
+        # NOTE: this fixture used to set the env var with
+        # ``gm.os.environ.setdefault(...)``. That idiom is now BLOCKED —
+        # reaching a restricted module through an allowed one is exactly
+        # how `gv.os.environ` leaked GEMINI_API_KEY, so the guard is
+        # correct and the fixture was wrong. The variable is set in the
+        # PARENT process instead, which is closer to production anyway:
+        # the key comes from the environment the server was started
+        # with, not from anything user code did.
+        os.environ.setdefault('GOOGLE_MAPS_PLATFORM_API_KEY', 'test-key-12345')
         code = textwrap.dedent("""
             from geeViz import googleMapsLib as gm
             gm._API_KEY = None                            # force fresh lookup
-            gm.os.environ.setdefault('GOOGLE_MAPS_PLATFORM_API_KEY', 'test-key-12345')
             k = gm._get_api_key()
             print('KEY_OK:', bool(k), 'len:', len(k or ''))
         """)
