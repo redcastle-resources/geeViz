@@ -2344,6 +2344,20 @@ if _EXTRA_ALLOWED:
     _ALLOWED_MODULE_PREFIXES = _ALLOWED_MODULE_PREFIXES + _EXTRA_ALLOWED
 
 # Builtins that are blocked from the execution namespace.
+#: Calls that deserialize pickled data. Blocked in sandbox mode because
+#: unpickling runs whatever the file says to run, and the sandbox hands
+#: user code a working file-write primitive (``save_file``). Verified
+#: exploitable via both pandas and numpy before this existed.
+#:
+#: Matched on the ATTRIBUTE NAME, so ``pd.read_pickle``,
+#: ``pandas.read_pickle`` and ``read_pickle`` are all caught without
+#: having to guess how the module was aliased.
+_UNPICKLING_CALLS = frozenset({
+    "read_pickle",      # pandas
+    "loads",            # pickle.loads / joblib.loads, if either is reached
+    "load_npz",         # scipy.sparse — unpickles object arrays
+})
+
 _BLOCKED_BUILTINS = frozenset({
     "__import__", "eval", "exec", "compile", "open",
     "breakpoint", "exit", "quit",
@@ -2514,6 +2528,51 @@ def _check_code_patterns(code: str) -> list[str]:
                     f"BLOCKED: attribute access '.{node.attr}' is not allowed. "
                     f"This dunder is a common sandbox-escape vector."
                 )
+
+        # --- Deserialization back doors (sandbox only) --------------
+        # ``pickle`` is already blocked as a module, but several libraries
+        # that ARE available will unpickle for you from a trusted frame,
+        # which turns attacker-chosen bytes into arbitrary code execution.
+        #
+        # Demonstrated end to end against this sandbox with no extra
+        # dependencies:
+        #
+        #   save_file('x.pkl', <bytes whose __reduce__ calls anything>)
+        #   pd.read_pickle(path)        -> executed
+        #   np.load(path, allow_pickle=True) -> executed
+        #
+        # ``save_file`` is deliberately exposed and pandas/numpy are
+        # deliberately available, so the write half and the read half are
+        # both legitimate on their own. Blocking the READ is the narrow
+        # fix: nothing in a geospatial analysis needs to unpickle a file
+        # the same session just wrote.
+        #
+        # np.load WITHOUT allow_pickle is fine (plain .npy arrays cannot
+        # execute), so only the pickle-enabling form is refused.
+        if _SANDBOX_ENABLED and isinstance(node, ast.Call):
+            _fname = ""
+            if isinstance(node.func, ast.Attribute):
+                _fname = node.func.attr
+            elif isinstance(node.func, ast.Name):
+                _fname = node.func.id
+            if _fname in _UNPICKLING_CALLS:
+                warnings.append(
+                    f"BLOCKED: '{_fname}()' deserializes pickled data, which "
+                    f"executes arbitrary code. Load data with a format that "
+                    f"cannot execute — pd.read_csv / pd.read_parquet / "
+                    f"pd.read_json, or np.loadtxt."
+                )
+            if _fname == "load":
+                for _kw in node.keywords:
+                    if _kw.arg == "allow_pickle" and not (
+                            isinstance(_kw.value, ast.Constant)
+                            and _kw.value.value is False):
+                        warnings.append(
+                            "BLOCKED: allow_pickle=True executes arbitrary "
+                            "code from the file being loaded. Save and load "
+                            "plain arrays instead (np.save writes .npy that "
+                            "loads fine without allow_pickle)."
+                        )
 
         # --- Batch export blocking (sandbox only): block .start() and task.start() ---
         # Export wrapper functions are allowed (they support start=False),
