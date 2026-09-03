@@ -1260,6 +1260,14 @@ def _build_module_tree():
         leaf = modname.rsplit(".", 1)[-1]
         if leaf.startswith("_"):
             continue
+        # Skip test modules. They are not API, and indexing them actively
+        # HURT discovery: a real session asked for "evalidator" and the
+        # only hit was test_njson_shape.test_legacy_evalidator_output_
+        # still_parses, because the term appears in that test's NAME but
+        # only in the BODY of the docstrings on fia.estimate/validate.
+        # The agent burned three searches before guessing module="fia".
+        if leaf.startswith("test_") or ".tests" in modname or leaf == "tests":
+            continue
 
         # Find the source file without importing
         try:
@@ -1275,12 +1283,39 @@ def _build_module_tree():
 
         short = leaf
         entry = {"fq": modname, "mod": None, "file": spec.origin,
-                 "members": members, "doc": first_line}
+                 "members": members, "doc": first_line, "is_pkg": ispkg,
+                 # Full module docstring, kept for search only. A module
+                 # can be the right answer on its own ("which module
+                 # talks to EVALIDator?") and matching just the summary
+                 # line missed that entirely.
+                 "module_doc": module_doc}
         tree[modname] = entry
         if short not in tree:
             tree[short] = entry
         fq_map[short] = modname
         fq_map[modname] = modname
+
+    # --- Packages list their submodules -------------------------------
+    # A package's spec.origin is its __init__.py, and a re-export-only
+    # __init__ has no def/class of its own — so AST extraction returned
+    # NOTHING and search_codebase(module="fsInsights") answered
+    # ``count: 0``. The package name is the obvious first guess, and it
+    # dead-ended into "this doesn't exist" when the truth was "its
+    # contents are in submodules". Point the caller at them instead.
+    for modname, entry in list(tree.items()):
+        if not entry.get("is_pkg") or entry.get("members"):
+            continue
+        subs = []
+        for other, oe in tree.items():
+            if other == modname or "." not in other:
+                continue
+            parent, _, child = other.rpartition(".")
+            if parent != modname:
+                continue
+            subs.append({"name": child, "type": "module",
+                         "description": oe.get("doc", "")})
+        if subs:
+            entry["members"] = sorted(subs, key=lambda d: d["name"])
 
     # --- Index examples (AST parse .py, JSON parse .ipynb) ---
     example_members = []
@@ -1702,6 +1737,20 @@ def _ensure_initialized_locked(session_id: str | None = None):
     except Exception as _gm_err:
         gm = None
         _GM_IMPORT_ERROR = repr(_gm_err)
+    # fsInsights (FIA + LCMS). Optional for the same reason as gm — it
+    # needs requests — and absent it the REPL simply has no `fs`.
+    #
+    # It is here because the MCP's three FIA/LCMS tools are a deliberate
+    # SUBSET: fia_estimate exposes 4 of estimate()'s 11 parameters, so
+    # str_filter, forest_definition, max_se_pct and min_plots were
+    # unreachable from the agent by any route. Everything else in geeViz
+    # already has a REPL handle (gil, sal, cl, tl, rl); this one did not,
+    # and an agent that wanted the full API had to guess the import path.
+    try:
+        from geeViz import fsInsights as fs
+    except Exception as _fs_err:
+        fs = None
+        _FS_IMPORT_ERROR = repr(_fs_err)
     else:
         _GM_IMPORT_ERROR = None
     # pandas and numpy are de-facto standard helpers the agent reaches for
@@ -1772,6 +1821,11 @@ def _ensure_initialized_locked(session_id: str | None = None):
     # a plain NameError telling the user the module isn't installed.
     if gm is not None:
         _ns_update["gm"] = gm
+    # Both spellings, matching the pd/pandas pattern above, so
+    # search_codebase(module=...) resolves whichever the agent tries.
+    if fs is not None:
+        _ns_update["fs"] = fs
+        _ns_update["fsInsights"] = fs
 
     # inventoryLib.inventory_area writes reports only when ``output_dir``
     # is passed. Without the wrapper below, an agent that forgets the
@@ -4097,6 +4151,19 @@ def search_codebase(query: str = "", name: str = "", module: str = "", session_i
         q = query.lower()
         results = []
         seen_fqs = set()
+        # Matching used to be name-or-FIRST-DOCSTRING-LINE, unranked. Two
+        # failures came out of that, both seen in a live session:
+        #
+        #   "evalidator" -> 0 real hits. EVALIDator is what the FIA API
+        #       is called and it is all over fia.py, but never in a name
+        #       or a summary line, so the code was invisible under the
+        #       word a user would actually type.
+        #   "carbon"     -> 0 hits, same reason.
+        #
+        # So match the WHOLE docstring. That alone would bury the good
+        # hits under incidental prose, hence the rank: an exact name beats
+        # a partial name beats a summary line beats a mention in the body.
+        RANK_EXACT, RANK_NAME, RANK_SUMMARY, RANK_BODY = 0, 1, 2, 3
         for short, entry in _MODULE_TREE.items():
             fq = entry["fq"]
             if fq in seen_fqs:
@@ -4104,16 +4171,44 @@ def search_codebase(query: str = "", name: str = "", module: str = "", session_i
             seen_fqs.add(fq)
             mod_short = fq.rsplit(".", 1)[-1]
 
+            # The MODULE itself can be the answer. "which module talks to
+            # EVALIDator?" is a real question, and answering it with a
+            # list of functions that each mention the word in passing is
+            # worse than naming the module.
+            mod_name_l = mod_short.lower()
+            if q in mod_name_l or q in entry.get("module_doc", "").lower():
+                results.append({
+                    "_rank": RANK_EXACT if q == mod_name_l else RANK_SUMMARY,
+                    # Full path here, not the short name — a row reading
+                    # {"module": "fia", "name": "fia"} tells the reader
+                    # nothing about where it lives.
+                    "module": fq, "name": mod_short, "type": "module",
+                    "description": entry.get("doc", ""),
+                    "hint": f"search_codebase(module='{mod_short}') to list it",
+                })
+
             for m in entry.get("members", []):
-                if q not in m["name"].lower() and q not in m.get("description", "").lower():
+                name_l = m["name"].lower()
+                desc_l = m.get("description", "").lower()
+                body_l = m.get("docstring", "").lower()
+                if name_l == q:
+                    rank = RANK_EXACT
+                elif q in name_l:
+                    rank = RANK_NAME
+                elif q in desc_l:
+                    rank = RANK_SUMMARY
+                elif q in body_l:
+                    rank = RANK_BODY
+                else:
                     # Also check class method names
                     if m["type"] == "class" and m.get("methods"):
                         matching_methods = [meth for meth in m["methods"] if q in meth.lower()]
                         for meth in matching_methods:
-                            results.append({"module": mod_short, "name": f"{m['name']}.{meth}", "type": "method",
+                            results.append({"_rank": RANK_NAME,
+                                            "module": mod_short, "name": f"{m['name']}.{meth}", "type": "method",
                                             "description": f"Method of {m['name']}"})
                     continue
-                r = {"module": mod_short, "name": m["name"], "type": m["type"]}
+                r = {"_rank": rank, "module": mod_short, "name": m["name"], "type": m["type"]}
                 if m.get("description"):
                     r["description"] = m["description"]
                 if m.get("signature"):
@@ -4123,8 +4218,32 @@ def search_codebase(query: str = "", name: str = "", module: str = "", session_i
                 if m["type"] == "class" and m.get("methods"):
                     for meth in m["methods"]:
                         if q in meth.lower():
-                            results.append({"module": mod_short, "name": f"{m['name']}.{meth}", "type": "method",
+                            results.append({"_rank": RANK_NAME,
+                                            "module": mod_short, "name": f"{m['name']}.{meth}", "type": "method",
                                             "description": f"Method of {m['name']}"})
+
+        # Best matches first. Ties keep their discovery order, which is
+        # module-walk order — stable, so the same query always answers
+        # the same way.
+        results.sort(key=lambda r: r.get("_rank", RANK_BODY))
+        total = len(results)
+        # Whole-docstring matching makes a common word ("image", "band")
+        # match a great deal. Cap what comes back, and SAY the cap was
+        # hit rather than silently serving the top slice as if it were
+        # everything.
+        _CAP = 40
+        truncated = total > _CAP
+        results = results[:_CAP]
+        for r in results:
+            r.pop("_rank", None)
+        if truncated:
+            return json.dumps({
+                "query": query, "count": len(results), "total_matches": total,
+                "truncated": True,
+                "note": (f"{total} matches; showing the {_CAP} best. Narrow "
+                         f"the query, or use module=... to list one module."),
+                "results": results,
+            })
 
         # Empty result + dataset-shaped query → transparently forward to
         # search_datasets so the agent doesn't need a second tool call.

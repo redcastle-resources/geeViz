@@ -1,5 +1,10 @@
 """FIADB-API client — Forest Inventory and Analysis estimates.
 
+Wraps **EVALIDator**, the USFS tool behind ``fiadb-api/fullreport``.
+EVALIDator is the name people know this service by, so it is said
+here in prose: an agent searching the codebase for "EVALIDator"
+found nothing but a test, because the word lived only in comments.
+
 FIA is a **probability sample** of forest plots, not a census. Every
 estimate it produces is a design-based estimate with a sampling error,
 and this client is built around refusing to let you forget that.
@@ -78,6 +83,10 @@ class FIAValidationError(ValueError):
 def validate(wc: int, snum: int) -> None:
     """Check an attribute is answerable by an evaluation. Raises if not.
 
+    Pre-flight for the EVALIDator request, so a bad pairing fails here
+    with a named reason instead of arriving as EVALIDator's own "Key
+    Error / Received an Error" HTML page.
+
     Attributes declare the evaluation type they need (``EXPCURR``,
     ``EXPVOL``, ``EXPGROW``, ``EXPMORT``, ``EXPREMV``, ``EXPCHNG``,
     ``EXPDWM``); evaluations advertise whether they support growth
@@ -120,6 +129,8 @@ def estimate(wc: int, snum: int, *,
              min_plots: int = DEFAULT_MIN_PLOTS,
              validate_first: bool = True) -> "Any":
     """Run an FIA estimate and return it tidy, with its sampling error.
+
+    This is the EVALIDator ``fullreport`` call.
 
     Args:
         wc: Evaluation group — see :func:`~geeViz.fsInsights.find_evaluations`.

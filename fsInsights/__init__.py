@@ -56,6 +56,17 @@ from .fia import (
     reliable,
     validate,
 )
+from .align import (
+    compare_area,
+    fia_forest_area,
+    lcms_tree_area,
+    summarize_comparison,
+)
+from .lcms_ee import (
+    lcms_asset_id,
+    lcms_class_properties,
+    lcms_ee_collection,
+)
 from .vocab import (
     cache_dir,
     describe_grouping,
@@ -89,6 +100,21 @@ __all__ = [
     "lcms_vis_params",
     "latest_release",
     "release_products",
+    # FIA <-> LCMS comparison. These implement the "makes the comparison
+    # easy and labels it" claim in the module docstring above, and were
+    # unreachable as ``fs.compare_area`` until now — align.py was never
+    # imported here, so the package's own headline feature was dead on
+    # the front door while search_codebase happily advertised it.
+    "compare_area",
+    "fia_forest_area",
+    "lcms_tree_area",
+    "summarize_comparison",
+    # LCMS in Earth Engine — the bridge from the tabular API to an
+    # ee.ImageCollection, which is what anything that maps or animates
+    # LCMS actually needs.
+    "lcms_asset_id",
+    "lcms_ee_collection",
+    "lcms_class_properties",
     # Cache management
     "refresh_all",
     "cache_dir",
