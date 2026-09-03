@@ -73,7 +73,7 @@ When the user says a class of data without naming a specific dataset, use these 
 | User says | Default (unless they specify otherwise) | Why |
 |---|---|---|
 | "NLCD", "land cover" (US, recent) | Annual NLCD: `projects/sat-io/open-datasets/USGS/ANNUAL_NLCD/LANDCOVER`, band `b1` | 40 years of annual coverage. `USGS/NLCD_RELEASES/YYYY_REL/NLCD` is a single-year release and should only be used when the user names a specific release year. Rename `b1` and set class properties. |
-| "LCMS", "land cover" (US, historical + change) | `USFS/GTAC/LCMS/v2024-10` — bands `Land_Cover`, `Land_Use`, `Change` | Backed by a national dataset with matching Land Use and Change bands. CONUS + SE Alaska, 1985→2023. |
+| "LCMS", "land cover" (US, historical + change) | `projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11` — bands `Land_Cover`, `Land_Use`, `Change` | 1985→2025, CONUS + AK. The `USFS/GTAC/LCMS/*` ids are all DEPRECATED in the catalog and stop at 2024; using one prints a deprecation warning and silently costs you the newest year. Coverage is NOT monotonic — Hawaii and Puerto Rico exist only in `USFS/GTAC/LCMS/v2024-10`, so pin that older id for those, and only those. |
 | "MTBS", "wildfire severity" | `USFS/GTAC/MTBS/burned_area_boundaries/v1` + `USFS/GTAC/MTBS/annual_burn_severity_mosaics/v1` — always `.select([0], ['Severity'])` on the severity mosaics (band name changed 2023+) | MTBS band naming shifted; the explicit select avoids the mismatch. |
 | "Sentinel-2", "S2" | `COPERNICUS/S2_SR_HARMONIZED` (surface reflectance) or `COPERNICUS/S2_HARMONIZED` (TOA). Use `vizParamsFalse10k` / `vizParamsTrue10k` from `getImagesLib` for viz. | Harmonized handles the 2022 processing baseline shift. |
 | "Landsat" (composite / recent) | `getImagesLib.getLandsatWrapper(...)` for cloud-masked, indices-added collection. Raw: `LANDSAT/LC08/C02/T1_L2` + `LANDSAT/LC09/C02/T1_L2` merged. Viz with `vizParamsFalse` / `vizParamsTrue` (no `10k`). | Wrapper adds NDVI/NBR/etc and applies SR scale factors. |
@@ -144,7 +144,7 @@ The Custom Script feature runs a single `run_code` block in a FRESH REPL (`reset
 import ee
 from geeViz.outputLib import charts as cl
 study_area = ee.Geometry.Polygon([...])
-lcms_slc = ee.ImageCollection('USFS/GTAC/LCMS/v2024-10').filterBounds(study_area)
+lcms_slc = ee.ImageCollection('projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11').filterBounds(study_area)
 result = cl.summarize_and_chart(lcms_slc.select(['Land_Cover']), study_area, chart_type='sankey')
 ```
 

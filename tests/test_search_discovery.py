@@ -303,3 +303,46 @@ def test_str_filter_documents_the_table_name_requirement():
         "spelling (p.unitcd) fails with an opaque upstream error")
     assert "NOT" in doc or "not accepted" in doc.lower(), (
         "the docstring does not warn that the short aliases fail")
+
+
+# ── the agent must be pointed at a live LCMS collection ────────────────
+#
+# A probe session asked for the "animated map with a synced chart"
+# starter prompt and the agent reached for USFS/GTAC/LCMS/v2024-10 —
+# deprecated in the catalog, 1985-2024, one year short — then ran the
+# whole 40-frame series and timed out. It learned the id from
+# agent-instructions.md, which is read every session and also stated
+# the wrong year range ("1985→2023" for a collection that ends 2024).
+#
+# This file's other tests are about finding things; this one is about
+# being pointed at the right thing in the first place.
+
+INSTR = (ROOT / "mcp" / "agent-instructions.md").read_text(encoding="utf-8")
+
+
+def test_instructions_name_the_current_lcms_collection():
+    assert "LCMS/Product_Version/2025-11" in INSTR, (
+        "agent-instructions.md does not name the current LCMS collection")
+
+
+def test_the_lcms_code_example_is_not_deprecated():
+    """The worked example is copied verbatim more often than the table
+    row is read."""
+    for line in INSTR.splitlines():
+        if "ee.ImageCollection(" in line and "LCMS" in line:
+            assert "USFS/GTAC/LCMS" not in line, (
+                f"a runnable LCMS example still uses a deprecated id: "
+                f"{line.strip()[:120]}")
+
+
+def test_the_hawaii_exception_survives():
+    """Coverage is not monotonic: HAWAII and PRUSVI exist only in the
+    older release, so a blanket 'always use the newest' instruction
+    would break those. Deleting the caveat is the likely future
+    mistake."""
+    assert "v2024-10" in INSTR, (
+        "the older release is no longer mentioned at all — work in "
+        "Hawaii or Puerto Rico has no id to pin")
+    low = INSTR.lower()
+    assert "hawaii" in low or "puerto rico" in low, (
+        "the non-monotonic coverage caveat is gone")
