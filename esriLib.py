@@ -65,6 +65,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
+from geeViz._ssrf import check_url as _check_url  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Known public portals
@@ -137,6 +138,7 @@ def _fetch_json(url: str, params: dict | None = None) -> dict:
     network failure, ``ValueError`` on non-JSON response."""
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
+    _check_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": "geeViz/esriLib"})
     with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
         raw = resp.read().decode("utf-8")

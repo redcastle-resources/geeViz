@@ -32,6 +32,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
+from geeViz._ssrf import check_url as _check_url  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -184,6 +185,7 @@ def _fetch_json(url: str, params: dict[str, str] | None = None) -> dict:
     """GET a URL with optional query params, return parsed JSON."""
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
+    _check_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": "geeViz-MCP/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
@@ -197,6 +199,7 @@ def _fetch_json(url: str, params: dict[str, str] | None = None) -> dict:
 def _post_json(url: str, params: dict[str, str]) -> dict:
     """POST form-encoded params, return parsed JSON. Used for large queries."""
     data = urllib.parse.urlencode(params).encode("utf-8")
+    _check_url(url)
     req = urllib.request.Request(
         url,
         data=data,

@@ -68,6 +68,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
+from geeViz._ssrf import check_url as _check_url  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # API key resolution
@@ -136,6 +137,7 @@ def _fetch_json(url: str, params: dict | None = None,
         hdrs.update(headers)
     if data and "Content-Type" not in hdrs:
         hdrs["Content-Type"] = "application/json"
+    _check_url(url)
     req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
     with urllib.request.urlopen(req, timeout=20) as resp:
         return json.loads(resp.read().decode("utf-8"))
@@ -145,6 +147,7 @@ def _fetch_bytes(url: str, params: dict | None = None) -> bytes:
     """HTTP GET returning raw bytes."""
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
+    _check_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": "geeViz/googleMaps"})
     with urllib.request.urlopen(req, timeout=20) as resp:
         return resp.read()

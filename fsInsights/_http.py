@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any, Optional
+from geeViz._ssrf import check_url as _check_url  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,7 @@ def get_json(url: str, params: Optional[dict] = None, *,
 
     for attempt in range(retries + 1):
         try:
+            _check_url(url)
             resp = requests.get(url, params=params, timeout=timeout,
                                 headers=headers)
         except Exception as exc:
