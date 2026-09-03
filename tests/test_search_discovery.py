@@ -236,3 +236,70 @@ def test_advertised_functions_are_actually_reachable(fn):
     from geeViz import fsInsights as fs
     assert hasattr(fs, fn), f"fs.{fn} is advertised by search but missing"
     assert fn in fs.__all__, f"{fn} is reachable but not in __all__"
+
+
+# ── a fully qualified name resolves ────────────────────────────────────
+#
+# Found by driving the real agent, not by reading code: two of five probe
+# sessions called search_codebase(name="geeViz.fsInsights.fia.estimate")
+# and got "not found in any geeViz module". The dotted-name branch split
+# on the FIRST dot, so the module part became "geeViz" — which is not
+# itself in the tree.
+#
+# `module=` had always accepted the prefix, so the two arguments
+# disagreed about the same name. It predates the index work (
+# "geeViz.getImagesLib.simpleMask" failed the same way), but making
+# modules discoverable by full path is what taught the agent to produce
+# the spelling.
+
+def test_a_multi_segment_module_prefix_is_tried():
+    body = _func("search_codebase")
+    assert re.search(r"for _i in range\(len\(_segs\) - 1, 0, -1\)", body), (
+        "the dotted-name lookup still assumes the module is one segment, "
+        "so fully qualified names fail")
+
+
+def test_the_prefix_walk_is_longest_first():
+    """Shortest-first would bind 'geeViz.fsInsights' before
+    'geeViz.fsInsights.fia' and resolve the attribute off the wrong
+    module."""
+    body = _func("search_codebase")
+    m = re.search(r"range\(len\(_segs\) - 1, 0, (-1)\)", body)
+    assert m, "prefix walk is not a descending range"
+
+
+def test_the_prefix_walk_runs_after_the_original_attempt():
+    """It must be additive — anything that resolved before still has to
+    resolve the same way, so the walk cannot precede the single-segment
+    branch."""
+    body = _func("search_codebase")
+    first = body.index("mod_name, attr_path = parts[0], parts[1]")
+    walk = body.index("for _i in range(len(_segs) - 1, 0, -1)")
+    assert first < walk, "the prefix walk shadows the original lookup"
+
+
+# ── str_filter needs the full table name ───────────────────────────────
+#
+# Found by driving the agent: `str_filter="p.unitcd in (0, 1, 2)"` — the
+# alias spelling used in FIA's own docs and in the db_column values that
+# find_groupings returns (P., C., PG.) — makes EVALIDator answer HTTP 200
+# with an "Internal Server Error - SQL Error" HTML page. `plot.unitcd`
+# works. Verified live: plot.* returns 7 rows, p.* raises UpstreamError.
+#
+# The error names nothing about aliases, so two separate sessions spent
+# several turns brute-forcing it. The parameter was documented as
+# "SQL-style filter passed through as strFilter" and nothing more.
+
+def test_str_filter_documents_the_table_name_requirement():
+    tree = ast.parse(FIA)
+    doc = ""
+    for n in tree.body:
+        if isinstance(n, ast.FunctionDef) and n.name == "estimate":
+            doc = ast.get_docstring(n) or ""
+    assert doc, "estimate() has no docstring"
+    assert "str_filter" in doc
+    assert "plot.unitcd" in doc, (
+        "str_filter does not show a WORKING example; the obvious "
+        "spelling (p.unitcd) fails with an opaque upstream error")
+    assert "NOT" in doc or "not accepted" in doc.lower(), (
+        "the docstring does not warn that the short aliases fail")

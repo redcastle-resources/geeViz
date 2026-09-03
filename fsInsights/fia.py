@@ -156,6 +156,20 @@ def estimate(wc: int, snum: int, *,
             should record. Compare the two before publishing a number
             that depends on the distinction.
         str_filter: SQL-style filter passed through as ``strFilter``.
+            Qualify columns with the FULL table name — ``plot.unitcd``,
+            ``cond.owncd``, ``tree.spcd``. The short aliases that appear
+            in FIA documentation and in the ``db_column`` values from
+            :func:`find_groupings` (``P.``, ``C.``, ``PG.``) are NOT
+            accepted here: EVALIDator answers ``p.unitcd in (0, 1, 2)``
+            with HTTP 200 carrying an "Internal Server Error - SQL
+            Error" page, which says nothing about the alias being the
+            problem. Two separate agent sessions burned several turns
+            guessing before landing on ``plot.``.
+
+            Example — western Oregon survey units only::
+
+                estimate(wc=412022, snum=98, rselected="Unit code",
+                         str_filter="plot.unitcd in (0, 1, 2)")
         max_se_pct: Flag cells whose standard error exceeds this.
         min_plots: Flag cells resting on fewer plots than this.
         validate_first: Check attribute/evaluation compatibility locally

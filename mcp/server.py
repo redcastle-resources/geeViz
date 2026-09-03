@@ -3970,6 +3970,44 @@ def search_codebase(query: str = "", name: str = "", module: str = "", session_i
                     return json.dumps(_describe_object(obj, name=name, module_name=mod_name))
                 except AttributeError:
                     pass
+            # Fallback: the module part may be more than one segment.
+            #
+            # The split above takes only the FIRST segment, so a fully
+            # qualified name — "geeViz.fsInsights.fia.estimate", or
+            # "geeViz.getImagesLib.simpleMask" — resolved mod_name to
+            # "geeViz", which is not itself in the tree, and answered
+            # "not found in any geeViz module".
+            #
+            # That spelling is exactly what an agent produces after
+            # search_codebase hands it back a fully qualified module
+            # path, and `module=` has always ACCEPTED the prefix, so the
+            # two arguments disagreed about the same name. Observed
+            # twice in five probe sessions.
+            #
+            # Try progressively shorter module prefixes, longest first,
+            # so the most specific module wins. Reaching this point means
+            # the single-segment attempt above did not return, so this is
+            # purely additive — no path that used to succeed changes.
+            _segs = name.split(".")
+            for _i in range(len(_segs) - 1, 0, -1):
+                _mod = ".".join(_segs[:_i])
+                _attr = ".".join(_segs[_i:])
+                if _mod == mod_name:
+                    continue              # already tried above
+                _, _obj = _resolve_module(_mod, ns)
+                if _obj is None and _mod in ns:
+                    _obj = ns[_mod]
+                if _obj is None:
+                    continue
+                try:
+                    _cur = _obj
+                    for _p in _attr.split("."):
+                        _cur = getattr(_cur, _p)
+                except AttributeError:
+                    continue
+                return json.dumps(
+                    _describe_object(_cur, name=name, module_name=_mod))
+
             # Fallback: mod_name might be a class inside a module (e.g. "mapper.addLayer")
             if mod_obj is None:
                 for short, entry in _MODULE_TREE.items():
