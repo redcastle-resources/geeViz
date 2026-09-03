@@ -45,6 +45,15 @@ What this package will not do, stated so it can be designed around:
 * **No replacement for a project-level FSim run.**
 """
 
+from .wind import (
+    UV_BANDS,
+    WIND_10M_TO_20FT,
+    wind_barbs,
+    wind_blocks_from_forecast,
+    wind_grid,
+    wind_speed_direction,
+    wind_uv,
+)
 from .behavior import (
     crown_fire_initiation,
     flame_length,
@@ -90,6 +99,13 @@ __all__ = [
     "spread_with_wind_blocks",
     "transmission_matrix",
     "calibrate_cost_units",
+    "wind_uv",
+    "wind_speed_direction",
+    "wind_grid",
+    "wind_barbs",
+    "wind_blocks_from_forecast",
+    "UV_BANDS",
+    "WIND_10M_TO_20FT",
 ]
 
 __version__ = "2026.9.1"

@@ -251,3 +251,157 @@ def test_context_assets_use_the_official_catalog():
 def test_risk_asset_is_the_published_fsim_output():
     """WRC is FSim/FlamMap output already computed for CONUS+AK+HI."""
     assert fuels.RISK_ASSET == "USDA/WRC/v0"
+
+
+# ── wind vectors ───────────────────────────────────────────────────────
+#
+# Same failure shape as the two bugs in this file's header: plausible,
+# finite, wrong. Written first with ``direction = atan2(u, v)`` mapped
+# straight to 0-360, which is the MATH angle (counter-clockwise from
+# east) and not a compass bearing (clockwise from north). The two are a
+# reflection, ``bearing = 90 - math_angle``, not an offset.
+#
+# What makes it dangerous is where it agrees: on the diagonals both
+# conventions give the same number. A south-westerly reads 225 either
+# way. The first test run checked SW and four cardinals — SW passed and
+# all four cardinals were wrong, so a test suite containing only the
+# diagonal would have shipped it.
+#
+# These run offline against the pure-Python conversion so they execute
+# in CI without Earth Engine; the live EE path was verified separately
+# on all eight compass points.
+
+def _bearing_to(u, v):
+    """Client-side twin of the conversion in wind.wind_speed_direction."""
+    math_deg = math.degrees(math.atan2(v, u))
+    return (90.0 - math_deg) % 360.0
+
+
+def _bearing_from(u, v):
+    return (_bearing_to(u, v) + 180.0) % 360.0
+
+
+# (label, u, v, direction_from, direction_to)
+COMPASS = [
+    ("westerly",   5.0,  0.0, 270.0,  90.0),
+    ("easterly",  -5.0,  0.0,  90.0, 270.0),
+    ("southerly",  0.0,  5.0, 180.0,   0.0),
+    ("northerly",  0.0, -5.0,   0.0, 180.0),
+    ("sw",         5.0,  5.0, 225.0,  45.0),
+    ("nw",         5.0, -5.0, 315.0, 135.0),
+    ("se",        -5.0,  5.0, 135.0, 315.0),
+    ("ne",        -5.0, -5.0,  45.0, 225.0),
+]
+
+
+@pytest.mark.parametrize("label,u,v,d_from,d_to", COMPASS)
+def test_wind_direction_conventions(label, u, v, d_from, d_to):
+    """A westerly blows FROM 270 and TOWARD 90. Getting this backwards
+    puts the fire on the wrong side of the ridge."""
+    assert abs(_bearing_from(u, v) - d_from) < 0.5, f"{label}: direction_from"
+    assert abs(_bearing_to(u, v) - d_to) < 0.5, f"{label}: direction_to"
+
+
+def test_the_cardinals_are_what_actually_discriminate():
+    """Guards the test suite itself. If someone later trims COMPASS to
+    the diagonals to 'keep it short', the reflection bug becomes
+    invisible again."""
+    cardinals = [c for c in COMPASS if c[1] == 0 or c[2] == 0]
+    assert len(cardinals) >= 4, (
+        "the cardinal cases are the only ones that distinguish a compass "
+        "bearing from a math angle — do not remove them")
+
+
+@pytest.mark.parametrize("label,u,v,d_from,d_to", COMPASS)
+def test_from_and_to_are_always_opposite(label, u, v, d_from, d_to):
+    diff = abs(_bearing_from(u, v) - _bearing_to(u, v)) % 360.0
+    assert abs(diff - 180.0) < 1e-6
+
+
+def test_a_naive_math_angle_would_fail_these():
+    """Proves the tests have teeth: the original wrong implementation
+    must not pass them."""
+    def wrong(u, v):
+        return math.degrees(math.atan2(v, u)) % 360.0
+    wrong_on_cardinals = [
+        c[0] for c in COMPASS
+        if (c[1] == 0 or c[2] == 0) and abs(wrong(c[1], c[2]) - c[4]) > 0.5
+    ]
+    assert len(wrong_on_cardinals) == 4, (
+        "the math-angle implementation should be wrong on all four "
+        "cardinals; if it is not, these tests cannot catch the bug")
+
+
+def test_unit_constants():
+    from geeViz.fireLib import wind
+    assert abs(wind.MS_TO_MIH - 2.23694) < 1e-5
+    # 10 m -> 20 ft log-profile ratio. Small, but it moves a marginal
+    # spread call.
+    assert 1.10 <= wind.WIND_10M_TO_20FT <= 1.20
+
+
+def test_uv_band_lookup_covers_the_published_spellings():
+    """Every forecast collection names these differently; the lookup is
+    the only reason callers do not have to care."""
+    from geeViz.fireLib import wind
+    assert "NOAA/GFS0P25" in wind.UV_BANDS
+    u, v = wind.UV_BANDS["NOAA/GFS0P25"]
+    assert u == "u_component_of_wind_10m_above_ground"
+    assert v == "v_component_of_wind_10m_above_ground"
+    for src, (u, v) in wind.UV_BANDS.items():
+        assert u.startswith("u"), src
+        assert v.startswith("v"), src
+
+
+def _executable_source(fn):
+    """Source with comments and the docstring removed.
+
+    Both of the tests below first matched their own explanatory
+    COMMENTS — one asserted `"ee.Algorithms.If" not in src` while the
+    comment said "instead of ee.Algorithms.If", and the other found the
+    `.mean()` inside "ImageCollection.mean() over a heterogeneous". The
+    code was right and the tests were wrong, which is the worse failure
+    of the two.
+    """
+    import inspect
+    src = inspect.getsource(fn)
+    doc = inspect.getdoc(fn)
+    if doc:
+        src = src.replace(doc, "")
+    out = []
+    for line in src.splitlines():
+        stripped = line.split("#")[0] if "#" in line else line
+        out.append(stripped)
+    return chr(10).join(out)
+
+
+def test_the_source_stripper_removes_comments():
+    """Guards the guard — without this the two tests below pass on
+    prose."""
+    def sample():
+        # ee.Algorithms.If mentioned only in a comment
+        return 1
+    assert "ee.Algorithms.If" not in _executable_source(sample)
+    assert "return 1" in _executable_source(sample)
+
+
+def test_forecast_blocks_are_built_client_side():
+    """ee.Algorithms.If evaluates BOTH branches when the graph is built,
+    so it cannot guard an empty forecast window — the empty branch still
+    runs select() on a band-less mean() and fails. The loop is a
+    deliberate choice, not an oversight."""
+    from geeViz.fireLib import wind
+    src = _executable_source(wind.wind_blocks_from_forecast)
+    assert "ee.Algorithms.If" not in src
+    assert "for i in range(n)" in src
+
+
+def test_select_happens_before_mean():
+    """GFS forecast steps do not all carry the same bands, and mean()
+    over a heterogeneous collection fails with an error that prints the
+    first image's band list and never mentions the mismatch."""
+    from geeViz.fireLib import wind
+    src = _executable_source(wind.wind_blocks_from_forecast)
+    sel = src.index("collection.select(")
+    mean = src.index(".mean()")
+    assert sel < mean, "mean() is taken before the bands are selected"
