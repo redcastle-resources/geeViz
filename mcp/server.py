@@ -2336,9 +2336,32 @@ _BLOCKED_MODULES = frozenset({
 # io (``io.open``, ``io.FileIO``) require a file path that the sandbox
 # doesn't grant anyway — and ``open`` is already blocked as a builtin.
 
-# Top-level module prefixes that are allowed in import statements.
-# Anything not matching these prefixes AND not in _BLOCKED_MODULES gets a warning
-# (not a hard block) to avoid breaking legitimate but uncommon imports.
+# !!! NOT ENFORCED — this list is currently INERT. !!!
+#
+# It is defined here and extended by MCP_EXTRA_ALLOWED_MODULES below, and
+# then nothing reads it. Verified: `uuid`, `hashlib`, `base64`, `csv`,
+# `random`, `typing` and `warnings` are all absent from this tuple and
+# all import successfully under --sandbox. It is also why scipy and
+# scikit-learn worked the moment they were installed, with no config
+# change.
+#
+# So the real import policy is the DENY list (_BLOCKED_MODULES) plus the
+# AST rules in _check_code_patterns — a denylist, with the well-known
+# denylist problem that every path to a capability must be enumerated.
+# Three holes found in one session (urllib3 behind requests,
+# pd.read_pickle behind pickle, gil.os behind os) were all that shape.
+#
+# Left in place rather than deleted because switching to real allowlist
+# enforcement is a live design question, and the answer is not obviously
+# "yes": an allowlist is stricter, and the agent is already reported as
+# over-constrained. Whoever picks that up should decide deliberately —
+# but until then, DO NOT read this tuple as a control that exists, and
+# do not set MCP_EXTRA_ALLOWED_MODULES expecting it to do anything.
+#
+# Original intent, kept for whoever wires it up: top-level module
+# prefixes allowed in import statements; anything not matching these AND
+# not in _BLOCKED_MODULES was meant to warn rather than hard-block, so
+# legitimate but uncommon imports keep working.
 _ALLOWED_MODULE_PREFIXES = (
     "ee", "geeViz", "json", "datetime", "math", "collections",
     "numpy", "np", "pandas", "pd", "plotly", "copy", "re",

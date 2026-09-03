@@ -235,3 +235,38 @@ def test_getattr_stays_blocked_so_the_static_check_cannot_be_dodged():
     """The AST check only sees `x.os`. If getattr() were available,
     getattr(gil, 'os') would walk straight past it."""
     assert "getattr" in _frozenset_names("_BLOCKED_BUILTINS")
+
+
+# ── the allowlist that is not one ──────────────────────────────────────
+#
+# _ALLOWED_MODULE_PREFIXES is defined, extended by
+# MCP_EXTRA_ALLOWED_MODULES, and never consulted. Verified against a live
+# sandbox: uuid, hashlib, base64, csv, random, typing and warnings are
+# all off the list and all import fine. It is also why scipy and sklearn
+# worked the instant they were installed.
+#
+# This test does not demand it be enforced — that is a live design
+# decision, and enforcing it would make the agent MORE constrained, which
+# is the opposite of what is wanted. It demands only that the file not
+# claim a control it does not have, so nobody sets
+# MCP_EXTRA_ALLOWED_MODULES believing it does something.
+
+def test_the_inert_allowlist_is_labelled_as_inert():
+    i = CODE.index("_ALLOWED_MODULE_PREFIXES = (")
+    header = SRC[max(0, SRC.index("_ALLOWED_MODULE_PREFIXES = (") - 1600):
+                 SRC.index("_ALLOWED_MODULE_PREFIXES = (")]
+    assert "NOT ENFORCED" in header, (
+        "_ALLOWED_MODULE_PREFIXES reads as an active allowlist but nothing "
+        "consults it — say so, or wire it up")
+    assert i > 0
+
+
+def test_it_is_still_genuinely_unreferenced():
+    """If someone wires it up, this fails and the comment above must be
+    rewritten — the label would then be a lie in the other direction."""
+    uses = [ln for ln in CODE.splitlines()
+            if "_ALLOWED_MODULE_PREFIXES" in ln]
+    # definition + the _EXTRA_ALLOWED extension, nothing else
+    assert len(uses) <= 2, (
+        f"the allowlist is now referenced {len(uses)} times — if it is "
+        f"enforced, remove the NOT ENFORCED banner")
