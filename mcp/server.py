@@ -36,6 +36,13 @@ if _SANDBOX_ENABLED:
         "mmap", "fcntl", "msvcrt", "resource", "signal",
         # ── Networking (any form) ──
         "socket", "http", "urllib", "requests", "ssl", "asyncio",
+        # Kept in sync with _BLOCKED_MODULES — see the note there about
+        # urllib3 making a real outbound request while requests was
+        # blocked.
+        "urllib3", "httpx", "httpcore", "h11", "h2", "hpack",
+        "aiohttp", "aiohappyeyeballs", "aiosignal", "yarl",
+        "httplib2", "websocket", "websockets", "curl_cffi", "socks",
+        "socketserver",
         "select", "selectors", "smtplib", "ftplib", "poplib", "imaplib",
         "telnetlib", "nntplib", "xmlrpc",
         # ── Concurrency (indirect subprocess vectors) ──
@@ -2297,7 +2304,18 @@ _BLOCKED_MODULES = frozenset({
     "mmap", "fcntl", "msvcrt", "resource", "signal", "ctypes",
     # ── Network ──
     "socket", "http", "urllib", "requests", "ssl", "asyncio",
-    "select", "selectors", "smtplib", "ftplib", "poplib", "imaplib",
+    # The HTTP stack UNDER requests/urllib. Blocking the friendly
+    # wrappers while leaving these importable blocks nothing: verified
+    # by making a real outbound GET from sandboxed run_code with
+    # ``urllib3.PoolManager().request(...)`` — status 200, 559 bytes,
+    # while ``import requests`` on the line above was refused.
+    # httpx / aiohttp / httplib2 / websocket ship as transitive deps and
+    # were equally importable.
+    "urllib3", "httpx", "httpcore", "h11", "h2", "hpack",
+    "aiohttp", "aiohappyeyeballs", "aiosignal", "yarl",
+    "httplib2", "websocket", "websockets", "curl_cffi", "socks",
+    "socketserver", "ftplib",
+    "select", "selectors", "smtplib", "poplib", "imaplib",
     "telnetlib", "nntplib", "xmlrpc",
     # ── Concurrency ──
     "threading", "multiprocessing",

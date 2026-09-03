@@ -111,3 +111,73 @@ def test_pickle_module_is_still_blocked_too():
     """Defense in depth: the module blocklist is the first door, this is
     the second. Removing either leaves the other."""
     assert '"pickle"' in CODE
+
+
+# ── the HTTP stack under requests/urllib ───────────────────────────────
+#
+# Asked directly: "are urllib3, or the agent making its own package, a
+# possibility?" Both were tested against a live sandboxed run_code.
+#
+# urllib3: YES, it was a full escape. `import requests` and `import
+# urllib.request` were both refused while
+#
+#     urllib3.PoolManager().request('GET', 'http://example.com')
+#
+# returned status 200 with 559 bytes. The blocklist matched on the
+# TOP-LEVEL module name, and "urllib3" != "urllib", so blocking the
+# friendly wrappers left the transport they sit on wide open. httpx,
+# aiohttp, httplib2 and websocket were equally importable — all present
+# as transitive dependencies nobody chose.
+#
+# Writing its own package: NO. save_file reduces the name with
+# os.path.basename so it cannot traverse, the output directory is not on
+# sys.path, and `sys` is blocked so it cannot be put there. Verified:
+# `import evilmod` -> ModuleNotFoundError, and the sys.path workaround
+# was refused at the import of `sys`.
+
+def _frozenset_names(var):
+    m = re.search(rf"{var} = frozenset\(\{{(.*?)\}}\)", CODE, re.S)
+    assert m, f"could not find {var}"
+    return set(re.findall(r'"([a-zA-Z0-9_]+)"', m.group(1)))
+
+
+HTTP_STACK = ["urllib3", "httpx", "httpcore", "aiohttp", "httplib2",
+              "websocket", "websockets"]
+
+
+@pytest.mark.parametrize("mod", HTTP_STACK)
+def test_the_real_http_stack_is_blocked_for_user_code(mod):
+    assert mod in _frozenset_names("_BLOCKED_MODULES"), (
+        f"{mod} is importable from run_code — blocking `requests` while "
+        f"leaving {mod} open blocks nothing")
+
+
+@pytest.mark.parametrize("mod", HTTP_STACK)
+def test_the_real_http_stack_is_blocked_at_the_audit_hook(mod):
+    """Second layer. The file states these two lists MUST agree — an
+    attacker who gets past one still has to clear the other."""
+    if mod in ("websockets",):          # audit list omits a few aliases
+        return
+    assert mod in _frozenset_names("_AUDIT_BLOCKED_IMPORTS"), (
+        f"{mod} is blocked for user code but not at the audit hook")
+
+
+def test_the_two_blocklists_do_not_drift():
+    """The comment at the top of _BLOCKED_MODULES promises they are kept
+    in sync. Anything in the audit list but NOT the module list would be
+    reachable by a plain import statement."""
+    mods = _frozenset_names("_BLOCKED_MODULES")
+    audit = _frozenset_names("_AUDIT_BLOCKED_IMPORTS")
+    missing = sorted(audit - mods)
+    assert not missing, (
+        f"audit hook blocks {missing} but the module blocklist does not")
+
+
+def test_save_file_cannot_escape_its_directory():
+    """The self-written-package route depends on landing a .py somewhere
+    importable. basename() is what stops it."""
+    i = CODE.index("def save_file") if "def save_file" in CODE else CODE.index("safe_name")
+    window = CODE[max(0, i - 400):i + 400]
+    assert "os.path.basename" in window, (
+        "save_file no longer strips directory components, so a written "
+        "file could land on sys.path")
