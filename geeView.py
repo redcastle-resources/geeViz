@@ -2080,7 +2080,8 @@ class mapper:
         # into the page instead; otherwise behave exactly as before.
         _maps_key = os.environ.get("GOOGLE_MAPS_PLATFORM_API_KEY", "").strip()
         if _maps_key:
-            html = re.sub(
+            import re as _re_key  # self-contained: geeView has no module-level re
+            html = _re_key.sub(
                 r"(maps\.googleapis\.com/maps/api/js\?key=)AIza[\w-]+",
                 r"\g<1>" + _maps_key, html)
 
