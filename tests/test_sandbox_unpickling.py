@@ -181,3 +181,57 @@ def test_save_file_cannot_escape_its_directory():
     assert "os.path.basename" in window, (
         "save_file no longer strips directory components, so a written "
         "file could land on sys.path")
+
+
+# ── reaching a blocked module through another module ───────────────────
+#
+# Asked: "what about gil.os, gil.blah — a blacklisted package reached
+# through one that is allowed?" Yes, that worked.
+#
+# Any module doing `import os` at the top re-exports it, so gil.os,
+# gv.os and cl.os are all the real os module. The import blocklist only
+# inspects `import` statements, so it never saw them. Verified against a
+# live sandbox BEFORE the fix:
+#
+#   gv.os.environ    -> listed GEMINI_API_KEY and
+#                       GOOGLE_MAPS_PLATFORM_API_KEY, values present
+#   cl.os.listdir(.) -> real directory listing
+#   gil.os.getcwd()  -> real path
+#
+# gil.os.system() was already refused, but only because the audit hook
+# watches that one SYSCALL. Reading os.environ raises no audit event, so
+# nothing fired.
+#
+# The list is deliberately NARROWER than _BLOCKED_MODULES: `select` is
+# ee.Image.select (the most used call in the codebase), `signal` is
+# scipy.signal, `code` is a plausible response field. Blocking those
+# would break real work, so they are excluded by design.
+
+def test_module_reexports_are_blocked_as_attributes():
+    names = _frozenset_names("_BLOCKED_MODULE_ATTRS")
+    for mod in ("os", "sys", "subprocess", "socket", "requests", "urllib3",
+                "pickle", "importlib", "ctypes"):
+        assert mod in names, f".{mod} is reachable through another module"
+
+
+def test_the_attr_list_does_not_break_ordinary_analysis_code():
+    """Guards the other direction. Adding these would make
+    ee.Image.select() and scipy.signal unusable, which is a worse
+    outcome than the hole."""
+    names = _frozenset_names("_BLOCKED_MODULE_ATTRS")
+    for legit in ("select", "signal", "code", "resource", "glob", "io"):
+        assert legit not in names, (
+            f"'.{legit}' is blocked as an attribute — that breaks "
+            f"legitimate calls (ee.Image.select, scipy.signal, ...)")
+
+
+def test_the_attr_check_is_wired_in():
+    assert "_BLOCKED_MODULE_ATTRS" in CODE
+    assert "node.attr in _BLOCKED_MODULE_ATTRS" in CODE, (
+        "the attribute blocklist is defined but never consulted")
+
+
+def test_getattr_stays_blocked_so_the_static_check_cannot_be_dodged():
+    """The AST check only sees `x.os`. If getattr() were available,
+    getattr(gil, 'os') would walk straight past it."""
+    assert "getattr" in _frozenset_names("_BLOCKED_BUILTINS")

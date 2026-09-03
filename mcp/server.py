@@ -2376,6 +2376,35 @@ _UNPICKLING_CALLS = frozenset({
     "load_npz",         # scipy.sparse — unpickles object arrays
 })
 
+#: Module names that must not be reachable as an ATTRIBUTE of something
+#: else. Any module that does ``import os`` at the top re-exports it:
+#: ``gil.os``, ``gv.os`` and ``cl.os`` are all the real os module, so the
+#: import blocklist — which only sees ``import`` statements — never fired.
+#:
+#: Demonstrated against a live sandbox: ``gv.os.environ`` listed
+#: GEMINI_API_KEY and GOOGLE_MAPS_PLATFORM_API_KEY with values present,
+#: and ``cl.os.listdir('.')`` walked the filesystem. ``gil.os.system()``
+#: was already caught, but only because the audit hook watches that one
+#: SYSCALL — reading os.environ raises no audit event at all.
+#:
+#: Deliberately NOT the whole of _BLOCKED_MODULES. Several entries there
+#: are ordinary attribute names in analysis code and blocking them would
+#: break real work:
+#:   select   -> ee.Image.select(), the single most used call in geeViz
+#:   signal   -> scipy.signal
+#:   code     -> a status code on a response object
+#:   resource, glob, io -> common field names
+#: This list is the intersection of "dangerous when traversed" and
+#: "never a legitimate attribute in this codebase".
+_BLOCKED_MODULE_ATTRS = frozenset({
+    "os", "sys", "subprocess", "shutil", "pathlib", "tempfile",
+    "socket", "requests", "urllib", "urllib3", "httpx", "httpcore",
+    "aiohttp", "httplib2", "websocket", "smtplib", "ftplib",
+    "importlib", "marshal", "runpy", "zipimport", "builtins", "ctypes",
+    "pickle", "shelve", "dbm", "sqlite3", "multiprocessing",
+    "threading", "webbrowser", "getpass", "mmap",
+})
+
 _BLOCKED_BUILTINS = frozenset({
     "__import__", "eval", "exec", "compile", "open",
     "breakpoint", "exit", "quit",
@@ -2545,6 +2574,17 @@ def _check_code_patterns(code: str) -> list[str]:
                 warnings.append(
                     f"BLOCKED: attribute access '.{node.attr}' is not allowed. "
                     f"This dunder is a common sandbox-escape vector."
+                )
+            # Module re-export traversal — see _BLOCKED_MODULE_ATTRS.
+            # getattr() is already blocked as a builtin, so refusing the
+            # static form closes the dynamic one too.
+            if (isinstance(node, ast.Attribute)
+                    and node.attr in _BLOCKED_MODULE_ATTRS):
+                warnings.append(
+                    f"BLOCKED: '.{node.attr}' reaches a restricted module "
+                    f"through another one. Modules that import "
+                    f"'{node.attr}' re-export it, so this is the same as "
+                    f"importing it directly."
                 )
 
         # --- Deserialization back doors (sandbox only) --------------
