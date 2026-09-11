@@ -81,6 +81,7 @@ When the user says a class of data without naming a specific dataset, use these 
 | "drought" (US) | `GRIDMET/DROUGHT` for PDSI/SPI/EDDI | Not `IDAHO_EPSCOR/GRIDMET` — that's weather, not drought. |
 | DEM / elevation (US) | `USGS/3DEP/10m` (10m CONUS). Global: `NASA/NASADEM_HGT/001`. Always `.resample('bicubic')` before any terrain derivative. | See DEM section below for full rules. |
 | Global land cover | Dynamic World: `GOOGLE/DYNAMICWORLD/V1` (near-real-time, 10m). | Sentinel-2-based, updated continuously. |
+| "wind", "forecast", "weather" (any variable, past or future) | `wx.getForecastData(start, end, model)` — `model` is `"gfs"`, `"euro"` or `"weathernext"` | Never hand-filter these collections; see the Weather section. |
 
 If the user names a specific product ("NLCD 2019", "the 2021 release", "MapBiomas Amazonia"), honor that. The defaults apply to open questions like "map land cover for Austin" — the answer is Annual NLCD, not a stale 2021 snapshot.
 
@@ -109,6 +110,8 @@ If the user names a specific product ("NLCD 2019", "the 2021 release", "MapBioma
 ## REPL namespace — already available, do NOT re-import or re-initialize
 
 `ee`, `Map` (use directly — do NOT call `gv.Map()`), `gv`, `gil`, `sal`, `edw`, `tl`, `rl`, `cl`, `palettes` (geePalettes), `pd`/`pandas`, `np`/`numpy`, `save_file`. `gm` (googleMapsLib) is present when the optional dep loads — check with `env_info(action="namespace")` if unsure.
+
+`wx` / `weather` (forecast weather: wind, temperature, precipitation, humidity from ECMWF, GFS and WeatherNext 3) is bound too. See the Weather section below and `search_codebase(module="weather")`.
 
 `fs` / `fsInsights` (Forest Service data: FIA estimates with sampling error, LCMS land cover) is also bound. `fs.find_attributes` / `fs.find_evaluations` / `fs.estimate` / `fs.lcms_summary` / `fs.compare_area` — see `search_codebase(module="fsInsights")`.
 
@@ -839,3 +842,117 @@ For water, vegetation, snow/ice, bare ground, urban/impervious, clouds, shadows 
 **Not tools — call from `run_code`:** Google Maps Platform helpers (`gm.geocode`, `gm.search_places`, `gm.streetview_*`, `gm.get_static_map`, `gm.get_elevation*`, `gm.get_air_quality`, `gm.get_solar_insights`, `gm.get_timezone`, `gm.snap_to_roads`, `gm.nearest_roads`) live in the `gm` REPL alias when the optional dep is installed. There are no MCP-level wrappers for these — use them inside `run_code`.
 
 <!--GMAPS_AI_STATUS-->
+
+---
+
+## Weather and forecast data — always go through `wx`
+
+`wx` (alias `weather`, module `geeViz.weather`) covers **wind, temperature,
+dewpoint, humidity, precipitation, cloud cover, pressure and sea-surface
+temperature** from three models. Full signatures:
+`search_codebase(module="weather")`.
+
+| model | id | resolution | reaches |
+|---|---|---|---|
+| `"gfs"` | `NOAA/GFS0P25` | 0.25° | back to 2015, forward ~16 days |
+| `"euro"` | `ECMWF/NRT_FORECAST/IFS/OPER` | ~0.4° | back to 2024-11-12, forward ~10 days |
+| `"weathernext"` | WeatherNext 3, 0.1° | 0.1° | 2026 onward, forward ~15 days |
+
+### Never filter these collections by hand
+
+`wx.getForecastData(startDate, endDate, model)` exists because the three
+models mark time three different ways, and Earth Engine filters **do not
+coerce types** — comparing an ISO-string property against a number returns
+an EMPTY collection instead of raising. A hand-rolled `filterDate` on these
+products reads as "no data for that window" when it is actually a bug.
+
+It also picks the right images for the question, which a date filter cannot:
+
+* **Past window** — the shortest-lead image from every run initialized in
+  the window (each model's best estimate of what actually happened).
+* **Future window** — one run, the most recent that actually reaches the
+  end of the window. Mixing runs makes the field jump where they disagree.
+* **Window spanning now** — both, seamed at the newest initialization.
+
+Output is a collection of `u` / `v` images with `valid_time`, `lead_hours`,
+`wx_model`, and `system:time_start` restamped to the VALID time (WeatherNext
+natively puts the INIT time there, so a time lapse built on the raw
+collection collapses to one frame).
+
+An empty window comes back as ONE fully masked image with `lead_hours = -1`,
+not an empty collection — so downstream code cannot die on `.first()`. Check
+that property before reporting numbers.
+
+### Wind on the map — `Map.addWindLayer`
+
+```python
+ic = wx.getForecastData('2026-09-12', '2026-09-14', 'gfs')
+Map.addWindLayer(ee.Image(ic.first()), {'units': 'km/hr'}, 'GFS 10 m wind')
+Map.centerObject(study_area, 6)
+Map.view()
+```
+
+Adds TWO layers, windy.com style: a bicubic-resampled speed raster that
+answers clicks with `speed` and `direction`, and animated particle trails
+over it.
+
+Layer `viz` keys: `units` (`km/hr` default, `m/s`, `mi/hr`), `min`/`max`
+(the default max follows the unit, so switching units cannot leave the
+raster one flat colour), `palette` (defaults to `wx.WIND_PALETTE`),
+`directionConvention` (`"from"` default, meteorological — 270 is a westerly).
+
+Particle `viz` keys — all optional, all with sensible defaults:
+
+| group | keys (default) |
+|---|---|
+| color | `particleColor` (`#fff`), `particleOpacity` (0.9) |
+| size | `particleStrokeWeight` (1.1), `particleMinSize` (0.5px), `particleMaxSize` (1.65px) |
+| shape | `particleTrailLength` (26), `particleTaper` (2.1), `particleHeadBoost` (1.6), `particleLineCap` (`round`) |
+| speed | `particleSpeedFactor` (380), `particleMinSpeed` (3.0 m/s), `particleMaxSpeed` (45.0 m/s) |
+| sampling | `particleMaxTileZoom` (10) — ceiling on u/v tile zoom. Tiles track the map so Earth Engine's bicubic resampling lands near display resolution; the client does no interpolation of its own |
+| lifetime | `particleMinAge` (22.5), `particleMaxAge` (90) |
+| count | `particleDensity` (1.75 per px of canvas width, so ~3000 on a 1700px canvas), `particleMinCount` (400), `particleMaxCount` (20000). `particleCount` overrides outright |
+| field | `particleFieldSpacing` (8) — grid spacing in canvas px of the wind field the client builds once per view; the wind is resolved per cell and particles just read the grid. `particleZoomRef` (7) is the zoom streak length is calibrated at |
+
+Size: `particleMinSize`/`particleMaxSize` are absolute pixel widths at the
+tail and head and default to fractions of `particleStrokeWeight`, so raising
+the weight alone rescales the whole taper. Equal values give a
+constant-width ribbon rather than a comet.
+
+Speed: `particleMinSpeed`/`particleMaxSpeed` are a floor and ceiling on
+APPARENT speed, applied to the advection only. Streak length is proportional
+to wind speed, so without a floor a light breeze draws a one-pixel dot and a
+calm map reads as broken. Direction is untouched and the speed raster and
+click query still report the true value — never quote these as data.
+
+Pass `viz={'bands': ['u_band', 'v_band']}` for an image whose wind components
+are not its first two bands.
+
+### Other variables — `wx.getVariable`
+
+```python
+raw = ee.ImageCollection(wx.MODELS['gfs']['collection'])
+t = wx.getVariable(raw, 'temperature_2m', 'gfs')      # unit-normalized
+```
+
+Kelvin products are converted to Celsius so models are comparable —
+WeatherNext publishes Kelvin while GFS and ECMWF publish Celsius, and
+charting them together unconverted puts one line 273 units off the others.
+`wx.VARIABLES` lists every variable and which models publish it; a model
+that does not raises rather than returning an empty layer.
+
+Palettes read off windy.com's legends, so a geeViz map and a windy map of the
+same hour are comparable: `wx.WIND_PALETTE`, `wx.PRECIP_PALETTE`,
+`wx.TEMPERATURE_PALETTE`.
+
+### Gotchas
+
+* WeatherNext's `wind_speed_10m_mean` is NOT the magnitude of its
+  `u_mean`/`v_mean` — it is the ensemble mean of speeds, larger by ~33% in
+  measured cases. `wx` derives speed from the components so the arrow's
+  direction and length describe the same wind. Do not mix the two.
+* WeatherNext's shortest lead is **1 hour**, not 0. Filtering `forecast_hour == 0`
+  returns nothing.
+* GFS has **no stable band list** — some images carry
+  `total_precipitation_surface`, others `precipitation_rate`. Use
+  `wx.getVariable`, or `inspect_asset` first.

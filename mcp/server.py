@@ -1731,6 +1731,7 @@ def _ensure_initialized_locked(session_id: str | None = None):
     import geeViz.getSummaryAreasLib as sal
     import geeViz.edwLib as edw
     import geeViz.geePalettes as palettes
+    import geeViz.weather as wx
     from geeViz.outputLib import charts as cl
     from geeViz.outputLib import thumbs as tl
     from geeViz.outputLib import reports as rl
@@ -1801,6 +1802,11 @@ def _ensure_initialized_locked(session_id: str | None = None):
         "sal": sal,
         "edw": edw,
         "palettes": palettes,
+        # Forecast wind/temperature/precipitation from ECMWF, GFS and
+        # WeatherNext, plus Map.addWindLayer. Core, not optional: it
+        # needs only ee and geeViz itself.
+        "wx": wx,
+        "weather": wx,
         "cl": cl,
         "tl": tl,
         "rl": rl,
@@ -3929,6 +3935,9 @@ def _resolve_module(name, session_ns=None):
         "edwl":             "edwLib",
         "esril":            "esriLib",
         "palettes":         "geePalettes",
+        "wx":               "weather",
+        "weatherlib":       "weather",
+        "forecast":         "weather",
     }
     aliased = _ALIASES.get(name.lower().strip())
     if aliased and aliased in _MODULE_TREE:

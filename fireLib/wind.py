@@ -9,9 +9,15 @@ downwind, expensive upwind" no matter what direction it is handed.
 But wind is a vector everywhere it is *published*, and the direction is
 the part a person actually wants to see. Forecast collections carry it
 as **u/v components** rather than speed and bearing, so every project
-rewrites the same ``hypot`` / ``atan2`` pair. One copy already lives in
-``examples/weather_forecast_examples.ipynb``, where nothing can import
-it. This module is that copy, importable, plus the two things it always
+rewrites the same ``hypot`` / ``atan2`` pair. One such copy used to live
+in ``examples/weather_forecast_examples.ipynb``, where nothing could
+import it — and it was wrong: its direction was
+``(atan2(v, u) / pi + 1) * 180``, the MATH angle rescaled to 0..360
+rather than a compass bearing, which is right on the diagonals and wrong
+on all four cardinals. That notebook now calls :mod:`geeViz.weather`,
+which routes here.
+
+This module is the importable version, plus the two things it always
 gets used for: sampling the field down to a drawable grid, and turning
 those samples into map geometry.
 

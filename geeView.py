@@ -1327,6 +1327,26 @@ class mapper:
         if "layerType" not in viz.keys():
             viz["layerType"] = self.typeLookup[imageType]
 
+        # A wind-particle layer ALWAYS leaves here carrying the u/v tile
+        # stretch, whoever built it.
+        #
+        # The browser decodes wind components out of the red and green
+        # channels of these tiles, which it can only do if it knows the
+        # exact range they were encoded with. wind-particles.js keeps a
+        # fallback copy of that range, but a fallback is the wrong place
+        # for it to come from: if the two ever disagree the decode does
+        # not fail, it returns winds wrong by a scale and an offset —
+        # which still look like weather, so nothing reports it.
+        #
+        # Setting it here rather than only in weather.addWindLayer means
+        # a hand-rolled ``Map.addLayer(tiles, {"windParticles": True})``
+        # is covered too.
+        if viz.get("windParticles"):
+            from geeViz.weather import WIND_TILE_MIN_MS, WIND_TILE_MAX_MS
+
+            viz.setdefault("windTileMin", WIND_TILE_MIN_MS)
+            viz.setdefault("windTileMax", WIND_TILE_MAX_MS)
+
         if not isinstance(image, dict):
             idDict["_ee_obj"] = image  # keep original for testLayers()
             idDict["_viz"] = dict(viz)  # keep original viz for testLayers()
@@ -2604,6 +2624,56 @@ class mapper:
             self.eeAuthMode = m
         else:
             self.eeAuthMode = None
+
+    def addWindLayer(self, image: ee.Image, viz: dict = {}, name: str = "Wind", visible: bool = True):
+        """Add a wind field: a queryable speed raster plus animated particles.
+
+        Two layers, in the style of windy.com — a smooth speed raster
+        carrying the reading, with particle trails over it showing the
+        flow. The particles are advected from wind components decoded
+        out of Earth Engine PNG tiles, so they follow the map anywhere
+        you pan rather than being confined to a region fixed up front.
+
+        Args:
+            image (ee.Image): Image whose bands include the wind
+                components.
+            viz (dict): Follows ``addLayer``'s conventions.
+
+                * ``bands`` (list or comma-separated str): the dx/dy
+                  components. Defaults to the image's FIRST TWO bands,
+                  in order — by position, because every product names
+                  them differently.
+                * ``units`` (str): ``"km/hr"`` (default), ``"m/s"`` or
+                  ``"mi/hr"``.
+                * ``min`` / ``max``: speed stretch. ``max`` defaults per
+                  UNIT (15 m/s, 54 km/h, 34 mi/h), so switching units
+                  cannot leave the raster one flat colour.
+                * ``palette`` (list or comma-separated str): speed ramp.
+                * ``particleColor`` (str): trail colour, default
+                  ``"#fff"``.
+                * ``particleCount``, ``particleSpeedFactor``,
+                  ``particleMaxAge``, ``particleTrailPersistence``,
+                  ``particleLineWidth``, ``particleOpacity``: animation
+                  feel.
+                * ``directionConvention`` (str): ``"from"`` (default,
+                  meteorological — 270 is a westerly) or ``"to"``.
+            name (str): Base name; the two layers are suffixed
+                ``" speed"`` and ``" particles"``.
+            visible (bool): Initial visibility of both.
+
+        Returns:
+            tuple: ``(speed_direction_image, encoded_tiles_image)``.
+
+        >>> import geeViz.weather as wx
+        >>> ic = wx.getForecastData("2026-09-11", "2026-09-12", "gfs")
+        >>> Map.addWindLayer(ee.Image(ic.first()), {"units": "mi/hr"})
+        """
+        # Imported lazily: geeViz.weather pulls in geeViz.fireLib, and
+        # geeView is imported by everything. Nothing pays for it unless
+        # this method is actually called.
+        from geeViz.weather import addWindLayer as _addWindLayer
+
+        return _addWindLayer(self, image, viz, name=name, visible=visible)
 
     def clearMap(self):
         """
