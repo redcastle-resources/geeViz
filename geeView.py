@@ -1375,6 +1375,7 @@ class mapper:
         visible: bool = True,
         opacity: float = 1.0,
         max_zoom: int = 20,
+        legend: dict | None = None,
     ):
         """Add an external XYZ tile service (or any URL-templated raster
         service) to the map without leaving geeViz for Leaflet/Mapbox.
@@ -1439,6 +1440,18 @@ class mapper:
                                "opacity": float(opacity),
                                "maxZoom": int(max_zoom)}),
         }
+        # LOCAL PATCH tile legend v2 (2026-09-02): a {label: '#rrggbb'} legend
+        # becomes the viewer's classLegendDict (hex without '#'), so the
+        # legend panel shows swatches instead of a min/max grey ramp.
+        # See patches/apply_tile_legend_patch.py.
+        if legend:
+            if not isinstance(legend, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in legend.items()
+            ):
+                raise ValueError("legend must be a {label: '#rrggbb'} dict")
+            viz = json.loads(idDict["viz"])
+            viz["classLegendDict"] = {k: v.lstrip("#") for k, v in legend.items()}
+            idDict["viz"] = json.dumps(viz)
         idDict["workloadTag"] = self._capture_workload_tag()
         self.idDictList.append(idDict)
 
@@ -1548,21 +1561,26 @@ class mapper:
     def addEsriImageService(self, url_or_result, viz_params=None, name=None, token=None):
         """See ``geeViz.esriLib.addEsriImageService``. Delegates."""
         from geeViz import esriLib as _el
-        return _el.addEsriImageService(url_or_result, viz_params=viz_params, name=name, token=token)
+        # LOCAL PATCH (2026-08-28): pass self, or the layer lands on gv.Map.
+        return _el.addEsriImageService(url_or_result, viz_params=viz_params, name=name, token=token, target_map=self)
 
     def addEsriMapService(self, url_or_result, name=None, token=None, viz_params=None):
         """See ``geeViz.esriLib.addEsriMapService``. Delegates. If the
         service is dynamic (non-cached), esriLib now falls back to
         ``Map.addDynamicMapService`` internally instead of raising."""
         from geeViz import esriLib as _el
-        return _el.addEsriMapService(url_or_result, name=name, token=token, viz_params=viz_params)
+        # LOCAL PATCH (2026-08-28): pass self, or the layer lands on gv.Map.
+        return _el.addEsriMapService(url_or_result, name=name, token=token, viz_params=viz_params, target_map=self)
 
     def addEsriFeatureService(self, url_or_result, viz_params=None, name=None,
-                              max_features=1000, where="1=1", token=None):
+                              max_features=1000, where="1=1", token=None,
+                              bbox=None):
         """See ``geeViz.esriLib.addEsriFeatureService``. Delegates."""
         from geeViz import esriLib as _el
+        # LOCAL PATCH (2026-08-28): pass self, or the layer lands on gv.Map.
         return _el.addEsriFeatureService(url_or_result, viz_params=viz_params, name=name,
-                                          max_features=max_features, where=where, token=token)
+                                          max_features=max_features, where=where, token=token,
+                                          target_map=self, bbox=bbox)
 
     def addEsriService(self, url_or_result, viz_params=None, name=None, token=None,
                        max_features=1000, where="1=1"):
@@ -1570,8 +1588,9 @@ class mapper:
         service type from URL / metadata and delegates to the right
         add-helper."""
         from geeViz import esriLib as _el
+        # LOCAL PATCH (2026-08-28): pass self, or the layer lands on gv.Map.
         return _el.addEsriService(url_or_result, viz_params=viz_params, name=name, token=token,
-                                   max_features=max_features, where=where)
+                                   max_features=max_features, where=where, target_map=self)
 
     ######################################################################
     # Function for adding a layer to the map
@@ -2047,7 +2066,7 @@ class mapper:
                     return (s or "").replace("\\", "\\\\").replace('"', '\\"')
                 lines += (
                     'try{{addDynamicToMap("{b1}","{b2}","{e1}","{e2}",'
-                    '{z1},{z2},"{name}",{visible},"","layer-list");}}'
+                    '{z1},{z2},"{name}",{visible},"","#layer-list");}}'
                     'catch(e){{layerLoadErrorMessages.push('
                     '"Dynamic MapService \\"{name}\\" failed: "+e.message);}}'
                 ).format(
@@ -2077,14 +2096,23 @@ class mapper:
                 )
                 # addREST signature: (tileURLFunction, name, visible, maxZoom, helpBox, whichLayerList)
                 # Wrap in a try/catch so a single bad URL can't break the whole map load.
+                # LOCAL PATCH tile v1 (2026-09-02): Map.addREST builds a
+                # <REST-layer> element the viewer never defines, so
+                # layer.setLayer is not a function and no tile is ever
+                # requested (measured in Chrome: 0 requests). The
+                # tileMapService branch of addToMap is the path
+                # addFeatureView uses, and it draws - go through
+                # Map.addLayer with that viz. See
+                # patches/apply_tile_layer_patch.py.
                 lines += (
-                    'try{{Map.addREST({fn},"{name}",{visible},{maxZoom},"","layer-list");}}'
+                    # LOCAL PATCH tile legend v2 (2026-09-02): the stored viz, so a legend reaches the page.
+                    'try{{Map.addLayer({fn},{viz},"{name}",{visible});}}'
                     'catch(e){{layerLoadErrorMessages.push("Tile layer \\"{name}\\" failed: "+e.message);}}'
                 ).format(
                     fn=tile_url_fn,
                     name=idDict["name"].replace('"', '\\"'),
                     visible=str(idDict["visible"]).lower(),
-                    maxZoom=idDict.get("_tile_max_zoom", 20),
+                    viz=idDict["viz"],
                 )
                 continue
 
@@ -2186,6 +2214,20 @@ class mapper:
 
         with open(template, "r", encoding="utf-8") as f:
             html = f.read()
+
+        # LOCAL PATCH (2026-09-03): the template hard-codes geeViz's own
+        # Google Maps key, which is HTTP-referrer-restricted to geeViz's
+        # domains (plus localhost - which is why every local test passes
+        # and every OTHER deployment fails with RefererNotAllowedMapError,
+        # a blank grey map, and a console pointing at a key the deployer
+        # does not own). If the standard env var names a key, stamp it
+        # into the page instead; otherwise behave exactly as before.
+        _maps_key = os.environ.get("GOOGLE_MAPS_PLATFORM_API_KEY", "").strip()
+        if _maps_key:
+            import re as _re_key  # self-contained: geeView has no module-level re
+            html = _re_key.sub(
+                r"(maps\.googleapis\.com/maps/api/js\?key=)AIza[\w-]+",
+                r"\g<1>" + _maps_key, html)
 
         # Inject <base href> so any RELATIVE URLs the geeView JS injects at
         # runtime (icons, palette images, etc.) resolve to the asset base
