@@ -87,10 +87,17 @@ from geeViz.outputLib._templates import (
     PDF_HTML_TEMPLATE as _PDF_HTML_TEMPLATE,
 )
 
+# LLM usage reporting. Imported at module scope on purpose: a call-time
+# import of this from inside a function deadlocked the MCP server, whose
+# prewarm thread holds the geeViz import lock while a tool call is being
+# served. llmUsage is stdlib-only and imports nothing from geeViz, so
+# this is free and cannot cycle.
+from geeViz import llmUsage as _lu
+
 # ---------------------------------------------------------------------------
 #  Constants
 # ---------------------------------------------------------------------------
-_DEFAULT_MODEL = "gemini-3-flash-preview"
+_DEFAULT_MODEL = _lu.DEFAULT_MODEL   # see geeViz.llmUsage
 
 _SECTION_PROMPT_TEMPLATE = textwrap.dedent("""\
     You are a geospatial data analyst writing a section of a technical report.
@@ -308,7 +315,8 @@ class Report:
 
     Args:
         title (str): Report title.
-        model (str): Gemini model name. Default ``"gemini-3-flash-preview"``.
+        model (str): Gemini model name. Default
+            :data:`geeViz.llmUsage.DEFAULT_MODEL`.
         api_key (str, optional): Google API key. If not provided, loaded from
             the ``GEMINI_API_KEY`` environment variable (via ``.env``).
         prompt (str, optional): Additional guidance for the executive summary.
@@ -1286,6 +1294,16 @@ class Report:
                 contents=contents,
                 config=types.GenerateContentConfig(temperature=0.0),
             )
+            # Report what this cost. A report runs one of these per
+            # section plus an executive summary over every image, so it
+            # is the heaviest LLM consumer in geeViz — and the only one
+            # that discarded its usage_metadata entirely, which made
+            # that spend invisible to whoever is paying for it.
+            try:
+                _lu.report(_lu.usage_from_response(
+                    response, model=self.model, source="geeviz.reports"))
+            except Exception:
+                pass
             return response.text
         except Exception as e:
             print(f"    LLM error: {e}", flush=True)

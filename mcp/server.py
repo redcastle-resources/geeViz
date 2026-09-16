@@ -24,6 +24,34 @@ for _arg in sys.argv[1:]:
         _SANDBOX_ENABLED = False
 
 # ---------------------------------------------------------------------------
+# Load the heavy C-extension stack HERE: single-threaded, and before the
+# audit hook exists.
+#
+# numpy and pandas are imported later anyway, by the geeViz cascade in
+# _ensure_initialized (outputLib.charts -> pandas -> numpy). Doing it
+# there means a Windows DLL load (LoadLibraryExW, which takes the
+# process-wide loader lock) happens while other threads are running and
+# with an audit hook firing on every file access inside the import.
+# That combination wedged the server: stack dumps caught it repeatedly,
+# always parked in ``numpy/_core/multiarray.py`` inside
+# ``create_module``, with the tool call that triggered it never
+# returning and nothing logged.
+#
+# Up here there is exactly one thread and no hook, which is the same
+# situation as ``python -c "import pandas"`` — which completes in 1.2s
+# in the very venv where the in-server import hangs.
+#
+# Cost: ~1.5s of startup that was going to be paid on the first tool
+# call regardless. Failures are non-fatal — if these are not installed
+# the later import raises where it always did.
+try:
+    import numpy as _numpy_preload   # noqa: F401
+    import pandas as _pandas_preload  # noqa: F401
+except Exception as _preload_err:    # pragma: no cover - env dependent
+    print(f"[geeViz MCP] numpy/pandas preload skipped: {_preload_err!r}",
+          file=sys.stderr, flush=True)
+
+# ---------------------------------------------------------------------------
 # Audit hook — runtime-level defense that cannot be bypassed from Python.
 # Catches os.system, subprocess.Popen, open(), exec(), import of blocked
 # modules, etc. even when accessed via module attribute traversal
@@ -1000,7 +1028,149 @@ async def _tool_manager_call_tool_with_scrub(
         return result
 
 
-app._tool_manager.call_tool = _tool_manager_call_tool_with_scrub
+# ---------------------------------------------------------------------------
+# LLM usage collection (Gemini billing attribution)
+#
+# The sibling of the workload-tag plumbing above, for the other thing
+# that costs money. Three geeViz modules call Gemini on their own —
+# googleMapsLib, inventoryLib and outputLib.reports — and until now the
+# tokens they burned reached nothing that accounts for spend. The agent
+# paid for them and could not see them.
+#
+# geeViz cannot report that itself: it is a standalone library with no
+# agent to import, no database credentials, and no idea who is being
+# billed. So it announces each call through ``geeViz.llmUsage.report``,
+# and this layer — which DOES know it is running as the agent's
+# subprocess — collects whatever was announced during one tool call and
+# attaches it to that call's result. The agent's after_tool_callback
+# drains the field, records it, and strips it before the model ever
+# sees it.
+#
+# Outermost of the call_tool wrappers, so the window spans everything
+# the tool did.
+_pre_usage_call_tool = _tool_manager_call_tool_with_scrub
+
+# The field name is underscore-prefixed to mark it as transport, not
+# tool output. It is removed by the agent before the response is
+# persisted, so it should never appear in conversation history — if it
+# does, the drain is not running.
+_LLM_USAGE_FIELD = "_llm_usage"
+
+
+def _put_in_structured(structured: dict, records: list) -> None:
+    """Write the usage field into a structuredContent dict, in place.
+
+    A single-key ``{"result": "<json string>"}`` envelope holds the real
+    payload as text, so the field goes INSIDE it — that is where the
+    agent's after_tool_callback unwraps to, and writing beside it puts
+    the records somewhere nothing looks.
+    """
+    inner_text = structured.get("result")
+    if len(structured) == 1 and isinstance(inner_text, str):
+        try:
+            inner = json.loads(inner_text)
+            if isinstance(inner, dict):
+                inner[_LLM_USAGE_FIELD] = records
+                structured["result"] = json.dumps(inner)
+                return
+        except (json.JSONDecodeError, TypeError):
+            pass
+    structured[_LLM_USAGE_FIELD] = records
+
+
+def _attach_llm_usage(result, records: list):
+    """Put ``records`` on the tool result, wherever the result keeps data.
+
+    Prefers ``structuredContent`` because it survives untouched; falls
+    back to re-serializing the first JSON text part. Returns the result
+    either way — a tool call must not fail because its accounting could
+    not be attached.
+    """
+    if not records:
+        return result
+
+    # FastMCP's REAL dispatch passes convert_result=True, and that
+    # returns a plain ``(content_list, structured_dict)`` TUPLE rather
+    # than a ToolResult. Missing this meant nothing was ever attached on
+    # the only path that matters: the tuple fell through to the
+    # list/tuple branch below, whose two items are a list and a dict —
+    # neither carries ``.text`` — so the function returned the result
+    # untouched and every geeViz LLM call went unbilled. Silently.
+    #
+    # The unit test did not catch it because its fake inner returned a
+    # ToolResult-shaped object: a shape the real dispatch never
+    # produces. Test the wiring, not just the helper.
+    if (isinstance(result, tuple) and len(result) == 2
+            and isinstance(result[1], dict)):
+        _put_in_structured(result[1], records)
+        return result
+
+    structured = getattr(result, "structuredContent", None) or getattr(
+        result, "structured_content", None
+    )
+    if isinstance(structured, dict):
+        _put_in_structured(structured, records)
+        return result
+
+    content = getattr(result, "content", None)
+    if content is None and isinstance(result, (list, tuple)):
+        content = result
+    for item in (content or []):
+        text = getattr(item, "text", None)
+        if not isinstance(text, str) or not text:
+            continue
+        try:
+            payload = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payload[_LLM_USAGE_FIELD] = records
+        new_text = json.dumps(payload)
+        try:
+            setattr(item, "text", new_text)
+        except Exception:
+            try:
+                item.__dict__["text"] = new_text
+            except Exception:
+                return result
+        return result
+    return result
+
+
+# Imported HERE, at module scope, and deliberately not inside the
+# wrapper below.
+#
+# A call-time ``from geeViz import llmUsage`` inside the wrapper
+# deadlocked the server. ``main()`` starts a daemon thread that prewarms
+# EE and the geeViz imports; that thread holds the import lock for the
+# ``geeViz`` package for tens of seconds. A tool call arriving in that
+# window ran the import ON THE EVENT LOOP, which blocked waiting for the
+# lock — so the tool finished, its result was never serialized back over
+# stdio, and the agent sat on a spinner forever. The symptom was a
+# completed tool call with no response and no error anywhere.
+#
+# This module imports nothing from geeViz and only stdlib, so hoisting
+# it costs nothing and cannot cycle.
+from geeViz import llmUsage as _lu
+
+
+async def _tool_manager_call_tool_with_usage(
+    name, arguments, context=None, convert_result=False
+):
+    """Collect LLM usage reported during one tool call and attach it."""
+    with _lu.collect() as records:
+        result = await _pre_usage_call_tool(
+            name, arguments, context=context, convert_result=convert_result
+        )
+    try:
+        return _attach_llm_usage(result, list(records))
+    except Exception:
+        # Accounting must never cost a caller their result.
+        return result
+
+
+app._tool_manager.call_tool = _tool_manager_call_tool_with_usage
 
 # Wrap app.tool() to auto-log every tool invocation
 _original_app_tool = app.tool
@@ -1114,10 +1284,47 @@ def _log_tool_call(tool_name: str, args: dict, result=None, error=None):
 import threading
 import json
 
+# Opt-in all-thread stack dump, for when this server stops responding.
+#
+# Set ``GEEVIZ_MCP_STACK_DUMP_SECS=45`` on the AGENT (its environment is
+# handed to this subprocess verbatim) and every N seconds each thread's
+# stack is printed to stderr, which lands in the agent's log.
+#
+# Worth keeping because the failure mode this server has had twice is a
+# HANG, not a crash: a tool logs "status": "OK", never returns, and
+# nothing is written anywhere. There is no traceback to find, and a
+# hung thread is invisible to every other kind of instrumentation. The
+# prewarm deadlock was diagnosed from one of these dumps in minutes
+# after days of hypotheses — the cycle (prewarm holding _init_lock
+# inside a numpy C-extension load, tool thread blocked acquiring it)
+# is only visible when you can see ALL threads at once.
+#
+# Off unless the variable is set, and it only prints.
+if os.environ.get("GEEVIZ_MCP_STACK_DUMP_SECS"):
+    import faulthandler as _fh
+    try:
+        _every = int(os.environ["GEEVIZ_MCP_STACK_DUMP_SECS"])
+    except ValueError:
+        _every = 0
+    if _every > 0:
+        _fh.dump_traceback_later(_every, repeat=True, exit=False,
+                                 file=sys.stderr)
+        print("[geeViz MCP] all-thread stack dump armed every %ss" % _every,
+              file=sys.stderr, flush=True)
+
 _init_lock = threading.RLock()  # reentrant: _ensure_initialized holds it
                                 # while calling _ensure_ee_initialized which
                                 # also acquires it on the same thread.
 _initialized = False
+
+# Set once global EE + geeViz init has finished. The dataset-catalog
+# prewarm waits on this rather than running alongside init: it is a
+# second background thread pulling in heavy dependencies (the BigQuery
+# client), and concurrent C-extension imports from two threads are
+# exactly what wedged the EE prewarm. Waiting costs nothing — the
+# catalog build is only needed by search_datasets, which cannot be
+# called before init anyway.
+_init_done = threading.Event()
 
 # Dynamic module tree — populated at init time by _build_module_tree()
 _MODULE_TREE = {}  # short_name -> {"fq": fully_qualified_path, "mod": module_object}
@@ -1715,7 +1922,12 @@ def _ensure_initialized(session_id: str | None = None):
     widened the race window enough to hit reliably).
     """
     with _init_lock:
-        return _ensure_initialized_locked(session_id)
+        sess = _ensure_initialized_locked(session_id)
+    # Set AFTER the lock is released and every import is done — setting
+    # it mid-cascade would let the catalog thread start alongside the
+    # numpy/pandas import that wedged the old prewarm.
+    _init_done.set()
+    return sess
 
 
 def _ensure_initialized_locked(session_id: str | None = None):
@@ -3939,18 +4151,37 @@ def _resolve_module(name, session_ns=None):
         "weatherlib":       "weather",
         "forecast":         "weather",
     }
-    aliased = _ALIASES.get(name.lower().strip())
+    # Strip a leading ``geeViz.`` before looking anything up.
+    #
+    # It is the real import path, so it is the first thing anyone types —
+    # and it matched nothing. One session burned eight search_codebase
+    # calls hunting a single function, cycling ``thumbs`` /
+    # ``outputLib.thumbs`` / ``geeViz.outputLib.thumbs`` /
+    # ``geeViz.outputLib.thumb`` because the prefixed forms returned
+    # "Module not found" and the agent could not tell a wrong spelling
+    # from a missing function. The alias table below already accepts the
+    # unprefixed ``outputlib.thumbs``; this makes the qualified form a
+    # synonym rather than a dead end.
+    _name = name.strip()
+    _low = _name.lower()
+    if _low.startswith("geeviz."):
+        _name = _name[len("geeViz."):]
+        _low = _name.lower()
+
+    aliased = _ALIASES.get(_low)
     if aliased and aliased in _MODULE_TREE:
         mod = _get_module(_MODULE_TREE[aliased])
         if mod is not None:
             return aliased, mod
 
-    # Exact match in the geeViz module tree
-    entry = _MODULE_TREE.get(name)
-    if entry:
-        mod = _get_module(entry)
-        if mod is not None:
-            return name, mod
+    # Exact match in the geeViz module tree — try the stripped name as
+    # well, so "geeViz.getImagesLib" resolves like "getImagesLib".
+    for _candidate in (name, _name):
+        entry = _MODULE_TREE.get(_candidate)
+        if entry:
+            mod = _get_module(entry)
+            if mod is not None:
+                return _candidate, mod
 
     if session_ns:
         # Top-level REPL hit (no dots)
@@ -6280,37 +6511,39 @@ def main() -> None:
     # Prewarm EE + geeViz imports + module tree in a background thread so the
     # first real tool call doesn't pay the full ~30-60s cold-start
     # (ee.Initialize + geeView / getImagesLib / edwLib / outputLib imports).
-    # An earlier prewarm was removed because it raced with the first tool
-    # call — that race is now guarded by ``_init_lock`` inside
-    # ``_ensure_initialized``, so the prewarm thread and any concurrent tool
-    # call simply serialize on the lock (either finds work done or blocks
-    # briefly until it is). Falls back to the lazy path on error.
-    import threading, time
-    def _prewarm():
-        try:
-            _proxy = os.environ.get("EE_PROXY_URL", "").strip()
-            _project = os.environ.get("GEE_PROJECT", "").strip()
-            _sa = "yes" if os.environ.get("GEE_SERVICE_ACCOUNT_B64", "").strip() else "no"
-            print(f"[geeViz MCP] Env at prewarm: EE_PROXY_URL={'set' if _proxy else 'MISSING'} "
-                  f"GEE_PROJECT={_project or 'MISSING'} GEE_SERVICE_ACCOUNT_B64={_sa}",
-                  file=sys.stderr, flush=True)
-            print("[geeViz MCP] Prewarming EE + geeViz imports...", file=sys.stderr, flush=True)
-            _t0 = time.time()
-            _ensure_initialized()
-            print(f"[geeViz MCP] Prewarm complete in {time.time() - _t0:.1f}s", file=sys.stderr, flush=True)
-        except Exception as _pw_err:
-            # Full traceback WITH __cause__ chain — robust_init wraps the real
-            # ee.Initialize() error in a "non-interactively" RuntimeError with
-            # `raise ... from init_err`, and its verbose=False path never
-            # prints the cause. Only the traceback exposes what actually
-            # failed (metadata-server 403, PermissionError from sandbox,
-            # missing scope, etc). Log full chain so evidence is available.
-            import traceback as _tb
-            print(f"[geeViz MCP] Prewarm failed: {_pw_err!r} (first tool call will retry)", file=sys.stderr, flush=True)
-            print("[geeViz MCP] Prewarm failure traceback (with cause chain):", file=sys.stderr, flush=True)
-            _tb.print_exception(type(_pw_err), _pw_err, _pw_err.__traceback__, chain=True, file=sys.stderr)
-            sys.stderr.flush()
-    threading.Thread(target=_prewarm, daemon=True, name="geeviz-mcp-prewarm").start()
+    # NO PREWARM THREAD. This is deliberate, and it is the third time
+    # this decision has been made — the two previous rounds are why the
+    # comment above exists.
+    #
+    #   round 1: a prewarm thread raced the first tool call -> removed
+    #   round 2: re-added, "guarded" by _init_lock
+    #   round 3: the lock turned the race into a DEADLOCK -> removed
+    #
+    # Round 3, from an all-thread stack dump of a wedged server:
+    #
+    #   prewarm thread   holds _init_lock, stuck forever inside
+    #                    create_module loading numpy's C extension
+    #                    (outputLib.charts -> pandas -> numpy)
+    #   tool thread      inspect_asset -> _ensure_initialized, blocked
+    #                    acquiring _init_lock
+    #
+    # Neither ever moves. The tool logs "status": "OK" on entry, never
+    # returns, and the agent sits on a spinner with nothing in any log.
+    #
+    # The lock could not have fixed this, because the lock was never the
+    # problem. Two threads doing the SAME heavy initialization is the
+    # problem; serializing them only decides which one hangs. The
+    # prewarm cannot make the first call faster than doing the work
+    # takes — at best it moves the work a few seconds earlier, and at
+    # worst it moves it to a thread whose failure nobody can see.
+    #
+    # So: one code path. ``_ensure_initialized`` runs on the call that
+    # needs it, under a lock that is now essentially uncontended. The
+    # first tool call pays ~10-20s, which is what the UI already tells
+    # the user it will. A failure raises into that call, where the agent
+    # can report it, instead of leaving ``_initialized`` False forever.
+    print("[geeViz MCP] Ready (EE + geeViz init runs on the first tool "
+          "call that needs it)", file=sys.stderr, flush=True)
 
     # Also prewarm the dataset catalogs (STAC + community + bigquery-public-data)
     # in a separate background thread so the first ``search_datasets`` call
@@ -6319,6 +6552,11 @@ def main() -> None:
     # bigquery is the expensive one (~15s of BQ API calls) and cleanly no-ops
     # to None when BQ dep / auth is unavailable.
     def _prewarm_catalogs():
+        # Wait for global init rather than racing it. Unbounded on
+        # purpose: if init never happens, there is nothing to prewarm
+        # for, and a timeout here would just reintroduce the overlap
+        # this wait exists to prevent.
+        _init_done.wait()
         for _cat in _CATALOG_NAMES:
             try:
                 _get_cached_catalog(_cat)
