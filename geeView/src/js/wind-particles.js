@@ -106,6 +106,20 @@
   var lastFrameAt = 0;
   var bound = false;
 
+  // Whether the map element is actually on screen.
+  //
+  // document.hidden already stops the animation when the TAB is in the
+  // background, but it says nothing about a visible tab scrolled past
+  // the map — a long report page, a notebook cell above the fold, a
+  // dashboard where the map is one panel among several. There the
+  // particles keep integrating a vector field and repainting a canvas
+  // nobody can see, which on a laptop is a fan spinning up for nothing.
+  //
+  // Defaults to true so that a browser without IntersectionObserver, or
+  // a map that is never observed, behaves exactly as before rather than
+  // silently never animating.
+  var inView = true;
+
   /**
    * The tile-URL builder on a google.maps.ImageMapType.
    *
@@ -942,7 +956,7 @@
     for (var id in adopted) {
       var st = adopted[id];
       var L = reg && reg[id];
-      var want = pageVisible && (L ? L.visible !== false : true);
+      var want = pageVisible && inView && (L ? L.visible !== false : true);
       if (want !== st.running) {
         st.running = want;
         if (!want && st.ctx) st.ctx.clearRect(0, 0, st.w, st.h);
@@ -957,6 +971,53 @@
       if (L) { detach(L); reportProgress(st); applyStacking(st); }
     }
     if (anyRunning() && rafId === null) rafId = global.requestAnimationFrame(tick);
+  }
+
+  /**
+   * Stop animating when the map scrolls off screen; resume when it is
+   * back.
+   *
+   * Observes the map's own container rather than a canvas: the canvases
+   * come and go as layers are added and removed, and the container is
+   * the thing whose position on the page actually decides whether any
+   * of this is visible.
+   *
+   * The threshold is 0, so "in view" means any part of the map is —
+   * a map half past the fold is still worth animating, and a stricter
+   * threshold would stop it while the user is looking at it.
+   *
+   * No-ops where IntersectionObserver is absent, leaving ``inView``
+   * true; the animation then behaves exactly as it did before.
+   */
+  function observeInView() {
+    if (!global.IntersectionObserver || !global.map ||
+        typeof global.map.getDiv !== "function") {
+      return;
+    }
+    var el;
+    try {
+      el = global.map.getDiv();
+    } catch (e) {
+      return;
+    }
+    if (!el) return;
+    try {
+      var io = new global.IntersectionObserver(function (entries) {
+        for (var i = 0; i < entries.length; i++) {
+          var next = !!entries[i].isIntersecting;
+          if (next === inView) continue;
+          inView = next;
+          // Reseeding on the way back in is what refreshRunState
+          // already does for any layer it switches on, so the particles
+          // come back in the current view rather than resuming from
+          // wherever they were when the map left the screen.
+          refreshRunState();
+        }
+      }, { threshold: 0 });
+      io.observe(el);
+    } catch (e) {
+      inView = true;
+    }
   }
 
   function bindOnce() {
@@ -977,6 +1038,7 @@
     if (global.document) {
       global.document.addEventListener("visibilitychange", refreshRunState);
     }
+    observeInView();
     global.setInterval(refreshRunState, 500);
     bound = true;
   }

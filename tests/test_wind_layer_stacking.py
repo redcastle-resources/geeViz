@@ -91,3 +91,82 @@ def test_the_source_uses_the_viewer_s_own_call(result):
         "every higher slot and corrupts other layers' layerId")
     assert "setAt(L.layerId, null)" in code, (
         "detach no longer hides the encoded raster the way the viewer does")
+
+
+# ── animating a map nobody is looking at ──────────────────────────────
+
+def _wind_js() -> str:
+    import pathlib
+    return (pathlib.Path(__file__).resolve().parents[1]
+            / "geeView" / "src" / "js" / "wind-particles.js").read_text(
+                encoding="utf-8")
+
+
+def test_the_animation_stops_when_the_map_scrolls_out_of_view():
+    """document.hidden only covers a backgrounded TAB.
+
+    A visible tab scrolled past the map — a long report, a notebook cell
+    above the fold, a dashboard panel — kept integrating the vector
+    field and repainting a canvas nobody could see.
+    """
+    js = _wind_js()
+    code = "\n".join(ln for ln in js.splitlines()
+                     if not ln.strip().startswith("//"))
+    assert "IntersectionObserver" in code
+    assert "inView" in code, "no in-view state is tracked"
+
+
+def test_in_view_gates_the_same_want_the_other_conditions_do():
+    """It has to join the existing decision, not run a second one — two
+    places deciding whether to animate is how they disagree."""
+    js = _wind_js()
+    i = js.index("function refreshRunState()")
+    body = js[i:i + 900]
+    code = "\n".join(ln for ln in body.splitlines()
+                     if not ln.strip().startswith("//"))
+    assert "pageVisible && inView" in code, (
+        "the in-view flag does not gate the run state")
+
+
+def test_it_defaults_to_animating_when_the_api_is_absent():
+    """A browser without IntersectionObserver, or a map with no div,
+    must behave exactly as before. Defaulting the other way would leave
+    the particles permanently frozen with nothing to explain why."""
+    js = _wind_js()
+    assert "var inView = true;" in js
+    i = js.index("function observeInView()")
+    body = js[i:i + 1200]
+    assert "!global.IntersectionObserver" in body
+    assert "return;" in body, "no bail-out when the API is missing"
+
+
+def test_the_observer_watches_the_map_container_not_a_canvas():
+    """Canvases come and go as layers are added and removed; the
+    container is what actually has a position on the page."""
+    js = _wind_js()
+    i = js.index("function observeInView()")
+    body = js[i:i + 1200]
+    assert "getDiv()" in body
+
+
+def test_coming_back_into_view_refreshes_rather_than_resuming_blind():
+    """refreshRunState reseeds any layer it switches on, so particles
+    return in the CURRENT view instead of wherever they were when the
+    map left the screen."""
+    js = _wind_js()
+    i = js.index("function observeInView()")
+    body = js[i:i + 1400]
+    assert "refreshRunState()" in body
+
+
+def test_the_observer_is_actually_installed():
+    """Defining observeInView and never calling it leaves the animation
+    running off screen exactly as before, with a function that looks
+    like it fixed it. Test the wiring, not just the helper."""
+    js = _wind_js()
+    i = js.index("function bindOnce()")
+    body = js[i:i + 1200]
+    code = "\n".join(ln for ln in body.splitlines()
+                     if not ln.strip().startswith("//"))
+    assert "observeInView()" in code, (
+        "observeInView is defined but never called from bindOnce")

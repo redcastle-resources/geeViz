@@ -44,8 +44,27 @@ model               resolution  archive    init      horizon        lead step   
 ``stat=``. The members themselves are not in the collection, so spread is
 ``p90 - p10`` rather than a reduction over members. ``weathernext_st``
 (the 0.05° product) is station-head 2 m temperature and dewpoint only —
-**no wind**. Both WeatherNext products are **gated**: an account without
-access gets a permission error, not an empty result.
+**no wind**.
+
+Both WeatherNext products are **gated**, and the way that failure
+presents is worth knowing before it costs you an afternoon. Earth Engine
+reports a denied gated asset as::
+
+    ImageCollection.load: ImageCollection asset
+    'projects/gcp-public-data-weathernext/assets/weathernext_3_0_0_0p1deg'
+    not found (does not exist or caller does not have access)
+
+That reads as "wrong id", so the natural response is to go looking for
+the right one — and the gated collections are not in the public STAC
+catalog either, so ``search_datasets("weathernext")`` returns only the
+v2 and deprecated products and appears to confirm it.
+
+Access is granted **per principal**, not per project. The same asset can
+load in the Code Editor (where the caller is you) and 404 from a
+deployed service in the *same* GCP project (where the caller is that
+service's runtime service account). If it works for you interactively
+and not in a deployment, grant the runtime service account access rather
+than hunting for a different asset id.
 
 Pitfalls
 ========

@@ -1,5 +1,28 @@
 """
-ArcGIS / Esri REST services client for geeViz.
+ArcGIS / Esri REST services client for geeViz. **DEPRECATED.**
+
+.. deprecated::
+   Use :mod:`georest` instead. This module now delegates to it and will
+   be removed in a future release.
+
+   ``georest`` is the maintained implementation of everything here that
+   talks to an Esri REST endpoint, it is stdlib-only (no runtime
+   dependencies), and it does considerably more than this module ever
+   did — ``exportImage``, ``identifyPixelValue``, ``getSamples``,
+   ``computeStatisticsHistograms``, ``queryBoundary``, and a full client
+   for the USFS Enterprise Data Warehouse.
+
+   The move, function by function::
+
+       geeViz.esriLib.searchPortal        -> georest.restesri.portal.searchPortal
+       geeViz.esriLib.getServiceMetadata  -> georest.restesri.portal.getServiceMetadata
+
+   The signatures match, so the change is the import line.
+
+   The ``addEsri*Service`` functions are NOT going to georest: they add
+   layers to a geeViz ``Map``, which is geeViz's concern, not a REST
+   client's. They stay available here (and as ``Map.addEsri*``) and now
+   do their REST work through georest.
 
 Bridges three Esri service types into the existing geeViz viewer with no
 JavaScript changes required.  The viewer already supports both
@@ -61,6 +84,7 @@ You may obtain a copy of the License at
 from __future__ import annotations
 
 import json
+import warnings
 import time
 import urllib.error
 import urllib.parse
@@ -134,50 +158,72 @@ _DATA_ONLY_EXCLUSIONS: list[str] = [
 _TIMEOUT = 30  # seconds
 
 
-def _fetch_json(url: str, params: dict | None = None) -> dict:
-    """GET a URL and return parsed JSON.  Raises ``urllib.error.URLError`` on
-    network failure, ``ValueError`` on non-JSON response.
+#: Functions already warned about, so a loop calling one does not emit
+#: the same notice a thousand times. A deprecation is a message to the
+#: person reading the code, not a running cost.
+_WARNED: set[str] = set()
 
-    LOCAL PATCH (2026-09-01): retry transient network failures. Measured on
-    hazards.fema.gov: 2 of 8 TLS handshakes were reset (WinError 10054, in
-    bursts), so a single-attempt fetch loses a coin-flip fraction of map
-    draws while the data path (esri_paging, which retries) succeeds on the
-    same layer in the same conversation. Mirrors esri_paging: two retries,
-    backoff, transient statuses only.
+
+def _deprecated(name: str, replacement: str) -> None:
+    """Warn once that ``name`` has moved to ``replacement``.
+
+    ``DeprecationWarning`` is hidden by default in scripts, which is
+    right: this must not spam a notebook that happens to call a geeViz
+    map helper. Anyone running with ``-W default`` or pytest sees it.
     """
+    if name in _WARNED:
+        return
+    _WARNED.add(name)
+    warnings.warn(
+        f"geeViz.esriLib.{name} is deprecated and now delegates to "
+        f"{replacement}. geeViz.esriLib will be removed in a future "
+        f"release; import georest directly.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
+def _fetch_json(url: str, params: dict | None = None) -> dict:
+    """GET a URL and return parsed JSON, via :mod:`georest`.
+
+    The body that used to live here — urlopen, the three-attempt retry
+    on transient statuses, the JSON decode with the response body in the
+    error — is now georest's, and georest is the maintained copy. This
+    is the same code path the retry patch of 2026-09-01 added, kept
+    working for the ``addEsri*`` callers below while they still exist.
+
+    Raises the same things it always did: ``urllib.error.URLError`` on
+    network failure, ``ValueError`` on a non-JSON response.
+    """
+    from georest.restesri import _http as _gh
+
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
+    # _check_url stays on this side: it is geeViz's SSRF guard, and the
+    # url is fully built by the time it runs.
     _check_url(url)
-    req = urllib.request.Request(url, headers={"User-Agent": "geeViz/esriLib"})
-    last_exc: Exception = urllib.error.URLError("no attempt made")
-    for attempt in range(3):
-        if attempt:
-            time.sleep(attempt)  # 1 s, then 2 s
-        try:
-            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-                raw = resp.read().decode("utf-8")
-            break
-        except urllib.error.HTTPError as exc:
-            if exc.code not in (429, 500, 502, 503, 504):
-                raise
-            last_exc = exc
-        except (urllib.error.URLError, ConnectionResetError, TimeoutError) as exc:
-            last_exc = exc
-    else:
-        raise last_exc
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"Expected JSON from {url!r} but got:\n{raw[:400]}"
-        ) from exc
+        return _gh.fetch_json(url)
+    except ValueError:
+        # A non-JSON body. Same meaning on both sides — pass it through
+        # rather than flattening it into the network case.
+        raise
+    except RuntimeError as exc:
+        # georest reports an unreachable host or a bad HTTP status as
+        # RuntimeError; this module has always documented and raised
+        # ConnectionError, and callers catch that. Delegation must not
+        # silently change which exception a caller has to handle, so
+        # translate at the boundary rather than rewriting the contract
+        # of a module people already depend on.
+        raise ConnectionError(str(exc)) from exc
+    except urllib.error.URLError as exc:
+        raise ConnectionError(str(exc)) from exc
 
 
 def _build_params(base: dict, token: str | None) -> dict:
-    """Merge ``token`` into a params dict if supplied."""
-    if token:
-        return {**base, "token": token}
-    return base
+    """Merge ``token`` into a params dict if supplied. Delegates."""
+    from georest.restesri import _http as _gh
+    return _gh.build_params(base, token)
 
 
 def _resolve_portal(portal: str) -> str:
@@ -281,59 +327,12 @@ def searchPortal(
         # Raw portal query DSL (bypasses data_only and filters)
         results = el.searchPortal("", raw_q='type:"Feature Service" owner:USGS')
     """
-    base_url = _resolve_portal(portal)
-    search_url = f"{base_url}/sharing/rest/search"
+    _deprecated("searchPortal", "georest.restesri.portal.searchPortal")
+    from georest.restesri import portal as _gp
+    return _gp.searchPortal(
+        query, portal=portal, limit=limit, data_only=data_only,
+        raw_q=raw_q, token=token, **filters)
 
-    # Assemble the query string
-    if raw_q is not None:
-        q = raw_q
-    else:
-        q = query
-        if data_only:
-            exclusions = " ".join(f'-type:"{t}"' for t in _DATA_ONLY_EXCLUSIONS)
-            q = f"{q} {exclusions}".strip()
-
-    params: dict[str, Any] = {
-        "q": q,
-        "num": min(max(1, limit), 100),
-        "f": "json",
-        **filters,
-    }
-    if token:
-        params["token"] = token
-
-    try:
-        data = _fetch_json(search_url, params)
-    except urllib.error.URLError as exc:
-        raise ConnectionError(
-            f"Could not reach portal at {search_url!r}: {exc}"
-        ) from exc
-
-    items = data.get("results", [])
-    parsed = []
-    for item in items:
-        thumb = item.get("thumbnail")
-        if thumb:
-            thumb = f"{base_url}/sharing/rest/content/items/{item.get('id', '')}/info/{thumb}"
-        parsed.append({
-            "id": item.get("id", ""),
-            "title": item.get("title", ""),
-            "type": item.get("type", ""),
-            "snippet": item.get("snippet", ""),
-            "tags": item.get("tags", []),
-            "url": item.get("url", ""),
-            "owner": item.get("owner", ""),
-            "created": item.get("created"),
-            "modified": item.get("modified"),
-            "thumbnail": thumb,
-            "_raw": item,
-        })
-    return parsed
-
-
-# ---------------------------------------------------------------------------
-# Service metadata
-# ---------------------------------------------------------------------------
 
 def getServiceMetadata(url: str, token: str | None = None) -> dict[str, Any]:
     """Fetch and return the JSON metadata for any ArcGIS REST service.
@@ -378,19 +377,18 @@ def getServiceMetadata(url: str, token: str | None = None) -> dict[str, Any]:
         meta = el.getServiceMetadata("https://.../FeatureServer/0")
         print([f["name"] for f in meta.get("fields", [])])
     """
-    clean_url = url.rstrip("/")
-    params = _build_params({"f": "json"}, token)
+    _deprecated("getServiceMetadata",
+                "georest.restesri.portal.getServiceMetadata")
+    from georest.restesri import portal as _gp
+    _check_url(url)
     try:
-        return _fetch_json(clean_url, params)
-    except urllib.error.URLError as exc:
-        raise ConnectionError(
-            f"Could not reach service at {clean_url!r}: {exc}"
-        ) from exc
+        return _gp.getServiceMetadata(url, token=token)
+    except (RuntimeError, urllib.error.URLError) as exc:
+        # Same translation as _fetch_json, and for the same reason: this
+        # function has always raised ConnectionError for an unreachable
+        # service, and delegating must not change what a caller catches.
+        raise ConnectionError(str(exc)) from exc
 
-
-# ---------------------------------------------------------------------------
-# Service-type detection
-# ---------------------------------------------------------------------------
 
 def _detect_service_type(url: str, meta: dict | None = None) -> str:
     """Return the service type string for *url*.
