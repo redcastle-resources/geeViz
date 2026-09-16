@@ -55,6 +55,13 @@ import time as _time
 from dataclasses import dataclass, field, asdict
 from typing import Any
 
+# LLM usage reporting. Imported at module scope on purpose: a
+# call-time import of this from inside a function deadlocked the MCP
+# server, whose prewarm thread holds the geeViz import lock while a
+# tool call is being served. llmUsage is stdlib-only and imports
+# nothing from geeViz, so this is free and cannot cycle.
+from geeViz import llmUsage as _lu
+
 
 def _log(msg: str, verbose: bool = True) -> None:
     """Emit a progress message with a flushed newline.
@@ -779,13 +786,14 @@ async def _call_gemini_batch(
 
     text = response.text or ""
     records = _parse_inventory_json(text)
-    # Extract token counts
-    um = getattr(response, "usage_metadata", None)
+    # Token counts, in the one vocabulary the whole stack speaks. These
+    # were ``input_tokens`` / ``output_tokens`` / ``thought_tokens``
+    # here and something else again in googleMapsLib, for the same four
+    # numbers off the same response object.
+    _usage = _lu.report(_lu.usage_from_response(
+        response, model=model, source="geeviz.inventory.batch"))
     meta = {
-        "input_tokens": getattr(um, "prompt_token_count", None),
-        "output_tokens": getattr(um, "candidates_token_count", None),
-        "thought_tokens": getattr(um, "thoughts_token_count", None),
-        "total_tokens": getattr(um, "total_token_count", None),
+        **_usage,
         "sample_count": len(batch),
         "sample_ids": [s.sample_id for s in batch],
         # Full raw prompt + response for downstream transparency
@@ -904,9 +912,9 @@ async def _run_all_batches(
                 else:
                     _log(f"[{stage}]   ✓ batch {batch_idx+1}/{len(batches)}: "
                          f"{len(records)} sample records, "
-                         f"in={meta.get('input_tokens') or 0:,} "
-                         f"out={meta.get('output_tokens') or 0:,} "
-                         f"thoughts={meta.get('thought_tokens') or 0:,} "
+                         f"in={meta.get('prompt_tokens') or 0:,} "
+                         f"out={meta.get('candidates_tokens') or 0:,} "
+                         f"thoughts={meta.get('thoughts_tokens') or 0:,} "
                          f"total={meta.get('total_tokens') or 0:,} "
                          f"({_fmt_dur(dt)})", verbose)
                 return records, meta
@@ -990,6 +998,11 @@ async def _consolidate_taxonomy(
             _lines = text.splitlines()
             if len(_lines) >= 3:
                 text = "\n".join(_lines[1:-1])
+        # Reported even though this helper returns only the mapping:
+        # a call whose tokens are never mentioned is a call nobody is
+        # billed for, and consolidation runs on every inventory.
+        _lu.report(_lu.usage_from_response(
+            response, model=model, source="geeviz.inventory.consolidate"))
         mapping = _json.loads(text)
         if isinstance(mapping, dict):
             return {k: str(v).strip().lower() for k, v in mapping.items()}
@@ -1525,7 +1538,7 @@ def _hash_color(name: str) -> str:
 
 def _generate_category_colors(
     categories: list[str],
-    model: str = "gemini-3.5-flash",
+    model: str = _lu.DEFAULT_MODEL,
 ) -> dict[str, str]:
     """Ask Gemini for a semantic hex color per category (green for
     plants, grey for pavement, blue for water, …). Failure — network,
@@ -1568,6 +1581,10 @@ def _generate_category_colors(
             contents=prompt,
             config={"temperature": 0.0, "response_mime_type": "application/json"},
         )
+        # Small call, but it runs once per inventory report and was the
+        # last geeViz Gemini call reporting nothing.
+        _lu.report(_lu.usage_from_response(
+            resp, model=model, source="geeviz.inventory.colors"))
         text = (getattr(resp, "text", None) or "").strip()
         parsed = _json.loads(text)
         result_colors = {}
@@ -1850,9 +1867,9 @@ def _render_html_report(result: dict, output_path: str) -> str:
         stage = b.get("stage", "?")
         bn = b.get("batch_number", i + 1)
         sids = b.get("sample_ids", [])
-        toks = (f"in={b.get('input_tokens') or 0:,} "
-                f"out={b.get('output_tokens') or 0:,} "
-                f"thoughts={b.get('thought_tokens') or 0:,} "
+        toks = (f"in={b.get('prompt_tokens') or 0:,} "
+                f"out={b.get('candidates_tokens') or 0:,} "
+                f"thoughts={b.get('thoughts_tokens') or 0:,} "
                 f"total={b.get('total_tokens') or 0:,}")
         err = b.get("error")
         summary = (
@@ -1895,7 +1912,7 @@ def _render_html_report(result: dict, output_path: str) -> str:
     _cats = [r["category"] for r in inv]
     _colors = result.get("category_colors")
     if not _colors:
-        _colors = _generate_category_colors(_cats, model=md.get("model", "gemini-3.5-flash"))
+        _colors = _generate_category_colors(_cats, model=md.get("model", _lu.DEFAULT_MODEL))
         result["category_colors"] = _colors
         md["category_colors"] = _colors
     composition_html = _render_composition_charts_html(inv, _colors)
@@ -2105,9 +2122,9 @@ def _render_md_report(result: dict, output_path: str) -> str:
             f"- Samples: {b.get('sample_ids')}"
         )
         L.append(
-            f"- Tokens: in={b.get('input_tokens') or 0:,} "
-            f"out={b.get('output_tokens') or 0:,} "
-            f"thoughts={b.get('thought_tokens') or 0:,} "
+            f"- Tokens: in={b.get('prompt_tokens') or 0:,} "
+            f"out={b.get('candidates_tokens') or 0:,} "
+            f"thoughts={b.get('thoughts_tokens') or 0:,} "
             f"total={b.get('total_tokens') or 0:,}"
         )
         L.append(f"- Duration: {b.get('duration_s', 0)}s")
@@ -2151,7 +2168,7 @@ def inventory_area(
     size: str = "640x480",
     categories: list[str] | None = None,
     max_samples_per_call: int = 20,
-    model: str = "gemini-3.5-flash",
+    model: str = _lu.DEFAULT_MODEL,
     temperature: float = 0.2,
     reliability_fraction: float = 0.2,
     reliability_temperature: float = 1.0,
@@ -2204,7 +2221,8 @@ def inventory_area(
             consolidation pass.
         max_samples_per_call: Cap on samples per Gemini batch call.
             Defaults to ``20``. Batches run concurrently.
-        model: Gemini model. Defaults to ``"gemini-3.5-flash"``.
+        model: Gemini model. Defaults to
+            :data:`geeViz.llmUsage.DEFAULT_MODEL`.
         temperature: Sampling temperature for the primary inventory
             call. Defaults to ``0.2`` for repeatability.
         reliability_fraction: Fraction of samples to re-interpret at

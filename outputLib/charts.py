@@ -1622,7 +1622,25 @@ def prepare_for_reduction(ee_obj, obj_info, x_axis_property="system:time_start",
         # below (EE band names reject ":"). Fall back to "YYYY".
         _df = date_format or "YYYY"
         if x_axis_property in ("year", "date", "system:time_start"):
-            ic = ic.map(lambda img: img.set("year", img.date().format(_df)))
+            # ...and sanitize a CALLER-SUPPLIED format for the same
+            # reason. The None case was handled; an explicit
+            # "YYYY-MM-dd HH:mm" -- the obvious thing to pass for
+            # sub-daily data -- was not, and died on
+            # ``Image.rename: Invalid band name:
+            # '2026-09-14 18:00----temperature_2m'``. That reads as a
+            # data problem rather than a formatting one, and the
+            # alternative is worse: the "YYYY" default silently
+            # collapses 31 hourly forecast steps into ONE row, which is
+            # a wrong chart rather than an error.
+            #
+            # Done here, on the property itself, so the labels and the
+            # band names derive from the same sanitized string and the
+            # ``label + "----" + band`` lookup in
+            # parse_continuous_results still matches. Formats that were
+            # already legal are untouched.
+            ic = ic.map(lambda img: img.set(
+                "year", img.date().format(_df)
+                           .replace("[: ]", "_", "g")))
             if x_axis_property in ("date", "system:time_start"):
                 x_axis_property = "year"
 

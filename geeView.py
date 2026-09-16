@@ -1327,6 +1327,26 @@ class mapper:
         if "layerType" not in viz.keys():
             viz["layerType"] = self.typeLookup[imageType]
 
+        # A wind-particle layer ALWAYS leaves here carrying the u/v tile
+        # stretch, whoever built it.
+        #
+        # The browser decodes wind components out of the red and green
+        # channels of these tiles, which it can only do if it knows the
+        # exact range they were encoded with. wind-particles.js keeps a
+        # fallback copy of that range, but a fallback is the wrong place
+        # for it to come from: if the two ever disagree the decode does
+        # not fail, it returns winds wrong by a scale and an offset —
+        # which still look like weather, so nothing reports it.
+        #
+        # Setting it here rather than only in weather.addWindLayer means
+        # a hand-rolled ``Map.addLayer(tiles, {"windParticles": True})``
+        # is covered too.
+        if viz.get("windParticles"):
+            from geeViz.weather import WIND_TILE_MIN_MS, WIND_TILE_MAX_MS
+
+            viz.setdefault("windTileMin", WIND_TILE_MIN_MS)
+            viz.setdefault("windTileMax", WIND_TILE_MAX_MS)
+
         if not isinstance(image, dict):
             idDict["_ee_obj"] = image  # keep original for testLayers()
             idDict["_viz"] = dict(viz)  # keep original viz for testLayers()
@@ -1355,6 +1375,7 @@ class mapper:
         visible: bool = True,
         opacity: float = 1.0,
         max_zoom: int = 20,
+        legend: dict | None = None,
     ):
         """Add an external XYZ tile service (or any URL-templated raster
         service) to the map without leaving geeViz for Leaflet/Mapbox.
@@ -1419,6 +1440,18 @@ class mapper:
                                "opacity": float(opacity),
                                "maxZoom": int(max_zoom)}),
         }
+        # LOCAL PATCH tile legend v2 (2026-09-02): a {label: '#rrggbb'} legend
+        # becomes the viewer's classLegendDict (hex without '#'), so the
+        # legend panel shows swatches instead of a min/max grey ramp.
+        # See patches/apply_tile_legend_patch.py.
+        if legend:
+            if not isinstance(legend, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in legend.items()
+            ):
+                raise ValueError("legend must be a {label: '#rrggbb'} dict")
+            viz = json.loads(idDict["viz"])
+            viz["classLegendDict"] = {k: v.lstrip("#") for k, v in legend.items()}
+            idDict["viz"] = json.dumps(viz)
         idDict["workloadTag"] = self._capture_workload_tag()
         self.idDictList.append(idDict)
 
@@ -1528,21 +1561,26 @@ class mapper:
     def addEsriImageService(self, url_or_result, viz_params=None, name=None, token=None):
         """See ``geeViz.esriLib.addEsriImageService``. Delegates."""
         from geeViz import esriLib as _el
-        return _el.addEsriImageService(url_or_result, viz_params=viz_params, name=name, token=token)
+        # LOCAL PATCH (2026-08-28): pass self, or the layer lands on gv.Map.
+        return _el.addEsriImageService(url_or_result, viz_params=viz_params, name=name, token=token, target_map=self)
 
     def addEsriMapService(self, url_or_result, name=None, token=None, viz_params=None):
         """See ``geeViz.esriLib.addEsriMapService``. Delegates. If the
         service is dynamic (non-cached), esriLib now falls back to
         ``Map.addDynamicMapService`` internally instead of raising."""
         from geeViz import esriLib as _el
-        return _el.addEsriMapService(url_or_result, name=name, token=token, viz_params=viz_params)
+        # LOCAL PATCH (2026-08-28): pass self, or the layer lands on gv.Map.
+        return _el.addEsriMapService(url_or_result, name=name, token=token, viz_params=viz_params, target_map=self)
 
     def addEsriFeatureService(self, url_or_result, viz_params=None, name=None,
-                              max_features=1000, where="1=1", token=None):
+                              max_features=1000, where="1=1", token=None,
+                              bbox=None):
         """See ``geeViz.esriLib.addEsriFeatureService``. Delegates."""
         from geeViz import esriLib as _el
+        # LOCAL PATCH (2026-08-28): pass self, or the layer lands on gv.Map.
         return _el.addEsriFeatureService(url_or_result, viz_params=viz_params, name=name,
-                                          max_features=max_features, where=where, token=token)
+                                          max_features=max_features, where=where, token=token,
+                                          target_map=self, bbox=bbox)
 
     def addEsriService(self, url_or_result, viz_params=None, name=None, token=None,
                        max_features=1000, where="1=1"):
@@ -1550,8 +1588,9 @@ class mapper:
         service type from URL / metadata and delegates to the right
         add-helper."""
         from geeViz import esriLib as _el
+        # LOCAL PATCH (2026-08-28): pass self, or the layer lands on gv.Map.
         return _el.addEsriService(url_or_result, viz_params=viz_params, name=name, token=token,
-                                   max_features=max_features, where=where)
+                                   max_features=max_features, where=where, target_map=self)
 
     ######################################################################
     # Function for adding a layer to the map
@@ -2027,7 +2066,7 @@ class mapper:
                     return (s or "").replace("\\", "\\\\").replace('"', '\\"')
                 lines += (
                     'try{{addDynamicToMap("{b1}","{b2}","{e1}","{e2}",'
-                    '{z1},{z2},"{name}",{visible},"","layer-list");}}'
+                    '{z1},{z2},"{name}",{visible},"","#layer-list");}}'
                     'catch(e){{layerLoadErrorMessages.push('
                     '"Dynamic MapService \\"{name}\\" failed: "+e.message);}}'
                 ).format(
@@ -2057,14 +2096,23 @@ class mapper:
                 )
                 # addREST signature: (tileURLFunction, name, visible, maxZoom, helpBox, whichLayerList)
                 # Wrap in a try/catch so a single bad URL can't break the whole map load.
+                # LOCAL PATCH tile v1 (2026-09-02): Map.addREST builds a
+                # <REST-layer> element the viewer never defines, so
+                # layer.setLayer is not a function and no tile is ever
+                # requested (measured in Chrome: 0 requests). The
+                # tileMapService branch of addToMap is the path
+                # addFeatureView uses, and it draws - go through
+                # Map.addLayer with that viz. See
+                # patches/apply_tile_layer_patch.py.
                 lines += (
-                    'try{{Map.addREST({fn},"{name}",{visible},{maxZoom},"","layer-list");}}'
+                    # LOCAL PATCH tile legend v2 (2026-09-02): the stored viz, so a legend reaches the page.
+                    'try{{Map.addLayer({fn},{viz},"{name}",{visible});}}'
                     'catch(e){{layerLoadErrorMessages.push("Tile layer \\"{name}\\" failed: "+e.message);}}'
                 ).format(
                     fn=tile_url_fn,
                     name=idDict["name"].replace('"', '\\"'),
                     visible=str(idDict["visible"]).lower(),
-                    maxZoom=idDict.get("_tile_max_zoom", 20),
+                    viz=idDict["viz"],
                 )
                 continue
 
@@ -2166,6 +2214,20 @@ class mapper:
 
         with open(template, "r", encoding="utf-8") as f:
             html = f.read()
+
+        # LOCAL PATCH (2026-09-03): the template hard-codes geeViz's own
+        # Google Maps key, which is HTTP-referrer-restricted to geeViz's
+        # domains (plus localhost - which is why every local test passes
+        # and every OTHER deployment fails with RefererNotAllowedMapError,
+        # a blank grey map, and a console pointing at a key the deployer
+        # does not own). If the standard env var names a key, stamp it
+        # into the page instead; otherwise behave exactly as before.
+        _maps_key = os.environ.get("GOOGLE_MAPS_PLATFORM_API_KEY", "").strip()
+        if _maps_key:
+            import re as _re_key  # self-contained: geeView has no module-level re
+            html = _re_key.sub(
+                r"(maps\.googleapis\.com/maps/api/js\?key=)AIza[\w-]+",
+                r"\g<1>" + _maps_key, html)
 
         # Inject <base href> so any RELATIVE URLs the geeView JS injects at
         # runtime (icons, palette images, etc.) resolve to the asset base
@@ -2604,6 +2666,56 @@ class mapper:
             self.eeAuthMode = m
         else:
             self.eeAuthMode = None
+
+    def addWindLayer(self, image: ee.Image, viz: dict = {}, name: str = "Wind", visible: bool = True):
+        """Add a wind field: a queryable speed raster plus animated particles.
+
+        Two layers, in the style of windy.com — a smooth speed raster
+        carrying the reading, with particle trails over it showing the
+        flow. The particles are advected from wind components decoded
+        out of Earth Engine PNG tiles, so they follow the map anywhere
+        you pan rather than being confined to a region fixed up front.
+
+        Args:
+            image (ee.Image): Image whose bands include the wind
+                components.
+            viz (dict): Follows ``addLayer``'s conventions.
+
+                * ``bands`` (list or comma-separated str): the dx/dy
+                  components. Defaults to the image's FIRST TWO bands,
+                  in order — by position, because every product names
+                  them differently.
+                * ``units`` (str): ``"km/hr"`` (default), ``"m/s"`` or
+                  ``"mi/hr"``.
+                * ``min`` / ``max``: speed stretch. ``max`` defaults per
+                  UNIT (15 m/s, 54 km/h, 34 mi/h), so switching units
+                  cannot leave the raster one flat colour.
+                * ``palette`` (list or comma-separated str): speed ramp.
+                * ``particleColor`` (str): trail colour, default
+                  ``"#fff"``.
+                * ``particleCount``, ``particleSpeedFactor``,
+                  ``particleMaxAge``, ``particleTrailPersistence``,
+                  ``particleLineWidth``, ``particleOpacity``: animation
+                  feel.
+                * ``directionConvention`` (str): ``"from"`` (default,
+                  meteorological — 270 is a westerly) or ``"to"``.
+            name (str): Base name; the two layers are suffixed
+                ``" speed"`` and ``" particles"``.
+            visible (bool): Initial visibility of both.
+
+        Returns:
+            tuple: ``(speed_direction_image, encoded_tiles_image)``.
+
+        >>> import geeViz.weather as wx
+        >>> ic = wx.getForecastData("2026-09-11", "2026-09-12", "gfs")
+        >>> Map.addWindLayer(ee.Image(ic.first()), {"units": "mi/hr"})
+        """
+        # Imported lazily: geeViz.weather pulls in geeViz.fireLib, and
+        # geeView is imported by everything. Nothing pays for it unless
+        # this method is actually called.
+        from geeViz.weather import addWindLayer as _addWindLayer
+
+        return _addWindLayer(self, image, viz, name=name, visible=visible)
 
     def clearMap(self):
         """

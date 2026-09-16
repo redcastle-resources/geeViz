@@ -315,8 +315,38 @@ def build_proxy_router(
             return creds
         return get_registry()
 
+    def _example_project(src, tenant):
+        """An EE project id the reader can paste, if one is knowable.
+
+        Every worked example needs a project in the path, and
+        ``<your-project>`` in a curl line is the difference between a
+        command that runs and one that returns 404 to someone who is
+        already unsure whether the proxy works.
+        """
+        for attr in ("project_for", "get_project"):
+            try:
+                got = getattr(src, attr)(tenant)
+                if got:
+                    return str(got)
+            except Exception:
+                pass
+        try:
+            import ee as _ee
+            got = _ee.data._cloud_api_user_project
+            if got:
+                return str(got)
+        except Exception:
+            pass
+        return "&lt;your-ee-project&gt;"
+
     router = APIRouter()
 
+    # Both spellings, because FastAPI answers the one without the
+    # trailing slash with a 307 and an EMPTY BODY. A browser follows it
+    # and nobody notices; curl, Insomnia and Postman do not follow by
+    # default, so `GET /ee-api` -- the obvious thing to try by hand --
+    # renders as a blank response from an apparently dead server.
+    @router.get("", response_class=HTMLResponse, include_in_schema=False)
     @router.get("/", response_class=HTMLResponse, include_in_schema=False)
     async def index(request: Request) -> HTMLResponse:
         """Human-friendly landing page — served when someone visits
@@ -343,6 +373,12 @@ def build_proxy_router(
 
         base = str(request.url).rstrip("/")
         health_url = f"{base}/health"
+        # Copy-pasteable examples beat correct-but-abstract ones, so the
+        # snippets below use a tenant that is actually registered here
+        # rather than <tenant-name>. Falls back to a placeholder only
+        # when nothing is registered yet.
+        example_tenant = tenants[0] if tenants else "<tenant-name>"
+        example_project = _example_project(src, example_tenant)
         tenant_rows = (
             "".join(f"<li><code>{_html_escape(t)}</code></li>" for t in tenants)
             if tenants
@@ -417,6 +453,19 @@ def build_proxy_router(
 </table>
 <p class="muted">Legacy aliases: <code>auto</code> → <code>attached</code>, <code>proxy</code> → <code>attached_strict</code>.</p>
 
+<h2>Picking a tenant</h2>
+<p class="muted">Three ways, any of which works on every endpoint below.
+Omit all three and the default credential is used.</p>
+<table>
+  <tr><th>Form</th><th>Looks like</th></tr>
+  <tr><td>Header</td><td><code>{_html_escape(tenant_header)}: {_html_escape(example_tenant)}</code></td></tr>
+  <tr><td>URL path</td><td><code>{_html_escape(base)}/t/{_html_escape(example_tenant)}/v1/…</code></td></tr>
+  <tr><td>Query param</td><td><code>?{_html_escape(tenant_query_param)}={_html_escape(example_tenant)}</code></td></tr>
+</table>
+<p class="muted">The path form is the one browser tabs use, because a
+tenant in the URL needs no header and so survives an <code>&lt;img&gt;</code>
+tag fetching a map tile.</p>
+
 <h2>Use it from Python</h2>
 <pre>from geeViz.eeAuth import initialize_via_proxy
 initialize_via_proxy("{_html_escape(base)}")
@@ -424,8 +473,108 @@ import ee
 ee.Number(1).getInfo()  # → routes through this proxy</pre>
 
 <h2>Use it from curl</h2>
-<pre>curl -H "{_html_escape(tenant_header)}: &lt;tenant-name&gt;" \\
+<p class="muted">Liveness — no credential needed, and the fastest way to
+tell "proxy is up" from "proxy is wedged":</p>
+<pre>curl {_html_escape(health_url)}</pre>
+
+<p class="muted">A real server-side computation. This is
+<code>2 + 40</code> evaluated by Earth Engine, not locally:</p>
+<pre>curl -X POST {_html_escape(base)}/v1/projects/{_html_escape(example_project)}/value:compute \\
+  -H "Content-Type: application/json" \\
+  -H "{_html_escape(tenant_header)}: {_html_escape(example_tenant)}" \\
+  -d '{{"expression":{{"result":"0","values":{{"0":{{
+        "functionInvocationValue":{{"functionName":"Number.add","arguments":{{
+          "left":{{"constantValue":2}},"right":{{"constantValue":40}}}}}}}}}}}}}}'
+# → {{ "result": 42 }}</pre>
+
+<p class="muted">Anything in the EE REST API works the same way — the
+proxy only adds the bearer token:</p>
+<pre>curl -H "{_html_escape(tenant_header)}: {_html_escape(example_tenant)}" \\
   {_html_escape(base)}/v1/projects/earthengine-legacy/algorithms</pre>
+
+<h2>Use it from Insomnia / Postman / Bruno</h2>
+<ol>
+  <li>Set the environment's base URL to <code>{_html_escape(base)}</code>.</li>
+  <li>Add a header <code>{_html_escape(tenant_header)}</code> =
+      <code>{_html_escape(example_tenant)}</code> at the environment or
+      folder level, so every request inherits it.</li>
+  <li><strong>Leave authentication set to None.</strong> The proxy mints
+      the token; a bearer token you add yourself is passed through and
+      will be rejected upstream.</li>
+  <li>Enable "follow redirects" if you want to hit
+      <code>{_html_escape(base)}</code> with no trailing path — otherwise
+      you get an empty 307.</li>
+</ol>
+<pre>POST {{{{baseUrl}}}}/v1/projects/{_html_escape(example_project)}/value:compute
+{_html_escape(tenant_header)}: {_html_escape(example_tenant)}
+Content-Type: application/json
+
+{{"expression":{{"result":"0","values":{{"0":{{"constantValue":42}}}}}}}}</pre>
+
+<h2>Use it from Node.js</h2>
+<p class="muted">No SDK and no credentials — <code>fetch</code> is built
+in from Node 18.</p>
+<pre>const BASE = "{_html_escape(base)}";
+const TENANT = "{_html_escape(example_tenant)}";
+
+const res = await fetch(
+  `${{BASE}}/v1/projects/{_html_escape(example_project)}/value:compute`, {{
+    method: "POST",
+    headers: {{
+      "Content-Type": "application/json",
+      "{_html_escape(tenant_header)}": TENANT,
+    }},
+    body: JSON.stringify({{
+      expression: {{ result: "0", values: {{ "0": {{ constantValue: 42 }} }} }},
+    }}),
+  }});
+console.log(await res.json());   // {{ result: 42 }}</pre>
+
+<h2>Use it from Express</h2>
+<p class="muted">Re-expose the proxy to your own front end so browser
+JavaScript can call Earth Engine <em>without ever holding a token</em> —
+the token stays on this process, and your server decides which tenant a
+given user is allowed to spend.</p>
+<pre>import express from "express";
+
+const app = express();
+const BASE = "{_html_escape(base)}";
+
+app.use(express.json({{ limit: "10mb" }}));
+
+// Map the signed-in user to a tenant SERVER-SIDE. Never take the tenant
+// from the client: it names whose EE quota the call spends.
+const tenantFor = (req) =&gt; req.session?.tenant ?? "{_html_escape(example_tenant)}";
+
+app.use("/ee", async (req, res) =&gt; {{
+  const upstream = await fetch(BASE + req.url, {{
+    method: req.method,
+    headers: {{
+      "Content-Type": "application/json",
+      "{_html_escape(tenant_header)}": tenantFor(req),
+    }},
+    body: req.method === "GET" ? undefined : JSON.stringify(req.body),
+  }});
+  // arrayBuffer, not text: computePixels and maps:getMap return binary.
+  const buf = Buffer.from(await upstream.arrayBuffer());
+  res.status(upstream.status)
+     .type(upstream.headers.get("content-type") ?? "application/json")
+     .send(buf);
+}});
+
+app.listen(3000);</pre>
+<p class="muted">Inside <code>app.use("/ee", …)</code> Express has already
+stripped the mount path, so <code>req.url</code> is what to forward —
+<code>req.originalUrl</code> would send <code>/ee</code> upstream too.</p>
+
+<h2>Use it from the Earth Engine JavaScript SDK</h2>
+<p class="muted">The SDK sends every REST call to whatever
+<code>authProxyAPIURL</code> holds, so pointing it here is the whole
+integration. Set it <strong>before</strong> <code>ee.initialize()</code>:</p>
+<pre>// Path form, so map tiles fetched by &lt;img&gt; carry the tenant too.
+authProxyAPIURL = window.location.origin +
+                  "/ee-api/t/{_html_escape(example_tenant)}";
+ee.initialize(authProxyAPIURL, null, onReady, onError);</pre>
 
 <p class="muted" style="margin-top: 2rem; font-size: 12px;">
   This page renders because the incoming request had no path after
@@ -741,12 +890,37 @@ def create_proxy_app(
         # ``_GeeVizRequestHandler`` served.
         from fastapi.staticfiles import StaticFiles
         import os as _os
+
+        class _NoStoreStatic(StaticFiles):
+            """StaticFiles that refuses to be cached.
+
+            ``Map.view()`` REWRITES ``runGeeViz.js`` in place on every
+            call, so the URL never changes while the content does.
+            Starlette's StaticFiles sends ``last-modified`` and ``etag``
+            but no ``Cache-Control``, and with no explicit directive a
+            browser is free to serve a heuristically-fresh copy without
+            revalidating -- which shows the PREVIOUS map, with no error
+            and nothing in the console.
+
+            geeViz's own request handler already forces no-store for
+            exactly this reason (see ``geeView._GeeVizRequestHandler``);
+            running behind this proxy quietly lost it, and the proxy is
+            the default path.
+            """
+
+            async def get_response(self, path, scope):
+                resp = await super().get_response(path, scope)
+                resp.headers["Cache-Control"] = "no-store, must-revalidate"
+                resp.headers["Pragma"] = "no-cache"
+                resp.headers["Expires"] = "0"
+                return resp
+
         _PKG_DIR = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
         _GEEVIEW_DIR = _os.path.join(_PKG_DIR, "geeView")
         if _os.path.isdir(_GEEVIEW_DIR):
             app.mount(
                 "/geeView",
-                StaticFiles(directory=_GEEVIEW_DIR, html=True),
+                _NoStoreStatic(directory=_GEEVIEW_DIR, html=True),
                 name="geeview-static",
             )
 

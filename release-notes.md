@@ -1,5 +1,101 @@
 # geeViz Release Notes
 
+## 2026.9.2 — September 14, 2026
+
+### geeViz.weather — new module surface
+
+- **`getForecastData` is the one entry point for forecast data**, not a
+  wind function. `variable=` takes `"wind"` (u/v), a `VARIABLES` key, a
+  list of keys, or `None` for the product's own bands. `getVariable` is
+  gone — it overlapped, took a raw collection, and used a second
+  parameter convention.
+- **One time, one name, one unit, whichever model produced the image.**
+  `system:time_start` is the VALID time; the band is the variable key;
+  the value is in its `CANONICAL_UNITS` unit and the image carries a
+  `wx_units` property saying so. u/v in m/s, temperature and dewpoint in
+  C, precipitation mm/hr, humidity and cloud percent, pressure hPa,
+  specific humidity g/kg. `to_celsius` is now `normalize_units` — the
+  old flag was declared and never read, so passing `False` did nothing.
+- **`kt` is a supported speed unit** (`3600/1852` exactly), which is
+  what METAR, TAF, NWS marine and windy.com report wind in.
+- **Terrain downscaling for three more variables** —
+  `downscaleTemperature`, `downscaleDewpoint`, `downscalePrecipitation`,
+  joining `downscaleWind`. All Liston & Elder (2006) MicroMet. Only wind
+  needs a `region`; the others depend on height above the forecast
+  cell's own mean elevation, which is local.
+- **A model table in the module docstring** — resolution, archive start,
+  init cadence, horizon and lead step for all four products, checked
+  against the live collections by `test_model_table.py`.
+
+### geeViz.weather — fixes
+
+- **ECMWF was declared 0.4 degrees; it is 0.25.** Everything that
+  trusted `native_scale_m` sampled ECMWF at 1.6x its real cell.
+- **Runs within one collection do not all reach the same distance.**
+  WeatherNext interleaves 6-hourly inits reaching 360 h with 20 interim
+  hourly inits that stop at 48; ECMWF reaches 360 h from 00/12 and only
+  144 h from 06/18. The newest run is therefore usually one that cannot
+  cover a forward window. `getForecastData` picks the newest run that
+  actually reaches the end of it.
+- **ECMWF precipitation returned an all-zero image, silently.** Its
+  `total_precipitation_sfc` is a running total since initialization and
+  is identically zero at the analysis lead a past window returns. It is
+  now `precipitation_accumulated`, a different quantity, and asking for
+  `precipitation` raises with the reason.
+- **Bicubic resampling overshot bounded fields** — measured over CONUS,
+  cloud cover ran -10.3 to 111.4 percent and precipitation to
+  -1.09 mm/hr. `PHYSICAL_RANGES` clamps them after conversion.
+- **The downscaled fields printed the forecast grid.** The cell-mean
+  elevation was piecewise constant (0.002 m between adjacent pixels
+  inside a cell, up to 986 m at its edge) while the forecast it corrects
+  is bicubic — so the subtraction stamped a checkerboard worth ~8 C onto
+  the output. The reference is now interpolated the same way.
+- `windQueryImage` removed; its one extra capability (`directionUnits`)
+  moved into `windImage`, leaving the module on one parameter
+  convention.
+
+### geeViz.geeView — wind particles
+
+- **Toggling a layer could leave a second copy of another layer's tiles
+  on the map.** The particle module took its encoded u/v raster off the
+  map with `overlayMapTypes.removeAt`, which shifts every higher slot
+  while the `layerId` values addressing them do not move. It now uses
+  `setAt(layerId, null)`, the same call the viewer's own `turnOff`
+  makes.
+- The particle layer has a **legend entry**: a comet swatch in the
+  particle's colour over the layer's own speed ramp at low opacity,
+  drawn from the same numbers the renderer uses.
+
+### geeViz.outputLib.charts
+
+- **Sub-daily collections could not be charted.** The formatted date is
+  used as a band name and Earth Engine rejects `:` and spaces, so
+  `date_format="YYYY-MM-dd HH:mm"` died on `Invalid band name` — while
+  the `"YYYY"` default silently collapsed a 31-step hourly series to one
+  row. Labels are now sanitized where they are made; formats that
+  already worked are unchanged.
+
+### geeViz.eeAuth
+
+- The proxy landing page is served at `/ee-api` as well as `/ee-api/`.
+  Without the trailing slash it was a 307 with an empty body — a browser
+  follows it, curl and Insomnia do not, so the first thing anyone tries
+  by hand looked like a dead server.
+- Worked examples on that page for curl, Insomnia/Postman, Node.js,
+  Express and the Earth Engine JavaScript SDK, using a tenant and
+  project that are actually registered rather than placeholders.
+
+### Examples
+
+- `weather_forecast_examples.ipynb` covers wind particles, variables and
+  units, ensemble percentiles, terrain downscaling, forecast time lapses
+  and real ensemble members.
+- `WeatherNextTimeLapse.py` **removed**, folded into that notebook. It
+  was built on the WeatherNext Graph and Gen collections, both
+  deprecated and both stopped publishing on 2026-07-29 — and because a
+  deprecated Earth Engine id keeps resolving, it exited successfully
+  every time while doing nothing.
+
 ## 2026.8.2 — August 21, 2026
 
 ### geeViz.eeAuth

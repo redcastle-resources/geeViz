@@ -61,6 +61,7 @@ You may obtain a copy of the License at
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -135,13 +136,35 @@ _TIMEOUT = 30  # seconds
 
 def _fetch_json(url: str, params: dict | None = None) -> dict:
     """GET a URL and return parsed JSON.  Raises ``urllib.error.URLError`` on
-    network failure, ``ValueError`` on non-JSON response."""
+    network failure, ``ValueError`` on non-JSON response.
+
+    LOCAL PATCH (2026-09-01): retry transient network failures. Measured on
+    hazards.fema.gov: 2 of 8 TLS handshakes were reset (WinError 10054, in
+    bursts), so a single-attempt fetch loses a coin-flip fraction of map
+    draws while the data path (esri_paging, which retries) succeeds on the
+    same layer in the same conversation. Mirrors esri_paging: two retries,
+    backoff, transient statuses only.
+    """
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
     _check_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": "geeViz/esriLib"})
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-        raw = resp.read().decode("utf-8")
+    last_exc: Exception = urllib.error.URLError("no attempt made")
+    for attempt in range(3):
+        if attempt:
+            time.sleep(attempt)  # 1 s, then 2 s
+        try:
+            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+                raw = resp.read().decode("utf-8")
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (429, 500, 502, 503, 504):
+                raise
+            last_exc = exc
+        except (urllib.error.URLError, ConnectionResetError, TimeoutError) as exc:
+            last_exc = exc
+    else:
+        raise last_exc
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -455,6 +478,7 @@ def addEsriImageService(
     viz_params: dict | None = None,
     name: str | None = None,
     token: str | None = None,
+    target_map=None
 ) -> None:
     """Add an ArcGIS Image Service as an XYZ tile layer to the geeViz map.
 
@@ -517,7 +541,7 @@ def addEsriImageService(
             kw["max_zoom"] = int(viz_params["max_zoom"])
 
     print(f"Adding Esri Image Service: {name}")
-    gv.Map.addTileLayer(tile_url, name=name, **kw)
+    (target_map or gv.Map).addTileLayer(tile_url, name=name, **kw)
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +553,7 @@ def addEsriMapService(
     name: str | None = None,
     token: str | None = None,
     viz_params: dict | None = None,
+    target_map=None,
 ) -> None:
     """Add a cached ArcGIS Map Service as an XYZ tile layer to the geeViz map.
 
@@ -585,7 +610,7 @@ def addEsriMapService(
     if _meta is not None and _meta.get("singleFusedMapCache") is False:
         _name = name or url.rstrip("/").split("/")[-2]
         print(f"Adding Dynamic Esri Map Service: {_name}  ({url})")
-        _gv.Map.addDynamicMapService(
+        (target_map or _gv.Map).addDynamicMapService(
             url,
             name=_name,
             visible=(viz_params or {}).get("visible", True),
@@ -593,7 +618,7 @@ def addEsriMapService(
         )
         return
     # Cached — same tile URL shape as ImageServer
-    addEsriImageService(url_or_result, viz_params=viz_params, name=name, token=token)
+    addEsriImageService(url_or_result, viz_params=viz_params, name=name, token=token, target_map=target_map)
 
 
 # ---------------------------------------------------------------------------
@@ -609,7 +634,9 @@ def addEsriFeatureService(
     name: str | None = None,
     max_features: int = 1000,
     where: str = "1=1",
+    bbox: str | None = None,
     token: str | None = None,
+    target_map=None
 ) -> None:
     """Fetch and add an ArcGIS Feature Service layer as a GeoJSON vector layer.
 
@@ -688,6 +715,18 @@ def addEsriFeatureService(
         "returnCountOnly": "true",
         "f": "json",
     }
+    # LOCAL PATCH (2026-08-28): area filter. Applied to the COUNT as well as
+    # the fetch, so max_features guards the area asked about rather than the
+    # whole layer - FEMA NFHL is 5.8M features nationally, 52 in a 2 km box.
+    _bbox_params = {}
+    if bbox:
+        _bbox_params = {
+            "geometry": bbox,
+            "geometryType": "esriGeometryEnvelope",
+            "inSR": "4326",
+            "spatialRel": "esriSpatialRelIntersects",
+        }
+        count_params.update(_bbox_params)
     if token:
         count_params["token"] = token
 
@@ -725,6 +764,7 @@ def addEsriFeatureService(
         "outSR": "4326",           # always WGS84 so the viewer renders it natively
         "f": "geojson",
     }
+    query_params.update(_bbox_params)
     if token:
         query_params["token"] = token
 
@@ -750,7 +790,7 @@ def addEsriFeatureService(
     # when passed a dict, but be explicit so callers can mix it with other keys.
     viz.setdefault("layerType", "geoJSONVector")
 
-    gv.Map.addLayer(geojson, viz, name)
+    (target_map or gv.Map).addLayer(geojson, viz, name)
 
 
 # ---------------------------------------------------------------------------
@@ -764,6 +804,7 @@ def addEsriService(
     token: str | None = None,
     max_features: int = 1000,
     where: str = "1=1",
+    target_map=None
 ) -> None:
     """Auto-detect the Esri service type and call the appropriate add helper.
 
@@ -799,7 +840,7 @@ def addEsriService(
 
     # Pass the original url_or_result so name resolution works with dicts too
     if stype == "ImageServer":
-        addEsriImageService(url_or_result, viz_params=viz_params, name=name, token=token)
+        addEsriImageService(url_or_result, viz_params=viz_params, name=name, token=token, target_map=target_map)
     elif stype == "FeatureServer":
         addEsriFeatureService(
             url_or_result,
@@ -810,7 +851,7 @@ def addEsriService(
             token=token,
         )
     elif stype == "MapServer":
-        addEsriMapService(url_or_result, name=name, token=token, viz_params=viz_params)
+        addEsriMapService(url_or_result, name=name, token=token, viz_params=viz_params, target_map=target_map)
     else:
         raise ValueError(
             f"Could not determine service type for URL {url!r}.  "

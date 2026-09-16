@@ -70,6 +70,13 @@ import urllib.request
 from typing import Any
 from geeViz._ssrf import check_url as _check_url  # noqa: E402
 
+# LLM usage reporting. Imported at module scope on purpose: a
+# call-time import of this from inside a function deadlocked the MCP
+# server, whose prewarm thread holds the geeViz import lock while a
+# tool call is being served. llmUsage is stdlib-only and imports
+# nothing from geeViz, so this is free and cannot cycle.
+from geeViz import llmUsage as _lu
+
 # ---------------------------------------------------------------------------
 # API key resolution
 # ---------------------------------------------------------------------------
@@ -887,42 +894,34 @@ def _parse_gemini_detections(text: str | None) -> tuple[list[dict], str | None]:
 
 
 def _extract_gemini_metadata(response, model: str, temperature: float,
-                               mode: str | None, prompt_used: str) -> dict[str, Any]:
+                               mode: str | None, prompt_used: str,
+                               source: str = "geeviz.maps") -> dict[str, Any]:
     """Pull tokens / model / temp out of a Gemini ``GenerateContentResponse``.
 
-    Returns a stable metadata dict for the caller. All token fields
-    default to ``None`` when the SDK doesn't populate them (older
-    versions, streaming, or non-thinking models).
+    Returns a stable metadata dict for the caller, and reports the usage
+    half of it to :mod:`geeViz.llmUsage` so a host can account for what
+    this call spent. Token fields are always present and always ints —
+    they used to default to ``None``, which turned a missing count into
+    a ``TypeError`` on whichever display path formatted it next.
+
+    ``source`` names the surface for per-subtype reporting; it is what
+    lets an admin see map labelling spend apart from chat spend.
     """
     meta: dict[str, Any] = {
-        "model": model,
         "temperature": temperature,
         "mode": mode,
         "prompt_used": prompt_used,
     }
 
-    um = getattr(response, "usage_metadata", None)
-    if um is not None:
-        meta["input_tokens"] = getattr(um, "prompt_token_count", None)
-        meta["output_tokens"] = getattr(um, "candidates_token_count", None)
-        meta["thought_tokens"] = getattr(um, "thoughts_token_count", None)
-        meta["cached_tokens"] = getattr(um, "cached_content_token_count", None)
-        meta["total_tokens"] = getattr(um, "total_token_count", None)
-
-        # Modality breakdown: prompt_tokens_details is a list of
-        # PromptTokenCountDetails entries with (modality, token_count).
-        input_text = input_image = None
-        details = getattr(um, "prompt_tokens_details", None) or []
-        for d in details:
-            mod = getattr(d, "modality", None)
-            cnt = getattr(d, "token_count", None)
-            mod_str = str(mod).upper() if mod is not None else ""
-            if "TEXT" in mod_str:
-                input_text = (input_text or 0) + (cnt or 0)
-            elif "IMAGE" in mod_str:
-                input_image = (input_image or 0) + (cnt or 0)
-        meta["input_text_tokens"] = input_text
-        meta["input_image_tokens"] = input_image
+    # Token counts, model and the de-dup id come from the one canonical
+    # extractor so every geeViz surface reports the same field names as
+    # the consumer that bills for them. This function used to spell them
+    # ``input_tokens`` / ``output_tokens`` / ``thought_tokens`` — a
+    # second vocabulary for the same numbers, and a silent field drop at
+    # every hand-off between the two.
+    usage = _lu.usage_from_response(response, model=model, source=source)
+    meta.update(usage)
+    _lu.report(usage)
 
     # Finish reason from the first candidate, if present.
     finish = None
@@ -941,7 +940,7 @@ def interpret_image(
     image_bytes: bytes,
     mode: str = "streetview",
     prompt: str | None = None,
-    model: str = "gemini-3.5-flash",
+    model: str = _lu.DEFAULT_MODEL,
     temperature: float = 0.3,
     context: str | None = None,
 ) -> dict[str, Any]:
@@ -961,7 +960,7 @@ def interpret_image(
         prompt (str, optional): Custom prompt to override the mode's
             default. When ``None``, uses ``_INTERPRET_PROMPTS[mode]``.
         model (str, optional): Gemini model name. Defaults to
-            ``"gemini-3.5-flash"``.
+            :data:`geeViz.llmUsage.DEFAULT_MODEL`.
         temperature (float, optional): Sampling temperature. Defaults to
             ``0.3``.
         context (str, optional): Additional context prepended to the
@@ -973,9 +972,9 @@ def interpret_image(
         - ``description`` (str): Full text description of the image.
         - ``object_counts`` (str): Markdown table of object counts.
         - ``raw_response`` (str): Complete Gemini response text.
-        - ``metadata`` (dict): Token counts (``input_tokens``,
-          ``input_text_tokens``, ``input_image_tokens``,
-          ``output_tokens``, ``thought_tokens``, ``cached_tokens``,
+        - ``metadata`` (dict): Token counts (``prompt_tokens``,
+          ``prompt_text_tokens``, ``prompt_image_tokens``,
+          ``candidates_tokens``, ``thoughts_tokens``, ``cached_tokens``,
           ``total_tokens``), plus ``model``, ``temperature``, ``mode``,
           ``prompt_used``, and ``finish_reason``.
 
@@ -1042,7 +1041,7 @@ def interpret_image(
         "raw_response": raw,
         "metadata": _extract_gemini_metadata(
             response, model=model, temperature=temperature,
-            mode=mode, prompt_used=prompt,
+            mode=mode, prompt_used=prompt, source="geeviz.maps.describe",
         ),
     }
 
@@ -1107,7 +1106,7 @@ def label_image(
     prompt: str | None = None,
     image_context: str | None = None,
     location_str: str = "",
-    model: str = "gemini-3.5-flash",
+    model: str = _lu.DEFAULT_MODEL,
     temperature: float = 0.3,
     max_labels: int = 30,
     font_size: int = 12,
@@ -1140,7 +1139,7 @@ def label_image(
         location_str (str, optional): "At X" location text for the
             header. Empty string skips it.
         model (str, optional): Gemini model. Defaults to
-            ``"gemini-3.5-flash"``.
+            :data:`geeViz.llmUsage.DEFAULT_MODEL`.
         temperature (float, optional): Sampling temperature. Defaults
             to ``0.3``.
         max_labels (int, optional): Maximum objects. Defaults to ``30``.
@@ -1290,6 +1289,7 @@ def label_image(
             **_extract_gemini_metadata(
                 response, model=model, temperature=temperature,
                 mode=mode, prompt_used=prompt_used,
+                source="geeviz.maps.detect",
             ),
             # Surfaced so a silent zero-detection result is visible
             # ("what happened?" → check metadata.parse_error).
@@ -1309,7 +1309,7 @@ def label_streetview(
     size: str = _SV_DEFAULT_SIZE,
     radius: int = 50,
     source: str = "default",
-    model: str = "gemini-3.5-flash",
+    model: str = _lu.DEFAULT_MODEL,
     temperature: float = 0.3,
     max_labels: int = 30,
     font_size: int = 12,

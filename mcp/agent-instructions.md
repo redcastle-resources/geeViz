@@ -81,6 +81,7 @@ When the user says a class of data without naming a specific dataset, use these 
 | "drought" (US) | `GRIDMET/DROUGHT` for PDSI/SPI/EDDI | Not `IDAHO_EPSCOR/GRIDMET` — that's weather, not drought. |
 | DEM / elevation (US) | `USGS/3DEP/10m` (10m CONUS). Global: `NASA/NASADEM_HGT/001`. Always `.resample('bicubic')` before any terrain derivative. | See DEM section below for full rules. |
 | Global land cover | Dynamic World: `GOOGLE/DYNAMICWORLD/V1` (near-real-time, 10m). | Sentinel-2-based, updated continuously. |
+| "wind", "forecast", "weather" (any variable, past or future) | `wx.getForecastData(start, end, model)` — `model` is `"gfs"`, `"euro"` or `"weathernext"` | Never hand-filter these collections; see the Weather section. |
 
 If the user names a specific product ("NLCD 2019", "the 2021 release", "MapBiomas Amazonia"), honor that. The defaults apply to open questions like "map land cover for Austin" — the answer is Annual NLCD, not a stale 2021 snapshot.
 
@@ -109,6 +110,8 @@ If the user names a specific product ("NLCD 2019", "the 2021 release", "MapBioma
 ## REPL namespace — already available, do NOT re-import or re-initialize
 
 `ee`, `Map` (use directly — do NOT call `gv.Map()`), `gv`, `gil`, `sal`, `edw`, `tl`, `rl`, `cl`, `palettes` (geePalettes), `pd`/`pandas`, `np`/`numpy`, `save_file`. `gm` (googleMapsLib) is present when the optional dep loads — check with `env_info(action="namespace")` if unsure.
+
+`wx` / `weather` (forecast weather: wind, temperature, precipitation, humidity from ECMWF, GFS and WeatherNext 3) is bound too. See the Weather section below and `search_codebase(module="weather")`.
 
 `fs` / `fsInsights` (Forest Service data: FIA estimates with sampling error, LCMS land cover) is also bound. `fs.find_attributes` / `fs.find_evaluations` / `fs.estimate` / `fs.lcms_summary` / `fs.compare_area` — see `search_codebase(module="fsInsights")`.
 
@@ -839,3 +842,435 @@ For water, vegetation, snow/ice, bare ground, urban/impervious, clouds, shadows 
 **Not tools — call from `run_code`:** Google Maps Platform helpers (`gm.geocode`, `gm.search_places`, `gm.streetview_*`, `gm.get_static_map`, `gm.get_elevation*`, `gm.get_air_quality`, `gm.get_solar_insights`, `gm.get_timezone`, `gm.snap_to_roads`, `gm.nearest_roads`) live in the `gm` REPL alias when the optional dep is installed. There are no MCP-level wrappers for these — use them inside `run_code`.
 
 <!--GMAPS_AI_STATUS-->
+
+---
+
+## Weather and forecast data — always go through `wx`
+
+**Do not fetch weather data yourself.** No
+`ee.ImageCollection("NOAA/GFS0P25")`, no hand-rolled `filterDate`, no
+band names typed from memory. Every weather question goes through `wx`
+(alias `weather`, module `geeViz.weather`). Full signatures:
+`search_codebase(module="weather")`.
+
+That is not a style preference — a hand-rolled version of this is wrong
+in ways that return data rather than raise:
+
+* **Filters do not coerce types.** WeatherNext stamps its times as ISO
+  strings and GFS as epoch millis; comparing one against the other
+  returns an EMPTY collection, which reads as "no data for that window".
+* **`system:time_start` is the INIT time** on WeatherNext — one value
+  for a whole run — so selecting on it picks a run, not a moment, and a
+  time lapse built on it collapses to one frame.
+* **The latest run usually cannot cover a forward window** (see below).
+* **Band names differ per model and drift over time** within GFS.
+* **Units differ per model**, including Kelvin vs Celsius, and a chart
+  of two models with one unconverted looks like a model blow-up.
+
+`wx` handles all five. It covers **wind, temperature, dewpoint,
+humidity, precipitation, cloud cover, pressure and sea-surface
+temperature** across four products.
+
+**The one entry point is `wx.getForecastData(startDate, endDate, model,
+variable=...)`.** Everything else in the module renders or derives from
+what it returns:
+
+| | |
+|---|---|
+| `getForecastData` | the images, time- name- and unit-normalized |
+| `addWindLayer` | speed raster + animated particles on the map |
+| `windImage` | `speed` / `direction` bands, for querying and charting |
+| `downscaleWind` / `Temperature` / `Dewpoint` / `Precipitation` | terrain sharpening |
+| `weatherLabURL` | a link to DeepMind WeatherLab |
+| `publishes(variable, model)` | whether to even ask |
+| `VARIABLES`, `CANONICAL_UNITS`, `MODELS` | the tables behind all of it |
+
+| model | id | resolution | archive | init | horizon | lead step | access |
+|---|---|---|---|---|---|---|---|
+| `"gfs"` | `NOAA/GFS0P25` | 0.25° (27.8 km) | 2015-04 | every 6h | 384h (16d), every run | 1h to lead 120, then 3h | open |
+| `"euro"` | `ECMWF/NRT_FORECAST/IFS/OPER` | 0.25° (27.8 km) | 2024-11 | every 6h | **360h from 00/12, only 144h from 06/18** | 3h to lead 144, then 6h | open |
+| `"weathernext"` | WeatherNext 3, 0.1° | 0.1° (11.1 km) | 2026-01 | every 1h | **360h from 00/06/12/18, only 48h from the other 20** | 1h | gated |
+| `"weathernext_stations"` | WeatherNext 3, 0.05° | 0.05° (5.6 km) | 2026-01 | every 1h | same split | 1h | gated |
+
+`weathernext` is a 64-member ensemble published **pre-aggregated** —
+`stat=` takes `"mean"` (default) or `"p10" "p25" "p50" "p75" "p90"`. The
+members are not in the collection, so spread is `p90 - p10`, not a
+reduction. `weathernext_stations` is station-head 2 m temperature and
+dewpoint **only — no wind**. Both WeatherNext products are **gated**: an
+account without access gets a permission error, not an empty result.
+
+**Runs in one collection do not all reach the same distance.** That is
+why you must not hand-pick "the latest run" — for WeatherNext, 20 hours
+out of 24 the latest run stops at 48 hours, and a five-day request
+served from it silently returns two days.
+`getForecastData` picks the newest run that actually reaches the end of
+the window. Only GFS is uniform.
+
+**Sizing a request:** frames = window ÷ lead step. Five days of
+WeatherNext at 1h is 120 images; each frame of a time lapse is its own
+tile layer, so thin the leads (`filter(ee.Filter.inList('lead_hours',
+list(range(6, 121, 6))))`) before calling `Map.addTimeLapse`.
+
+### Never filter these collections by hand
+
+`wx.getForecastData(startDate, endDate, model)` exists because the three
+models mark time three different ways, and Earth Engine filters **do not
+coerce types** — comparing an ISO-string property against a number returns
+an EMPTY collection instead of raising. A hand-rolled `filterDate` on these
+products reads as "no data for that window" when it is actually a bug.
+
+It also picks the right images for the question, which a date filter cannot:
+
+* **Past window** — the shortest-lead image from every run initialized in
+  the window (each model's best estimate of what actually happened).
+* **Future window** — one run, the most recent that actually reaches the
+  end of the window. Mixing runs makes the field jump where they disagree.
+* **Window spanning now** — both, seamed at the newest initialization.
+
+`variable=` picks what comes back — it is not a wind-only function:
+
+| `variable` | result |
+|---|---|
+| `'wind'` (default) | `u` / `v` components, what `addWindLayer` and `downscaleWind` take |
+| a `wx.VARIABLES` key | that band, renamed to the key and unit-normalised |
+| a list of keys | several at once |
+| `None` | every band as published, untouched |
+
+**Three things are the same whichever model produced the image**, and that
+is what makes two models subtractable:
+
+| | |
+|---|---|
+| time | `system:time_start` is the **valid** time |
+| name | the band is the `wx.VARIABLES` key |
+| unit | whatever `wx.CANONICAL_UNITS` says |
+
+`temperature_2m` is `temperature_2m_above_ground` in GFS,
+`temperature_2m_sfc` in ECMWF and `temperature_2m_mean` in WeatherNext — and
+the last is Kelvin. You get `temperature_2m` in Celsius from all three.
+Asking a model for something it does not publish raises and names the models
+that do.
+
+Canonical units: **u/v m/s**, temperature and dewpoint **C**, precipitation
+**mm/hr**, humidity **%** (specific humidity **g/kg**, which is the
+convention — it is a mass fraction, not a percentage), cloud cover **%**,
+pressure **hPa**. Each image carries a `wx_units` property saying so, so a
+chart can label itself without consulting the table.
+
+`normalize_units=False` gives the product's own units. `variable=None` is
+never normalized at all: with no table entry, nothing knows what the raw
+bands are in.
+
+Output is a collection with `valid_time`, `lead_hours`, `wx_model`,
+`wx_units`, and `system:time_start` restamped to the VALID time (WeatherNext
+natively puts the INIT time there, so a time lapse built on the raw
+collection collapses to one frame).
+
+An empty window comes back as ONE fully masked image with `lead_hours = -1`,
+not an empty collection — so downstream code cannot die on `.first()`. Check
+that property before reporting numbers.
+
+### Wind on the map — `Map.addWindLayer`
+
+```python
+ic = wx.getForecastData('2026-09-12', '2026-09-14', 'gfs')
+Map.addWindLayer(ee.Image(ic.first()), {'units': 'km/hr'}, 'GFS 10 m wind')
+Map.centerObject(study_area, 6)
+Map.view()
+```
+
+Adds TWO layers, windy.com style: a bicubic-resampled speed raster that
+answers clicks with `speed` and `direction`, and animated particle trails
+over it.
+
+Layer `viz` keys: `units` (`km/hr` default, `m/s`, `mi/hr`, `kt`), `min`/`max`
+(the default max follows the unit, so switching units cannot leave the
+raster one flat colour), `palette` (defaults to `wx.WIND_PALETTE`),
+`directionConvention` (`"from"` default, meteorological — 270 is a westerly).
+
+Particle `viz` keys — all optional, all with sensible defaults:
+
+| group | keys (default) |
+|---|---|
+| color | `particleColor` (`#fff`), `particleOpacity` (0.9) |
+| width | `particleStrokeWeight` (1.1), `particleMinWidth` (0.5px), `particleMaxWidth` (1.65px) |
+| shape | `particleTrailLength` (13), `particleTaper` (2.1), `particleHeadBoost` (1.6), `particleLineCap` (`round`) |
+| speed | `particleSpeed` (0.5 px/frame per m/s at the equator — zoom does not enter into it). The ONLY speed knob: the apparent-speed floor and ceiling are `min`/`max` converted to m/s, so streaks start and stop growing where the colour ramp does. A `min` of 0 becomes 1 m/s, or a light breeze draws a one-pixel dot |
+| lifetime | `particleMinAge` (11.25), `particleMaxAge` (45). A spent particle's trail retracts over `particleTrailLength` frames rather than blinking out |
+| count | `particleDensity` (1.2 per px of canvas width, so ~2000 on a 1700px canvas). No floor or ceiling. `particleCount` overrides outright |
+| layout | `particleLayout` — `random` (default, scattered), `grid` (strict lattice), `randomGrid` (lattice under one random offset). The lattice modes trade scatter for even coverage |
+
+Width: `particleMinWidth`/`particleMaxWidth` are absolute pixel widths at the
+tail and head and default to fractions of `particleStrokeWeight`, so raising
+the weight alone rescales the whole taper. Equal values give a
+constant-width ribbon rather than a comet.
+
+Speed: `particleSpeed` is the only speed knob. The floor and ceiling on
+APPARENT speed are `min`/`max` converted from `units` to m/s, so streaks
+start and stop growing exactly where the colour ramp does. A `min` of 0
+(nearly every wind map) becomes 1 m/s, or a light breeze draws a one-pixel
+dot. They change only how far a dot MOVES — direction is untouched and the
+raster and click query still report the true value, so never read a wind
+speed off a streak length.
+
+Pass `viz={'bands': ['u_band', 'v_band']}` for an image whose wind components
+are not its first two bands.
+
+### DeepMind WeatherLab — `wx.weatherLabURL` (a LINK, not an embed)
+
+`wx.weatherLabURL(...)` builds a deep link into Google's WeatherLab viewer
+at a given place, time, model and layer. Use it to hand the user a URL that
+opens on the SAME scene a geeViz map is showing — the two viewers then agree.
+
+```python
+url = wx.weatherLabURL(center=study_area, zoom=6, variable='precipitation',
+                       valid_time='2026-09-12T18:00Z', cyclone='NORBERT',
+                       cyclone_models=['observed', 'wn2_blended'],
+                       panel='charts')
+```
+
+**Never put this in an `<iframe>`.** WeatherLab serves
+`X-Frame-Options: SAMEORIGIN` and redirects to Google sign-in, so an embed
+renders a blank frame with a console refusal and nothing raises on the Python
+side. Give the user the link. It needs a signed-in Google account with access.
+
+`center` is `(lon, lat)` — geeViz/EE order — or an `ee.Geometry`. WeatherLab's
+own parameter is `lat,lon`; the flip is handled, and it matters because a
+transposed pair is a valid coordinate somewhere else and the page just loads
+the wrong place.
+
+`variable` takes a `wx.VARIABLES` key: WeatherLab names its layers exactly as
+WeatherNext names its bands, so `'precipitation'` becomes
+`total_precipitation_1hr_mean`. Times take the same forms as
+`getForecastData`. `extra={...}` passes through any parameter not modelled
+here — WeatherLab is not a documented API and its parameter set was read off
+shared links.
+
+### Other variables — same call, different `variable`
+
+`getForecastData` is not a wind function. `variable` selects what comes back:
+
+```python
+t = wx.getForecastData(a, b, 'gfs', variable='temperature_2m')   # one band
+both = wx.getForecastData(a, b, 'gfs',
+                          variable=['temperature_2m', 'precipitation'])
+raw = wx.getForecastData(a, b, 'gfs', variable=None)   # every band, as published
+```
+
+The default is `'wind'`, which gives the `u`/`v` components — what
+`addWindLayer` and `downscaleWind` expect. A `wx.VARIABLES` key is renamed to
+the key, so `temperature_2m` means the same band name across three products
+that spell it three ways. `None` is the escape hatch for the hundred-odd
+WeatherNext bands the table does not name; it renames nothing.
+
+Bands are resampled bicubic before selection so a layer is smooth rather than
+blocky at map zooms — pass `resample=None` for a categorical band, where
+interpolating a class code invents classes.
+
+Units are normalized to `wx.CANONICAL_UNITS` (see above). `wx.VARIABLES`
+lists every variable and which models publish it — use
+`wx.publishes(variable, model)` rather than testing the entry's truthiness,
+because an entry may be a *string explaining why* that model's version is
+unusable. A model that does not publish something raises rather than
+returning an empty layer.
+
+Variables with a physical bound (humidity, cloud cover, precipitation) are
+clamped after conversion. They have to be: the bicubic resample overshoots a
+saturated edge, and measured on one GFS image that meant cloud cover from
+-10.3 to 111.4 percent and precipitation down to -1.09 mm/hr.
+
+Palettes read off windy.com's legends, so a geeViz map and a windy map of the
+same hour are comparable: `wx.WIND_PALETTE`, `wx.PRECIP_PALETTE`,
+`wx.TEMPERATURE_PALETTE`.
+
+### Terrain downscaling
+
+Four functions, all Liston & Elder (2006) MicroMet, all redistributing a
+coarse forecast within its own cells using terrain. A 28 km GFS cell
+reports ONE value for its mean elevation, and inside it a valley floor
+and a ridge 1500 m up are genuinely different.
+
+```python
+wx.downscaleWind(img, region=aoi, scale=500)      # slope + curvature
+wx.downscaleTemperature(img, scale=500)           # lapse rate
+wx.downscaleDewpoint(img, scale=500)              # shallower rate
+wx.downscalePrecipitation(img, scale=500)         # orographic
+```
+
+Only `downscaleWind` takes `region`, and it is REQUIRED there — its
+terms are normalized by the strongest terrain in the domain, so the same
+mountain downscales differently inside a small box than a continental
+one. That is how the method is defined. The other three depend only on
+how far a pixel sits above their own forecast cell's mean elevation,
+which is local, so they need no region.
+
+Wind is bounded to 0.5–1.5x the input speed and ±14.3° of direction.
+`downscaleWind(z0=...)` adds a log wind profile for surface roughness,
+which the DEM knows nothing about.
+
+The rates are tunable and MicroMet varies them by season — the defaults
+`wx.DEFAULT_LAPSE_RATE` (-6.5 C/km, the annual mean),
+`wx.DEFAULT_DEWPOINT_LAPSE_RATE` and `wx.DEFAULT_PRECIP_CHI` are the
+honest choice when the month is not known. Pass `lapse_rate=` or `chi=`
+when it is: a shallow winter inversion can flatten or reverse the
+temperature profile outright, which no single rate can express.
+
+**None of these adds information about the atmosphere.** They are a
+better-resolved rendering of the same forecast. Say so when you present
+one. Specifically: a single lapse rate cannot express a valley
+inversion, and the precipitation term has no wind direction in it, so it
+enhances windward and lee slopes equally — rain shadow is the largest
+orographic effect there is and this does not model it.
+
+Downscale temperature and dewpoint **together** or neither: they use
+different rates, and doing only temperature makes the mountain drier
+than the forecast said.
+
+**Knots for anything aviation or marine.** `kt` is what METAR, TAF, NWS
+marine forecasts and windy.com all report wind in — reach for it when the
+question comes from one of those, not `mi/hr`. They are different units:
+a knot is a NAUTICAL mile per hour, about 15% longer than a statute one.
+
+**Matching windy.com.** `wx.WIND_PALETTE` is windy's own ramp, but
+`DEFAULT_MAX_SPEED` is deliberately about half windy's full scale, so the
+same field reads roughly twice as windy here — an 8.7 m/s wind sits 58%
+up this ramp and 28% up windy's. For a side-by-side, pass `max` of
+`60` with `units='kt'` (or 30 m/s, 111 km/h, 69 mi/h).
+
+### Never derive wind speed or direction by hand
+
+`wx.windImage(img, {'units': 'mi/hr'})` returns `speed` and `direction`.
+Use it. Do not write `u.hypot(v)` and an `atan2` of your own — for
+charting, for tables, for anything.
+
+Speed is harmless. **Direction is not**, and the failure is close to
+invisible. A real session wrote:
+
+```python
+direction = u.atan2(v).multiply(180 / 3.14159).add(180).mod(360)   # WRONG
+```
+
+Checked against `windImage` on the eight compass points, that agrees on
+**NE and SW and is 90° or 180° out everywhere else** — because
+`ee.Image.atan2` takes the vector as `(x, y)` while the meteorological
+bearing is `270 - math_angle`, and the two expressions coincide exactly
+at 45° and 225°. So a spot check on a diagonal passes, the numbers stay
+in 0-360, the chart looks completely normal, and every cardinal wind is
+reported from the wrong quarter. That session's summary said
+"southwest winds" for a wind that was not from the southwest.
+
+`windImage` delegates to `geeViz.fireLib.wind`, whose convention is
+pinned on all eight points by `test_wind_direction_conventions`.
+
+`directionConvention` is `"from"` by default (meteorological — 270 is a
+westerly, what every forecast means by "wind direction"); pass `"to"`
+for the way the air is moving. `directionUnits` takes `"degrees"` or
+`"radians"`.
+
+### Charting a forecast — `cl.summarize_and_chart`, never by hand
+
+`getForecastData` returns an ImageCollection stamped with
+`system:time_start` = the VALID time, which is exactly what the chart
+library keys a line chart on. So a forecast time series is ONE call —
+do not pull values back with `.getInfo()` and plot them with matplotlib.
+
+```python
+cl.summarize_and_chart(
+    ic, geometry=aoi, band_names=['temperature_2m'],
+    reducer=ee.Reducer.mean(),
+    scale=wx.MODELS['gfs']['native_scale_m'],   # NOT the default 30 m
+    date_format='YYYY-MM-dd HH:mm',             # NOT the default 'YYYY'
+    title='GFS 2 m temperature')
+```
+
+Two defaults are wrong for forecast data and both are quiet:
+
+* **`date_format='YYYY'` collapses the series.** Every step of a
+  multi-day forecast lands on one label, so 31 hourly steps chart as a
+  SINGLE point. Nothing raises. Pass a format that resolves to the hour.
+* **`scale=30`** against a 28 km forecast grid is four orders of
+  magnitude finer than the data and pays for it. Use
+  `wx.MODELS[model]['native_scale_m']`.
+
+Ask for several variables in one collection (`variable=[...]`) and chart
+them together — `band_names=['temperature_2m', 'precipitation']`.
+
+### Keep it to a few round trips
+
+`getForecastData` builds a server-side graph and costs nothing until
+something is evaluated. The expense is `.getInfo()`, and it is easy to
+spend a dozen of them without noticing — a real session used **14** to
+put four layers on a map, most of them printing sizes and band names
+that did not change what happened next.
+
+**Ask for several variables in one call.** `variable=` takes a list:
+
+```python
+wx.getForecastData(a, b, 'gfs', variable=['temperature_2m', 'precipitation'])
+```
+
+`'wind'` is the exception — it returns u/v rather than a named band, so
+it needs its own call.
+
+**Batch the round trips you do need.** One dictionary, one request:
+
+```python
+print(ee.Dictionary({'n': ic.size(), 'bands': ee.Image(ic.first()).bandNames(),
+                     'times': ic.aggregate_array('valid_time')}).getInfo())
+```
+
+not `ic.size().getInfo()` then `.bandNames().getInfo()` then
+`.aggregate_array(...).getInfo()`.
+
+**Format server-side.** To see valid times, ask Earth Engine for strings
+rather than pulling epoch millis back and looping over them in Python:
+
+```python
+ic.aggregate_array('valid_time').map(
+    lambda t: ee.Date(t).format('YYYY-MM-dd HH:mm')).getInfo()
+```
+
+**Select a frame by date, not by a pasted epoch integer.** `valid_time`
+is in millis, so use `ee.Date`:
+
+```python
+noon = ee.Date('2026-09-13T18:00:00')
+img = ee.Image(ic.filter(ee.Filter.eq('valid_time', noon.millis())).first())
+```
+
+A hard-coded `1789322400000` is unreadable, silently wrong if the window
+moves, and impossible to review.
+
+**Do not verify what the call already guarantees.** `getForecastData`
+returns the band you asked for in the unit `CANONICAL_UNITS` names, or
+raises. Printing `bandNames()` to check costs a round trip to confirm
+something that cannot be otherwise. Spend `.getInfo()` when the answer
+changes what you do next — an empty window (`lead_hours == -1`), a count
+before building a time lapse — not to narrate.
+
+**`tl.auto_viz` is a `reduceRegion`.** Calling it and then overwriting
+what it computed wastes the request. For weather, the palettes and
+default stretches are already right: `wx.TEMPERATURE_PALETTE`,
+`wx.PRECIP_PALETTE`, `wx.WIND_PALETTE`, and `addWindLayer`'s own
+per-unit `max`.
+
+### Gotchas
+
+* WeatherNext's `wind_speed_10m_mean` is NOT the magnitude of its
+  `u_mean`/`v_mean` — it is the ensemble mean of speeds, larger by ~33% in
+  measured cases. `wx` derives speed from the components so the arrow's
+  direction and length describe the same wind. Do not mix the two.
+* WeatherNext's shortest lead is **1 hour**, not 0. Filtering `forecast_hour == 0`
+  returns nothing.
+* GFS has **no stable band list** — some images carry
+  `total_precipitation_surface`, others `precipitation_rate`. The split is by
+  AGE — the recent images are the ones with `precipitation_rate`, which is
+  what `wx.VARIABLES` names. Go through `getForecastData(variable=...)`, or
+  `inspect_asset` an image from the window you actually want first.
+* **ECMWF has no `precipitation`.** Its `total_precipitation_sfc` is a
+  running total since the run started, not a per-hour amount — and it is
+  identically zero at lead 0, which is what a past window returns. So that
+  request used to hand back a confidently dry forecast everywhere. It now
+  raises; ask for `precipitation_accumulated` (mm since forecast start),
+  which is a different quantity and not comparable to GFS or WeatherNext
+  precipitation.
