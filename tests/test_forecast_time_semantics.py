@@ -52,11 +52,21 @@ def _ee_ready():
     """
     try:
         import ee
-        from geeViz.geeView import robustInitializer
         try:
             ee.Number(1).getInfo()
             return True
         except Exception:
+            # Imported HERE, not at the top: it is only needed when EE is
+            # not already up, and importing it eagerly makes this probe
+            # fail for an unrelated reason. test_esriLib installs a stub
+            # module at sys.modules["geeViz.geeView"] at IMPORT time, and
+            # pytest imports every test module during collection before
+            # running any -- so the stub is live while earlier files run,
+            # and `from geeViz.geeView import robustInitializer` raises
+            # "cannot import name ... (unknown location)". That was read
+            # as "Earth Engine not reachable" and skipped eleven passing
+            # tests silently in every full run.
+            from geeViz.geeView import robustInitializer
             robustInitializer()
             ee.Number(1).getInfo()
             return True
@@ -77,7 +87,33 @@ def _require_ee():
     if not _ee_ready():
         pytest.skip("Earth Engine not reachable")
 
-NOW = datetime.datetime(2026, 9, 10, 16, 0, tzinfo=datetime.timezone.utc)
+# Windows are RELATIVE to the current clock, and the clock is the real
+# one.
+#
+# These were pinned to a frozen NOW with absolute dates around it -- a
+# "forward" window of 2026-09-12..14 read against now = 2026-09-10. That
+# works for exactly as long as the calendar agrees: four days later the
+# live archive had moved past those dates, the forward window resolved
+# to analyses, and nine tests failed with no code change behind them.
+# They were time bombs, and the failure looked like a regression.
+#
+# Everything here asks the live collections, so the only stable frame of
+# reference is the clock they are published against.
+NOW = datetime.datetime.now(datetime.timezone.utc).replace(
+    minute=0, second=0, microsecond=0)
+
+
+def _day(offset):
+    """A date ``offset`` days from now, as ``YYYY-MM-DD``."""
+    return (NOW + datetime.timedelta(days=offset)).strftime("%Y-%m-%d")
+
+
+# A forward window every model can reach, a past window inside every
+# model's retention, and one that straddles the two.
+FUT_START, FUT_END = _day(2), _day(4)
+PAST_START, PAST_END = _day(-4), _day(-2)
+SPAN_START, SPAN_END = _day(-2), _day(3)
+
 MODELS = ["gfs", "euro", "weathernext"]
 
 
@@ -119,10 +155,12 @@ def _summary(ic):
 def test_forward_window_is_covered(model):
     """A future window returns images valid inside it, from one run."""
     import geeViz.weather as wx
-    d = _summary(wx.getForecastData("2026-09-12", "2026-09-14", model, now=NOW))
+    d = _summary(wx.getForecastData(FUT_START, FUT_END, model, now=NOW))
     _real(d, model)
-    lo = datetime.datetime(2026, 9, 12, tzinfo=datetime.timezone.utc)
-    hi = datetime.datetime(2026, 9, 14, tzinfo=datetime.timezone.utc)
+    lo = datetime.datetime.strptime(FUT_START, "%Y-%m-%d").replace(
+        tzinfo=datetime.timezone.utc)
+    hi = datetime.datetime.strptime(FUT_END, "%Y-%m-%d").replace(
+        tzinfo=datetime.timezone.utc)
     assert d["lo"] >= lo.timestamp() * 1000 - 1
     assert d["hi"] <= hi.timestamp() * 1000 + 1
     # Forward means real lead time; a 0-hour lead would be an analysis.
@@ -137,7 +175,7 @@ def test_system_time_start_is_the_valid_time(model):
     whole run — and a time lapse built on it collapses to one frame.
     """
     import geeViz.weather as wx
-    d = _summary(wx.getForecastData("2026-09-12", "2026-09-14", model, now=NOW))
+    d = _summary(wx.getForecastData(FUT_START, FUT_END, model, now=NOW))
     assert d["sts_lo"] == d["lo"], f"{model}: system:time_start != valid_time"
     assert d["sts_hi"] == d["hi"], f"{model}: system:time_start != valid_time"
     assert d["n_sts"] == d["n"], (
@@ -159,7 +197,7 @@ def test_past_window_is_analyses_only(model):
     WeatherNext, which reads as "no data" rather than a wrong constant.
     """
     import geeViz.weather as wx
-    d = _summary(wx.getForecastData("2026-09-06", "2026-09-08", model, now=NOW))
+    d = _summary(wx.getForecastData(PAST_START, PAST_END, model, now=NOW))
     _real(d, model)
     assert d["lead_lo"] == d["lead_hi"], (
         f"{model}: past window mixes leads {d['lead_lo']}..{d['lead_hi']} — "
@@ -173,7 +211,7 @@ def test_forward_window_comes_from_a_single_run(model):
     """One run forward, so the field cannot jump where runs disagree."""
     import ee
     import geeViz.weather as wx
-    ic = wx.getForecastData("2026-09-12", "2026-09-14", model, now=NOW)
+    ic = wx.getForecastData(FUT_START, FUT_END, model, now=NOW)
     # Every image should trace to one initialization: leads increase in
     # step with valid time, so distinct leads == distinct valid times.
     n_lead = ic.aggregate_count_distinct("lead_hours").getInfo()
@@ -193,8 +231,9 @@ def test_the_window_end_is_actually_covered(model):
     """
     import datetime as _dt
     import geeViz.weather as wx
-    end = _dt.datetime(2026, 9, 14, tzinfo=_dt.timezone.utc)
-    d = _summary(wx.getForecastData("2026-09-12", "2026-09-14", model, now=NOW))
+    end = _dt.datetime.strptime(FUT_END, "%Y-%m-%d").replace(
+        tzinfo=_dt.timezone.utc)
+    d = _summary(wx.getForecastData(FUT_START, FUT_END, model, now=NOW))
     reach = _dt.datetime.fromtimestamp(d["hi"] / 1000, _dt.timezone.utc)
     assert (end - reach).total_seconds() <= 6 * 3600, (
         f"{model}: asked to {end:%m-%d %H:%M}, only reached "
@@ -207,7 +246,7 @@ def test_spanning_window_joins_analyses_to_a_forecast(model):
     recent initialization — so the leads span from the shortest to a
     real forecast horizon."""
     import geeViz.weather as wx
-    d = _summary(wx.getForecastData("2026-09-08", "2026-09-13", model, now=NOW))
+    d = _summary(wx.getForecastData(SPAN_START, SPAN_END, model, now=NOW))
     _real(d, model)
     assert d["lead_lo"] <= 1, (
         f"{model}: spanning window has no analyses (min lead "
@@ -232,7 +271,7 @@ def test_weathernext_reaches_days_ahead():
     """It is a forward model, not an archive. The 6-hourly inits carry
     360-hour leads; only the interim hourly inits stop at 48."""
     import geeViz.weather as wx
-    d = _summary(wx.getForecastData("2026-09-12", "2026-09-20",
+    d = _summary(wx.getForecastData(_day(2), _day(10),
                                     "weathernext", now=NOW))
     _real(d, "weathernext")
     assert d["lead_hi"] > 48, (
@@ -279,7 +318,7 @@ def test_no_round_trips_while_building_a_query():
     import geeViz.weather as wx
     for model in MODELS:
         t0 = time.time()
-        wx.getForecastData("2026-09-06", "2026-09-08", model, now=NOW)
+        wx.getForecastData(PAST_START, PAST_END, model, now=NOW)
         dt = time.time() - t0
         assert dt < 0.15, (
             f"{model}: building the query took {dt:.2f}s — that is a "
@@ -302,8 +341,7 @@ def test_min_lead_is_reduced_server_side():
     """
     import ee
     import geeViz.weather as wx
-    ic = ee.ImageCollection("NOAA/GFS0P25").filterDate("2026-09-06",
-                                                       "2026-09-08")
+    ic = ee.ImageCollection("NOAA/GFS0P25").filterDate(PAST_START, PAST_END)
     lead = wx._min_lead(ic, "forecast_hours")
     assert isinstance(lead, ee.Number), (
         f"_min_lead returned {type(lead).__name__}; a client-side value "
@@ -386,7 +424,7 @@ def test_the_lead_reduce_is_bounded_by_the_window(model):
 
     wx._min_lead = spy
     try:
-        wx.getForecastData("2026-09-06", "2026-09-08", model,
+        wx.getForecastData(PAST_START, PAST_END, model,
                            now=NOW).size().getInfo()
     finally:
         wx._min_lead = real
@@ -411,7 +449,7 @@ def test_a_spanning_window_has_no_duplicate_instants(model):
     jumping between two runs' disagreement, which reads as weather.
     """
     import geeViz.weather as wx
-    ic = wx.getForecastData("2026-09-08", "2026-09-13", model, now=NOW)
+    ic = wx.getForecastData(SPAN_START, SPAN_END, model, now=NOW)
     n = ic.size().getInfo()
     distinct = ic.aggregate_count_distinct("valid_time").getInfo()
     assert n == distinct, (

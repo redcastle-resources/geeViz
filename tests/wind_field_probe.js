@@ -12,7 +12,7 @@ vm.createContext(sandbox);
 vm.runInContext(src, sandbox);
 const W = sandbox.geeVizWindParticles;
 
-const cfg = { count: null, density: 1.75, minCount: 400, maxCount: 20000 };
+const cfg = { count: null, density: 1.75 };
 
 // A 5x5 grid at 10px spacing: dx ramps with the column, dy constant.
 const gw = 5, gh = 5, sp = 10;
@@ -25,7 +25,10 @@ for (let gy = 0; gy < gh; gy++) {
     f[i + 1] = 2;
   }
 }
-const st = { field: f, fieldOk: ok, fieldW: gw, fieldH: gh, fieldSpacing: sp };
+// fieldAny is what buildField sets when a build found data; fieldAt
+// gates on it so a refilled-but-empty grid cannot be read as valid.
+const st = { field: f, fieldOk: ok, fieldW: gw, fieldH: gh,
+             fieldSpacing: sp, fieldAny: true };
 const ramp = [10, 12.5, 15, 17.5, 20]
   .map(x => Number(W._fieldAt(st, x, 15)[0].toFixed(6)));
 const outside = W._fieldAt(st, -5, 5);
@@ -39,7 +42,8 @@ const missingCorner = W._fieldAt(st, 12, 12);
 const ok2 = new Uint8Array(gw * gh).fill(1);
 ok2[1 * gw + 1] = 0;
 const missingNear = W._fieldAt(
-  { field: f, fieldOk: ok2, fieldW: gw, fieldH: gh, fieldSpacing: sp }, 12, 12);
+  { field: f, fieldOk: ok2, fieldW: gw, fieldH: gh, fieldSpacing: sp,
+    fieldAny: true }, 12, 12);
 
 process.stdout.write(JSON.stringify({
   w800: W._countFor(cfg, 800),

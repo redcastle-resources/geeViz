@@ -119,6 +119,44 @@ def test_python_encodes_into_red_and_green():
     assert [b.strip().strip('"\'') for b in m.group(1).split(",")] == ["u", "v", "z"]
 
 
+def test_knots_are_nautical_not_statute():
+    """The one wind unit with a trap in it.
+
+    A knot is one NAUTICAL mile per hour, and a nautical mile is defined
+    as exactly 1852 m -- 15% longer than the statute mile behind
+    ``mi/hr``. Confusing the two is a 15% error in wind speed, which is
+    the sort of wrong that looks completely reasonable on a map and
+    matters on an aviation or marine forecast, where knots is the unit
+    the answer is expected in.
+    """
+    import geeViz.weather as wx
+    kt = wx.SPEED_UNITS["kt"]
+    # Exact by definition, not a retyped decimal.
+    assert kt == 3600.0 / 1852.0
+    assert abs(1.0 / kt - 0.514444) < 1e-5, "1 kt is 0.514444 m/s"
+    assert kt != wx.SPEED_UNITS["mi/hr"], "knots are not miles per hour"
+    # The ratio between them IS the ratio of the two miles.
+    assert abs(wx.SPEED_UNITS["mi/hr"] / kt - 1852.0 / 1609.344) < 1e-9
+    # Windy's full scale, which is what makes kt worth having here.
+    assert abs(60.0 / kt - 30.87) < 0.01, "60 kt is 30.87 m/s"
+
+
+def test_every_speed_unit_survives_a_round_trip():
+    """SPEED_UNITS is a multiplier FROM m/s. A unit added with the
+    reciprocal would look plausible everywhere except the numbers."""
+    import geeViz.weather as wx
+    for unit, mult in wx.SPEED_UNITS.items():
+        assert mult > 0, unit
+        assert abs((10.0 * mult) / mult - 10.0) < 1e-9, unit
+    # m/s is the reference and must be exactly 1, or every conversion in
+    # the module is off by a constant nobody would spot.
+    assert wx.SPEED_UNITS["m/s"] == 1.0
+    # Ordered by how fast the number grows, which is a cheap way to
+    # catch a reciprocal: 1 m/s is 1, 1.94 kt, 2.24 mph, 3.6 km/h.
+    assert (wx.SPEED_UNITS["m/s"] < wx.SPEED_UNITS["kt"]
+            < wx.SPEED_UNITS["mi/hr"] < wx.SPEED_UNITS["km/hr"])
+
+
 def test_default_stretch_follows_the_unit():
     """A 0..15 stretch read as km/h paints the map one flat colour."""
     import geeViz.weather as wx
@@ -290,8 +328,8 @@ def test_python_sends_the_lifetime_range():
                  or "particles" in (k or "")]
     assert particles, f"no particle layer was added; got {list(sent)}"
     v = particles[0]
-    assert v["particleMaxAge"] == 90
-    assert v["particleMinAge"] == 22.5, (
+    assert v["particleMaxAge"] == 45
+    assert v["particleMinAge"] == 11.25, (
         f"particleMinAge is {v.get('particleMinAge')!r}; without it the "
         f"client falls back and the range is never actually chosen here")
 
@@ -364,7 +402,7 @@ def test_every_client_default_matches_what_python_sends():
     explicitly and silently stopped covering the rest as the set grew.
     """
     js = _js_literal_defaults()
-    assert len(js) >= 12, (
+    assert len(js) >= 9, (
         f"only parsed {len(js)} defaults out of cfgFrom — the parser has "
         f"drifted from the source and is no longer checking anything")
     viz = _stamped_viz()
@@ -372,6 +410,13 @@ def test_every_client_default_matches_what_python_sends():
     for key, default in js.items():
         if key == "particleLineWidth":
             continue          # back-compat alias, resolved in Python
+        if key == "windMaxSpeedMs":
+            # DERIVED from the raster stretch, so python sends a value
+            # that depends on viz['max'] and units rather than a
+            # constant. The client keeps a literal only as a fallback
+            # for a hand-built layer. test_the_speed_ceiling_follows_
+            # the_stretch covers the real contract.
+            continue
         if key not in viz:
             missing.append(key)
         elif isinstance(default, float):
@@ -384,7 +429,7 @@ def test_every_client_default_matches_what_python_sends():
 
 
 def test_derived_sizes_track_their_base():
-    """``particleMinSize`` / ``particleMaxSize`` default to fractions of
+    """``particleMinWidth`` / ``particleMaxWidth`` default to fractions of
     ``particleStrokeWeight``, so raising the weight alone rescales the
     whole taper instead of leaving a half-scaled one. Same contract as
     ``particleMinAge`` tracking ``particleMaxAge``."""
@@ -399,9 +444,9 @@ def test_derived_sizes_track_their_base():
     img = ee.Image([1, 2]).rename(["u", "v"])
     wx.addWindLayer(FakeMap(), img, {"particleStrokeWeight": 4.0}, "W")
     v = [x for x in sent.values() if x.get("windParticles")][0]
-    assert v["particleMinSize"] == 4.0 * 0.45
-    assert v["particleMaxSize"] == 4.0 * 1.5
-    assert v["particleMinSize"] < v["particleMaxSize"], (
+    assert v["particleMinWidth"] == 4.0 * 0.45
+    assert v["particleMaxWidth"] == 4.0 * 1.5
+    assert v["particleMinWidth"] < v["particleMaxWidth"], (
         "a comet is thin at the tail and fat at the tip")
 
     # the old name still works
@@ -415,9 +460,9 @@ def test_derived_sizes_track_their_base():
     # and an explicit size wins over the derived one
     sent.clear()
     wx.addWindLayer(FakeMap(), img,
-                    {"particleStrokeWeight": 4.0, "particleMaxSize": 9.0}, "W")
+                    {"particleStrokeWeight": 4.0, "particleMaxWidth": 9.0}, "W")
     v = [x for x in sent.values() if x.get("windParticles")][0]
-    assert v["particleMaxSize"] == 9.0
+    assert v["particleMaxWidth"] == 9.0
 
 
 def test_the_size_ramp_is_used_in_frame():
@@ -425,7 +470,7 @@ def test_the_size_ramp_is_used_in_frame():
     maxSize across the trail — the head then needs no special case,
     because at t = 1 it already IS maxSize."""
     body = _strip_js_comments(_js_fn_body("frame"))
-    assert "cfg.minSize + (cfg.maxSize - cfg.minSize) * t" in body, (
+    assert "cfg.minWidth + (cfg.maxWidth - cfg.minWidth) * t" in body, (
         "frame() does not ramp the width between the configured sizes")
     assert "cfg.lineCap" in body, "particleLineCap is configured but unused"
 
@@ -506,7 +551,7 @@ def test_every_particle_param_is_documented():
     """
     import geeViz.weather as wx
     params = sorted(k for k in _stamped_viz() if k.startswith("particle"))
-    assert len(params) >= 18, (
+    assert len(params) >= 14, (
         f"only {len(params)} particle params found — the introspection "
         f"has drifted and this test is no longer checking much")
 
@@ -544,81 +589,6 @@ def test_the_units_caveat_travels_with_the_speed_bounds():
         assert "true value" in low, (
             f"{where}: nothing says the raster and query still carry the "
             f"true speed")
-
-
-def _streak_px(wind_ms, zoom=7, lat=29.0):
-    """Screen length of one streak, from the client's own constants.
-
-        max(min(speed, maxSpeed), minSpeed)
-          * speedFactor * 2 ** (zoomRef - zoom)
-          / metresPerPixel
-          * trailLength
-
-    The ``2 ** (zoomRef - zoom)`` term is what keeps this independent of
-    zoom; without it the length doubled per level.
-    """
-    import math
-    import re as _re
-    src = _strip_js_comments(JS.read_text(encoding="utf-8"))
-
-    def num(pat):
-        m = _re.search(pat, src)
-        assert m, f"could not find {pat!r} in the client source"
-        return float(m.group(1))
-
-    speed = num(r"speedFactor: v\.particleSpeedFactor \|\| ([\d.]+)")
-    # buildField computes `advance = speedFactor * 2**(zoomRef - zoom)`
-    # once per view; the exponent is what holds screen length constant.
-    length = num(r"v\.particleTrailLength \|\| ([\d.]+)")
-    floor = num(r"v\.particleMinSpeed !== undefined \? v\.particleMinSpeed : ([\d.]+)")
-    ceil_ = num(r"v\.particleMaxSpeed !== undefined \? v\.particleMaxSpeed : ([\d.]+)")
-    ref = num(r"v\.particleZoomRef !== undefined \? v\.particleZoomRef : ([\d.]+)")
-
-    mpp = 156543.03392 * math.cos(math.radians(lat)) / (2 ** zoom)
-    bounded = min(max(wind_ms, floor), ceil_)
-    return (bounded * speed * (2 ** (ref - zoom)) / mpp) * length
-
-
-def test_streak_length_is_the_same_at_every_zoom():
-    """Zooming in must not stretch the streaks.
-
-    The step is computed in DEGREES, which is zoom-invariant on the
-    ground -- but what you see is ``step / metresPerPixel``, and
-    metres-per-pixel halves with every zoom level. So a fixed ground
-    step doubled in screen length per level: 9 px at z5 against 591 px
-    at z11 for the same 4 m/s wind, a 64x blowup that turned a
-    zoomed-in view into a white smear. The particle count falls only
-    ~3x across that range, nowhere near enough to hide it.
-    """
-    lengths = {z: _streak_px(4.0, zoom=z) for z in range(4, 13)}
-    lo, hi = min(lengths.values()), max(lengths.values())
-    assert hi - lo < 1e-6, (
-        "streak length varies with zoom: "
-        + ", ".join(f"z{z}={v:.0f}px" for z, v in sorted(lengths.items())))
-    # And the fast case must not run away either -- that is the smear.
-    fast = {z: _streak_px(60.0, zoom=z) for z in range(4, 13)}
-    assert max(fast.values()) - min(fast.values()) < 1e-6
-
-
-def test_trails_are_long_enough_to_read_as_streaks():
-    """Readable at the calm end, bounded at the violent end.
-
-    Length used to be an emergent property of a canvas fade, which gave
-    FIVE pixels for an ordinary 4 m/s wind -- a scatter of dots, not a
-    flow field. The speed floor is what fixes the low end: without it
-    length is strictly proportional to speed, so a calm map is
-    indistinguishable from a broken one.
-    """
-    # A dead-calm cell must still draw something readable...
-    assert _streak_px(0.5) > 10, (
-        f"a 0.5 m/s cell draws {_streak_px(0.5):.1f}px — the minSpeed "
-        f"floor is not holding the low end up")
-    # ...an ordinary breeze a clear streak...
-    assert 20 < _streak_px(4.0) < 60, f"4 m/s gives {_streak_px(4.0):.1f}px"
-    # ...and a hurricane must stay on the screen.
-    assert _streak_px(80.0) < 500, (
-        f"80 m/s gives {_streak_px(80.0):.1f}px — the maxSpeed ceiling "
-        f"is not bounding the violent end")
 
 
 def test_the_head_is_brighter_than_the_tail():
@@ -663,18 +633,6 @@ def test_the_head_is_brighter_than_the_tail():
         f"head is only {head / mid:.1f}x the midpoint — not a comet")
 
 
-def test_one_stroke_per_rank_not_per_particle():
-    """Thousands of individual ``stroke()`` calls is what made the very
-    first version stutter, and drawing a full trail per particle would
-    reintroduce exactly that. Batching by history rank keeps it at
-    ``trailLength`` strokes per frame regardless of particle count."""
-    body = _strip_js_comments(_js_fn_body("frame"))
-    assert body.count("ctx.stroke()") == 1, (
-        "more than one stroke() in frame() — it should be one per rank, "
-        "inside the rank loop")
-    assert "for (var rank = 1; rank < n; rank++)" in body
-
-
 def test_the_encoded_raster_is_detached_and_stays_detached():
     """Unchecking and re-checking the layer made the RGB reappear.
 
@@ -693,7 +651,7 @@ def test_the_encoded_raster_is_detached_and_stays_detached():
     # The exact guarded call, not just the symbol: `if (false) detach(L)`
     # keeps the name in the file while doing nothing, and an assertion
     # that only looked for "detach(L)" passed on it.
-    assert "if (L) { detach(L); reportProgress(st); }" in refresh, (
+    assert "if (L) { detach(L); reportProgress(st); applyStacking(st); }" in refresh, (
         "detach must RUN on the refresh tick, or re-checking the layer "
         "puts the encoded RGB back on the map for good")
 
@@ -720,10 +678,12 @@ def test_tile_progress_is_reported_from_the_real_queue():
     assert "function reportProgress(st)" in src
 
     body = _strip_js_comments(_js_fn_body("reportProgress"))
-    assert "var loading = inflight > 0;" in body, (
-        "loading must be derived from the queue, not pinned")
-    assert "L.percent = percent;" in body and ": 100;" in body, (
-        "percent must reach 100 when the queue drains")
+    assert "var loading = visible && inflight > 0;" in body, (
+        "loading must be derived from the queue (and visibility), not "
+        "pinned")
+    assert "L.percent = percent;" in body and ": 100);" in body, (
+        "percent must reach 100 when the queue drains and the layer is "
+        "visible")
     assert "-spinner2" in body, "the spinner element is never toggled"
     assert "-layer-container" in body, (
         "the white progress fill across the layer row is never repainted")
@@ -774,25 +734,34 @@ def test_adoption_settles_a_probe_set_flag():
         "adoption must settle the flag the URL probe set")
 
 
-def test_the_tile_zoom_cap_is_applied():
-    """Configured is not applied — again.
-
-    Fetching finer tiles than the forecast can resolve buys nothing and
-    costs a great deal: at map zoom 10 the viewport needed 35 tiles and
-    1559 were requested. GFS is 0.25 deg (~28 km); a zoom-7 tile pixel
-    is about 1 km, already 28x finer. Everything past the cap is an
-    upsampled duplicate.
-    """
-    src = _strip_js_comments(JS.read_text(encoding="utf-8"))
-    assert "Math.min(st.cfg.maxTileZoom, global.map.getZoom() || 4)" in src, (
-        "the tile zoom is no longer clamped to the configured cap — a "
-        "zoomed-in view will request hundreds of redundant tiles")
-    assert "Math.min(10, global.map.getZoom()" not in src, (
-        "the old hard-coded cap is back")
+def _probe_field():
+    """Run countFor and fieldAt for real."""
+    import json
+    import subprocess
+    exe = _node()
+    if not exe:
+        pytest.skip("node not available")
+    r = subprocess.run([exe, str(FIELD_PROBE), str(JS)],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, f"field probe failed: {r.stderr[:800]}"
+    return json.loads(r.stdout)
 
 
 PROBE = Path(__file__).parent / "wind_sampler_probe.js"
 FIELD_PROBE = Path(__file__).parent / "wind_field_probe.js"
+LAYOUT_PROBE = Path(__file__).parent / "wind_layout_probe.js"
+
+
+def _probe_layout():
+    import json
+    import subprocess
+    exe = _node()
+    if not exe:
+        pytest.skip("node not available")
+    r = subprocess.run([exe, str(LAYOUT_PROBE), str(JS)],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, f"layout probe failed: {r.stderr[:800]}"
+    return json.loads(r.stdout)
 
 
 def _probe_field():
@@ -892,10 +861,26 @@ def test_the_tile_service_resamples_server_side():
     img = ee.Image([1, 2]).rename(["u", "v"])
 
     src = (ROOT / "geeViz" / "weather.py").read_text(encoding="utf-8")
+
+    def _fn_source(name):
+        """A top-level function's source, by AST.
+
+        This used to slice between the name of whichever function
+        happened to follow, and to assume a fixed character width. Both
+        boundaries broke the moment a neighbour was deleted and a
+        docstring grew -- silently, because a slice that lands somewhere
+        harmless still passes.
+        """
+        import ast
+        for node in ast.parse(src).body:
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return ast.get_source_segment(src, node)
+        raise AssertionError(f"{name}() is gone from weather.py")
+
     # windImage and windTiles held identical copies of the select +
     # resample block; it lives in one helper now, so exactly one place
     # decides how the field gets smoothed.
-    body = src[src.index("def _uv_image("):src.index("def windQueryImage(")]
+    body = _fn_source("_uv_image")
     code = "\n".join(ln for ln in body.splitlines()
                      if not ln.strip().startswith("#"))
     assert 'viz.get("resample", "bicubic")' in code, (
@@ -905,12 +890,12 @@ def test_the_tile_service_resamples_server_side():
         "the resample mode is read but never applied")
 
     # And both renderers must go through it rather than re-rolling it.
-    for fn in ("def windImage(", "def windTiles("):
-        seg = src[src.index(fn):src.index(fn) + 1600]
+    for fn in ("windImage", "windTiles"):
+        seg = _fn_source(fn)
         assert "_uv_image(image, viz)" in seg, (
-            f"{fn.strip()} does not use the shared helper")
+            f"{fn}() does not use the shared helper")
         assert "img.resample(" not in seg, (
-            f"{fn.strip()} resamples on its own again — two copies is "
+            f"{fn}() resamples on its own again — two copies is "
             f"how they drift apart")
 
     # And it must survive into the graph, not just the source.
@@ -947,37 +932,6 @@ def test_the_client_does_not_interpolate_the_forecast():
         "at particleFieldSpacing")
 
 
-def test_tiles_track_the_map_rather_than_a_low_cap():
-    """A low cap forces the client to sample a coarse grid and then
-    interpolate its way back to smooth — the long way round. Tiles
-    should be fetched near the resolution they are shown at, so the
-    server-side bicubic lands where it is needed.
-
-    The cap only stops the pointless extreme; what actually bounds the
-    request count is the off-screen cull, which took a zoom-10 view from
-    1559 tiles to the ~35 the viewport needs.
-    """
-    import re as _re
-    src = _strip_js_comments(JS.read_text(encoding="utf-8"))
-    cap = float(_re.search(
-        r"v\.particleMaxTileZoom !== undefined\s*\?\s*"
-        r"v\.particleMaxTileZoom : ([\d.]+)", src).group(1))
-    assert cap >= 10, (
-        f"the tile cap is {cap:.0f}; below about 10 a zoomed-in view "
-        f"samples a grid coarser than the screen and needs a client "
-        f"blend to look right")
-    # A 28 km forecast grid has nothing to say below ~150 m/pixel.
-    assert cap <= 12, (
-        f"a cap of {cap:.0f} fetches tiles finer than 150 m against a "
-        f"28 km forecast grid — pure upsampling, at 4x the tiles per "
-        f"level")
-
-
-# ---------------------------------------------------------------------------
-# The field is built once per view, not sampled per particle per frame.
-# ---------------------------------------------------------------------------
-
-
 def test_the_hot_path_does_no_geography():
     """``frame`` must not project, trigonometry, or touch a tile.
 
@@ -1002,12 +956,20 @@ def test_the_hot_path_does_no_geography():
 def test_buildfield_does_the_work_frame_used_to():
     """Everything that left the hot path has to have landed here."""
     body = _strip_js_comments(_js_fn_body("buildField"))
-    for needed in ("fromDivPixelToLatLng", "Math.cos", "sampleUV(",
-                   "cfg.minSpeed", "cfg.maxSpeed", "cfg.zoomRef"):
+    for needed in ("fromDivPixelToLatLng", "sampleUV(",
+                   "cfg.minSpeed", "cfg.maxSpeed", "cfg.speed"):
         assert needed in body, f"buildField never does {needed}"
-    assert "Math.pow(2, cfg.zoomRef - zoom)" in body, (
-        "the zoom normalisation is gone; streak length will double per "
-        "zoom level again")
+    # Math.cos is deliberately ABSENT -- see
+    # test_screen_speed_does_not_vary_with_latitude.
+    # Zoom must NOT appear. The old form divided
+    # `speedFactor * 2**(zoomRef - zoom)` by a metres-per-pixel that is
+    # itself `156543 * cos(lat) / 2**zoom`, so the powers of two
+    # cancelled exactly -- keeping either term back would reintroduce
+    # the bug where streaks doubled in length per zoom level.
+    for gone in ("getZoom()", "Math.pow(2,", "156543", "Math.cos"):
+        assert gone not in body, (
+            f"buildField still references {gone}; the zoom terms cancel "
+            f"and must not be reintroduced")
     assert "f[i + 1] = -v * scale;" in body, (
         "screen y grows downward while v is northward — without the "
         "sign flip the whole field is mirrored north/south")
@@ -1028,7 +990,19 @@ def test_the_field_is_rebuilt_when_the_view_moves():
     assert "st.fieldKey === viewKey(st)" in ensure
     assert 'addListener("idle"' in src
     idle = src[src.index('addListener("idle"'):][:400]
-    assert "field = null" in idle, "idle does not invalidate the field"
+    assert "fieldKey = null" in idle, "idle does not invalidate the field"
+    # ...but it must drop the KEY, not the arrays. Reallocating a
+    # ~32,000-cell pair on every pan is churn for no gain: the grid is
+    # the same shape, only the places it refers to changed.
+    assert "field = null;" not in idle, (
+        "idle throws the field arrays away; only the key should go")
+    build = _strip_js_comments(_js_fn_body("buildField"))
+    assert "st.fieldW !== gw || st.fieldH !== gh" in build, (
+        "buildField reallocates unconditionally — it should only do so "
+        "when the CANVAS resizes")
+    assert "st.fieldOk.fill(0)" in build, (
+        "a reused ok-mask must be cleared, or last view's cells read as "
+        "valid where this one has no data")
 
 
 def test_particle_count_comes_from_canvas_width():
@@ -1055,7 +1029,7 @@ def test_python_does_not_pin_the_count():
     assert "particleCount" not in viz, (
         "weather.py sends a particleCount, so the canvas width is never "
         "consulted")
-    assert viz["particleDensity"] == 1.75
+    assert viz["particleDensity"] == 1.2
     # ...but an explicit request still travels.
     import ee
     import geeViz.weather as wx
@@ -1076,7 +1050,9 @@ def test_the_count_and_grid_maths_run():
     d = _probe_field()
     assert d["w1700"] == 2975, (
         f"a 1700px canvas gives {d['w1700']} particles; expected ~3000")
-    assert d["clampLo"] == 400 and d["clampHi"] == 20000
+    # No clamps any more: width x density is the answer at any size.
+    assert d["clampLo"] == 175, d["clampLo"]
+    assert d["clampHi"] == 174998, d["clampHi"]
     assert d["explicit"] == 900
     # The grid read must ramp linearly across a cell.
     assert d["ramp"] == [1.0, 1.25, 1.5, 1.75, 2.0], d["ramp"]
@@ -1089,3 +1065,719 @@ def test_the_count_and_grid_maths_run():
     assert d["missingCorner"] is None, (
         "a missing FAR corner must reject the sample too — blending a "
         "zero in drags the vector toward calm at every data edge")
+
+
+# ---------------------------------------------------------------------------
+# One speed number, and a fade rather than a pop.
+# ---------------------------------------------------------------------------
+
+
+def test_speed_is_one_number_with_no_zoom_term():
+    """``particleSpeed`` is pixels/frame per m/s at the equator.
+
+    It replaced a speed factor AND a reference zoom. Screen speed was
+    ``speedFactor * 2**(zoomRef - zoom) / metresPerPixel``, and
+    metres-per-pixel is ``156543 * cos(lat) / 2**zoom`` -- the powers of
+    two cancel exactly, so the pair reduces to a constant over cos(lat)
+    and zoom drops out of the expression entirely. That is the same
+    statement as "a streak is the same size on screen at every zoom",
+    which is what two separate knobs were being used to arrange.
+    """
+    import re as _re
+    src = _strip_js_comments(JS.read_text(encoding="utf-8"))
+    assert "particleSpeedFactor" not in src and "particleZoomRef" not in src, (
+        "the two collapsed knobs are back")
+    speed = float(_re.search(
+        r"v\.particleSpeed !== undefined \? v\.particleSpeed : ([\d.]+)",
+        src).group(1))
+    # A sane magnitude, not an exact value -- the number is tuned by
+    # eye and lives in the group checked by
+    # test_the_frame_rate_and_trail_defaults_are_one_group.
+    assert 0.1 < speed < 1.5, (
+        f"particleSpeed {speed} px/frame per m/s is outside any usable "
+        f"range; at the capped frame rate this is motion of "
+        f"{speed * 30:.0f} px/s for a 1 m/s wind")
+    build = _strip_js_comments(_js_fn_body("buildField"))
+    assert "var scale = cfg.speed;" in build, (
+        "the per-cell scale must be cfg.speed alone — no zoom term and "
+        "no latitude term")
+
+
+def test_streak_length_still_reads_at_both_ends():
+    """Readable in a calm cell, bounded in a hurricane -- now computed
+    straight from particleSpeed, with no zoom anywhere in it."""
+    import math
+    import re as _re
+    src = _strip_js_comments(JS.read_text(encoding="utf-8"))
+
+    def num(pat):
+        m = _re.search(pat, src)
+        assert m, pat
+        return float(m.group(1))
+
+    speed = num(r"v\.particleSpeed !== undefined \? v\.particleSpeed : ([\d.]+)")
+    length = num(r"v\.particleTrailLength \|\| ([\d.]+)")
+    floor = num(r"v\.windMinSpeedMs !== undefined \? v\.windMinSpeedMs : ([\d.]+)")
+    ceil_ = num(r"v\.windMaxSpeedMs !== undefined \? v\.windMaxSpeedMs : ([\d.]+)")
+
+    def px(wind, lat=29.0):
+        return (min(max(wind, floor), ceil_) * speed
+                / math.cos(math.radians(lat))) * length
+
+    # The bug this guards is a ONE-PIXEL DOT, not a short dash. The
+    # threshold was 10px when the floor was 3 m/s; the floor is 1 m/s
+    # now, which deliberately lets calm areas read as calm instead of
+    # holding every cell up to the same artificial length.
+    assert px(0.5) > 4, (
+        f"a calm cell draws {px(0.5):.1f}px — the minSpeed floor has "
+        f"stopped holding the low end up at all")
+    assert 20 < px(4.0) < 60, f"4 m/s gives {px(4.0):.1f}px"
+    assert px(80.0) < 500, f"80 m/s gives {px(80.0):.1f}px"
+    # And it cannot vary with zoom, because zoom is not in the formula.
+    assert "getZoom" not in _strip_js_comments(_js_fn_body("buildField"))
+
+
+def test_the_field_grid_and_tile_cap_are_not_viz_knobs():
+    """Both are internal constants now.
+
+    Neither has a use the caller can reason about: an 8 px cell is
+    already finer than a 0.25 degree forecast grid at every map zoom,
+    and the tile cap only governs waste past zoom 10. Exposing them
+    invited tuning where there is nothing to tune.
+    """
+    src = _strip_js_comments(JS.read_text(encoding="utf-8"))
+    assert "particleFieldSpacing" not in src
+    assert "particleMaxTileZoom" not in src
+    assert "var FIELD_SPACING = 8;" in src
+    assert "var MAX_TILE_ZOOM = 10;" in src
+    assert "Math.min(MAX_TILE_ZOOM" in src, "the tile cap is not applied"
+    build = _strip_js_comments(_js_fn_body("buildField"))
+    assert "var sp = FIELD_SPACING;" in build
+
+    import geeViz.weather as wx
+    viz = _stamped_viz()
+    for gone in ("particleFieldSpacing", "particleMaxTileZoom",
+                 "particleMinCount", "particleMaxCount",
+                 "particleZoomRef", "particleSpeedFactor"):
+        assert gone not in viz, f"python still sends {gone}"
+
+
+def test_a_spent_particle_keeps_flying_while_it_fades():
+    """The fade must run in the same direction the particle moves.
+
+    The first version FROZE the particle and pulled its trail into the
+    stationary head. That consumes the tail first, which is the right
+    order -- but a motionless streak surrounded by moving ones reads as
+    drifting backwards, because everything around it is still going
+    forward. Keeping it flying while only its trail allowance shrinks
+    puts the motion of the fade and the motion of the particle in the
+    same direction.
+    """
+    body = _strip_js_comments(_js_fn_body("frame"))
+    branch = body[body.index("if (p.retiring) {"):]
+    branch = branch[:branch.index("}") + 1]
+
+    assert "p.retire -= 1;" in branch, (
+        "retirement must count DOWN a trail allowance")
+    assert "p.xs.shift()" not in branch, (
+        "the retirement branch must not retract the trail itself — that "
+        "is what froze the particle; the normal trim handles it")
+    assert "continue;" in branch and "p.dead = true" in branch, (
+        "a fully faded particle must respawn")
+
+    # The particle still advances: the branch must fall THROUGH to the
+    # field read rather than skipping it.
+    after = body[body.index("if (p.retiring) {"):]
+    assert after.index("fieldAt(st, p.x, p.y)") > 0, (
+        "a retiring particle never reaches the advection — it is frozen "
+        "again")
+
+    # ...and the trim is tail-first, with a shrinking cap.
+    assert "var cap = p.retiring ? p.retire : n;" in body, (
+        "the trail allowance must shrink only while retiring")
+    assert "while (p.xs.length > cap) { p.xs.shift(); p.ys.shift(); }" in body, (
+        "the trim must drop the OLDEST points — pop() would eat the head "
+        "and the streak would retract backwards")
+
+
+def test_retirement_starts_from_the_trail_it_actually_has():
+    """A particle that died young has a short trail; fading it over the
+    full trailLength would leave it frozen-but-alive for frames with
+    nothing to draw."""
+    body = _strip_js_comments(_js_fn_body("frame"))
+    assert body.count("p.retire = p.xs.length;") == 2, (
+        "both retirement entries -- old age and no-data -- must size the "
+        f"fade to the current trail; found {body.count('p.retire = p.xs.length;')}")
+    # BOTH exits, counted. Asserting mere presence passed with the
+    # guard stripped from one of them, because the other still had it.
+    assert body.count("&& !p.retiring") == 2, (
+        f"{body.count('&& !p.retiring')} of the 2 retirement entries "
+        f"guard against re-arming; an unguarded one resets p.retire "
+        f"every frame and the particle never dies")
+
+
+# ---------------------------------------------------------------------------
+# Seeding layouts
+# ---------------------------------------------------------------------------
+
+
+def test_the_three_layouts_are_available():
+    """``random`` scatters, ``grid`` is a strict lattice, ``randomGrid``
+    is that lattice under ONE random offset -- even spacing without the
+    rows landing identically every time."""
+    src = _strip_js_comments(JS.read_text(encoding="utf-8"))
+    assert 'v.particleLayout === "grid" || v.particleLayout === "randomGrid"' in src, (
+        "the layout is not validated; an unknown value should fall back "
+        "to random rather than producing an empty field")
+    body = _strip_js_comments(_js_fn_body("layout"))
+    assert 'cfg.layout === "randomGrid" ? Math.random() * dx : dx / 2' in body, (
+        "randomGrid must offset the WHOLE lattice; offsetting each cell "
+        "separately is just `random` with extra steps")
+    assert "Math.sqrt((w * h) / n)" in body, (
+        "the lattice must use square cells, or the spacing differs "
+        "between the axes")
+
+
+def test_python_sends_the_layout():
+    """``particleLayout`` is a string, so it escapes the numeric
+    default-parity check that covers the rest of the set -- a deletion
+    here would otherwise pass everything."""
+    viz = _stamped_viz()
+    assert viz.get("particleLayout") == "random", (
+        f"python sends {viz.get('particleLayout')!r}; the client would "
+        f"fall back to its own default and the two could drift")
+    import ee
+    import geeViz.weather as wx
+    sent = {}
+
+    class FakeMap:
+        def addLayer(self, image, viz=None, name=None, visible=True):
+            sent[name] = viz or {}
+
+    wx.addWindLayer(FakeMap(), ee.Image([1, 2]).rename(["u", "v"]),
+                    {"particleLayout": "randomGrid"}, "W")
+    v = [x for x in sent.values() if x.get("windParticles")][0]
+    assert v["particleLayout"] == "randomGrid", "an explicit layout is dropped"
+
+
+def test_a_lattice_particle_returns_to_its_cell():
+    """Respawning a grid particle at a random point erodes the pattern
+    into noise within a lifetime or two, which defeats the point of
+    asking for a grid."""
+    body = _strip_js_comments(_js_fn_body("respawn"))
+    assert 'p.hx === undefined || cfg.layout === "random"' in body
+    assert "p.x = p.hx;" in body and "p.y = p.hy;" in body
+
+
+def test_the_layout_maths_run():
+    """Executed, not grepped."""
+    d = _probe_layout()
+    assert d["randomCount"] == 2975, d["randomCount"]
+    # A lattice lands near the requested count, not exactly on it.
+    assert abs(d["gridCount"] - 2975) < 2975 * 0.05, d["gridCount"]
+    assert d["cols"] * d["rows"] == d["gridCount"]
+    # Square cells, uniform spacing (float noise only).
+    assert d["dxSpread"] < 1e-9, d["dxSpread"]
+    assert abs(d["dx"] - d["dy"]) < 1.0, (d["dx"], d["dy"])
+    # randomGrid keeps the spacing and moves the phase.
+    assert d["offsetsDiffer"], "randomGrid produced the same offset twice"
+    assert d["randomGridCount"] == d["gridCount"]
+
+
+# ---------------------------------------------------------------------------
+# The two tile-cache bugs
+# ---------------------------------------------------------------------------
+
+
+def test_an_incomplete_field_is_not_cached():
+    """A field built while tiles were still in flight must be rebuilt.
+
+    This stamped the view key whenever a SINGLE cell had data, so a
+    build that ran mid-load was cached as final and ensureField returned
+    true forever after -- leaving large regions permanently blank over a
+    map whose loading counter honestly read zero, because the tiles
+    really had finished. The field was frozen before they arrived.
+    """
+    body = _strip_js_comments(_js_fn_body("buildField"))
+    assert "st.fieldKey = (any && !st.inflight) ? viewKey(st) : null;" in body, (
+        "the field is cached without checking for tiles still in "
+        "flight; half-loaded views will stick")
+
+
+def test_a_failed_tile_is_retried_but_not_forever():
+    """One 404 or decode error left a tile-shaped hole in the wind for
+    the life of the page, because `false` was cached and `hit !==
+    undefined` returned it unconditionally."""
+    body = _strip_js_comments(_js_fn_body("getTile"))
+    assert "if (hit === false) {" in body, (
+        "a failed tile is still cached permanently")
+    assert "if (fails >= TILE_RETRIES) return false;" in body, (
+        "retries must be bounded, or a genuinely missing tile is "
+        "requested on every frame forever")
+    assert "hit = undefined;" in body, "the retry never refetches"
+    src = _strip_js_comments(JS.read_text(encoding="utf-8"))
+    assert "var TILE_RETRIES = 3;" in src
+    assert "tileFails: Object.create(null)" in src, (
+        "nothing tracks the failure count, so the bound cannot hold")
+
+
+# ---------------------------------------------------------------------------
+# Cost. The renderer has to fit in a frame.
+# ---------------------------------------------------------------------------
+
+
+def test_the_trail_is_stroked_in_bands_not_per_segment():
+    """One pass per BAND, not per trail segment.
+
+    Stroking by segment walked every particle once per rank and emitted
+    an isolated moveTo+lineTo for each: 145,000 canvas path operations a
+    frame at the old defaults, 8.7 million a second. That is what made
+    the animation choppy. A band draws a contiguous run as a POLYLINE at
+    one alpha, so the moveTo is paid once per band instead of once per
+    segment.
+    """
+    body = _strip_js_comments(_js_fn_body("frame"))
+    assert "for (var rank = 1; rank < n; rank++)" not in body, (
+        "the per-segment stroke loop is back")
+    assert "for (var b = 0; b < bands; b++)" in body
+    assert "for (var k = i0 + 1; k <= i1; k++) ctx.lineTo(" in body, (
+        "a band must be drawn as a polyline; one moveTo per segment is "
+        "the cost this replaced")
+    src = _strip_js_comments(JS.read_text(encoding="utf-8"))
+    assert "var TRAIL_BANDS = 8;" in src
+    # The band COUNT must come from that constant. Pinning it to 1 would
+    # draw every trail at one flat alpha -- no taper, no bright head, no
+    # comet at all -- while leaving the band loop and the polyline in
+    # place for every other assertion here to pass.
+    assert "var bands = Math.min(segs, TRAIL_BANDS);" in body, (
+        "the band count is not derived from TRAIL_BANDS; a constant "
+        "here silently flattens the taper")
+
+
+def test_the_band_cut_is_hoisted_out_of_the_particle_loop():
+    """Almost every trail is full length.
+
+    Computing the band's index range per particle cost two divisions and
+    two floors on every visit -- 47,600 a frame -- and made the banded
+    version measurably SLOWER than the per-segment one it replaced.
+    Cutting the common case once per band fixed it.
+    """
+    body = _strip_js_comments(_js_fn_body("frame"))
+    i_hoist = body.index("var fi0 = Math.floor((b * segs) / bands);")
+    i_loop = body.index("for (var j = 0; j < ps.length; j++)")
+    assert i_hoist < i_loop, (
+        "the full-length band cut must happen before the particle loop")
+    assert "if (own === segs) {" in body, (
+        "the hoisted values are computed but never used")
+
+
+def test_the_animation_is_frame_capped():
+    """rAF fires at the display rate; we render at FRAME_MS.
+
+    windy.js runs its loop at 30fps for the same reason. A steady 30
+    also reads better than an unsteady 50 -- irregular frame times are
+    what the eye registers as choppy.
+    """
+    src = _strip_js_comments(JS.read_text(encoding="utf-8"))
+    assert "var FRAME_MS = 1000 / 30;" in src
+    body = _strip_js_comments(_js_fn_body("tick"))
+    assert "if (now - lastFrameAt >= FRAME_MS) {" in body, (
+        "tick renders on every rAF; the cap does nothing")
+    assert "lastFrameAt = now;" in body
+    # rAF's own timestamp, not a wall clock that can jump.
+    assert "function tick(ts)" in body and "ts ||" in body, (
+        "the cap should use the monotonic timestamp rAF passes in")
+    # ...and rAF must still be rescheduled on the skipped frames, or the
+    # loop stops after one tick.
+    assert body.rindex("requestAnimationFrame(tick)") > body.index("}"), (
+        "rescheduling must sit outside the FRAME_MS branch")
+
+
+def test_the_frame_rate_and_trail_defaults_are_one_group():
+    """Four numbers that only make sense together.
+
+    Streak length is ``trailLength * speed`` and apparent motion is
+    ``speed * frameRate``. At a fixed frame rate the trail cannot be
+    shortened without speeding the field up, so halving the rate,
+    doubling the step and halving the trail is the only change that
+    leaves both length and motion exactly as they were -- while drawing
+    a quarter as many segments a second. Lifetimes are counted in
+    frames, so they halve with the rate too or particles live twice as
+    long in wall-clock time.
+    """
+    import re as _re
+    src = _strip_js_comments(JS.read_text(encoding="utf-8"))
+
+    def num(pat):
+        m = _re.search(pat, src)
+        assert m, pat
+        return float(m.group(1))
+
+    # FRAME_MS is written `1000 / 30`, so the captured number IS the
+    # frame rate. Dividing it into 1000 again gives 33, not 30 -- which
+    # is exactly the slip this assertion then reported.
+    fps = num(r"var FRAME_MS = 1000 / ([\d.]+);")
+    speed = num(r"v\.particleSpeed !== undefined \? v\.particleSpeed : ([\d.]+)")
+    trail = num(r"v\.particleTrailLength \|\| ([\d.]+)")
+    max_age = num(r"var maxAge = v\.particleMaxAge \|\| ([\d.]+);")
+
+    # These are TUNED BY EYE, so the test pins the relationship and a
+    # sane range rather than three exact numbers -- pinning the numbers
+    # just means re-editing the test every time the look is adjusted,
+    # which teaches people to edit it without thinking.
+    #
+    # What must hold: a streak long enough to read and short enough not
+    # to smear, motion quick enough to be alive and slow enough to
+    # follow, and a lifetime measured in seconds rather than frames.
+    length = trail * speed          # px per m/s of wind
+    motion = speed * fps            # px/s per m/s of wind
+    life = max_age / fps            # seconds
+
+    assert 4.0 < length < 12.0, (
+        f"streak length {length:.2f} px per m/s — under ~4 a 4 m/s "
+        f"breeze is a dot, over ~12 a gale smears")
+    assert 10.0 < motion < 30.0, (
+        f"apparent motion {motion:.1f} px/s per m/s — the field either "
+        f"crawls or races")
+    assert 1.0 < life < 4.0, (
+        f"a particle lives {life:.2f}s; much less churns, much more and "
+        f"the field goes static")
+
+    # And the coupling itself: lifetimes are counted in FRAMES, so a
+    # frame-rate change that does not scale them changes how long a
+    # particle lives in wall-clock time.
+    assert max_age > trail, (
+        f"maxAge {max_age} is not longer than the trail {trail}; every "
+        f"particle would retire before its trail ever filled")
+
+
+def test_the_per_second_cost_is_bounded():
+    """A budget, in the units that actually matter.
+
+    The renderer draws ``particles x (trail - 1)`` segments a frame, at
+    the capped rate. The old defaults came to 8.7 million canvas path
+    operations a second, which no 2D canvas holds at 60fps -- and that
+    is measured against a rewrite that was 25x the cost of the fade
+    renderer it replaced.
+    """
+    import math
+    import re as _re
+    src = _strip_js_comments(JS.read_text(encoding="utf-8"))
+
+    def num(pat):
+        return float(_re.search(pat, src).group(1))
+
+    # FRAME_MS is written `1000 / 30`, so the captured number IS the
+    # frame rate. Dividing it into 1000 again gives 33, not 30 -- which
+    # is exactly the slip this assertion then reported.
+    fps = num(r"var FRAME_MS = 1000 / ([\d.]+);")
+    trail = num(r"v\.particleTrailLength \|\| ([\d.]+)")
+    bands = num(r"var TRAIL_BANDS = ([\d.]+);")
+    density = num(r"v\.particleDensity !== undefined \? v\.particleDensity : ([\d.]+)")
+
+    n = 1700 * density                       # a typical canvas
+    segs = trail - 1
+    # One moveTo per band plus one lineTo per segment.
+    ops = n * (segs + min(segs, bands))
+    per_sec = ops * fps
+    assert per_sec < 3e6, (
+        f"{per_sec:,.0f} canvas path operations a second on a 1700px "
+        f"canvas — the old design measured 8.7M and was visibly choppy")
+
+
+# ---------------------------------------------------------------------------
+# The particle speed ceiling follows the raster stretch.
+# ---------------------------------------------------------------------------
+
+
+def _wind_viz(viz):
+    import ee
+    import geeViz.weather as wx
+    sent = {}
+
+    class FakeMap:
+        def addLayer(self, image, viz=None, name=None, visible=True):
+            sent[name] = viz or {}
+
+    wx.addWindLayer(FakeMap(), ee.Image([1, 2]).rename(["u", "v"]), viz, "W")
+    return [x for x in sent.values() if x.get("windParticles")][0]
+
+
+def test_the_speed_ceiling_follows_the_stretch():
+    """``particleMaxSpeed`` defaults to ``max``, converted to m/s.
+
+    These used to be unrelated numbers: the stretch is expressed in
+    ``units`` while the particle bounds are m/s, so ``units='km/hr',
+    max=30`` saturated the colour ramp at 8.3 m/s while the particles
+    went on lengthening to a fixed 45. Past ``max`` the raster is one
+    flat colour, and a streak that keeps growing there is claiming a
+    difference the map has stopped showing.
+    """
+    import geeViz.weather as wx
+    cases = [
+        ({}, wx.DEFAULT_MAX_SPEED["km/hr"] / wx.SPEED_UNITS["km/hr"]),
+        ({"units": "mi/hr", "max": 100}, 100 / wx.SPEED_UNITS["mi/hr"]),
+        ({"units": "km/hr", "max": 30}, 30 / wx.SPEED_UNITS["km/hr"]),
+        ({"units": "m/s", "max": 20}, 20.0),
+    ]
+    for viz, expected in cases:
+        got = _wind_viz(dict(viz))["windMaxSpeedMs"]
+        assert abs(got - expected) < 1e-6, (
+            f"{viz or 'defaults'}: ceiling {got:.2f} m/s against a "
+            f"stretch that saturates at {expected:.2f} m/s")
+
+
+def test_both_bounds_are_derived_from_the_stretch():
+    """``particleSpeed`` is the only speed knob.
+
+    The floor and ceiling come from ``min`` and ``max``, converted from
+    ``units`` to m/s, so the streaks start and stop growing exactly
+    where the colour ramp does. Two hand-set m/s constants alongside a
+    stretch in some other unit was a contradiction waiting to be found:
+    ``units='km/hr', max=30`` saturated the ramp at 8.3 m/s while the
+    particles kept lengthening to a fixed 45.
+    """
+    import geeViz.weather as wx
+    cases = [
+        # viz                                        floor   ceiling
+        ({"units": "km/hr", "min": 5, "max": 30},     5 / 3.6, 30 / 3.6),
+        ({"units": "m/s", "min": 2, "max": 20},       2.0,     20.0),
+        ({"units": "mi/hr", "min": 10, "max": 100},
+         10 / wx.SPEED_UNITS["mi/hr"], 100 / wx.SPEED_UNITS["mi/hr"]),
+    ]
+    for viz, floor, ceil_ in cases:
+        v = _wind_viz(dict(viz))
+        assert abs(v["windMinSpeedMs"] - floor) < 1e-6, (
+            f"{viz}: floor {v['windMinSpeedMs']:.2f} != {floor:.2f} m/s")
+        assert abs(v["windMaxSpeedMs"] - ceil_) < 1e-6, (
+            f"{viz}: ceiling {v['windMaxSpeedMs']:.2f} != {ceil_:.2f} m/s")
+
+
+def test_a_zero_floor_becomes_one_metre_per_second():
+    """``min`` is 0 on nearly every wind map, which would leave no floor
+    at all -- and length is proportional to speed, so a light breeze
+    draws a one-pixel dot and a calm map reads as broken.
+
+    One METRE PER SECOND specifically, not one of whatever ``units``
+    happens to be: the bounds are m/s throughout, and 1 mi/hr is 0.45
+    m/s, which would put the dots back.
+    """
+    for units in ("m/s", "km/hr", "mi/hr"):
+        v = _wind_viz({"units": units, "min": 0, "max": 100})
+        assert v["windMinSpeedMs"] == 1.0, (
+            f"units={units}: a zero stretch floor gave "
+            f"{v['windMinSpeedMs']}, not 1 m/s")
+    # A negative floor is not a speed; it clamps to zero and then to 1.
+    assert _wind_viz({"units": "m/s", "min": -5, "max": 20})["windMinSpeedMs"] == 1.0
+
+
+def test_a_degenerate_stretch_does_not_invert_the_clamp():
+    """A stretch whose max falls below the 1 m/s substitute would give a
+    floor above the ceiling, and ``min(max(mag, floor), ceil)`` then
+    pins every cell to the ceiling regardless of wind -- a field that
+    animates uniformly and looks like data."""
+    v = _wind_viz({"units": "m/s", "min": 0, "max": 0.4})
+    assert v["windMinSpeedMs"] <= v["windMaxSpeedMs"], (
+        f"floor {v['windMinSpeedMs']} exceeds ceiling "
+        f"{v['windMaxSpeedMs']}")
+
+
+def test_there_are_no_speed_bound_parameters():
+    """The floor and ceiling are not settable, by design.
+
+    Two loose m/s numbers beside a stretch expressed in some other unit
+    is the contradiction this whole thing replaced -- ``units='km/hr',
+    max=30`` saturating the ramp at 8.3 m/s while particles lengthened
+    to a fixed 45. There is nothing left to set that ``min``, ``max``
+    and ``units`` do not already say, so widening the stretch is how you
+    widen the range the streaks respond over.
+    """
+    # The old names are gone from the wire entirely.
+    viz = _stamped_viz()
+    for gone in ("particleMinSpeed", "particleMaxSpeed"):
+        assert gone not in viz, f"{gone} is still sent"
+    # Passing one has no effect -- the stretch decides.
+    v = _wind_viz({"units": "mi/hr", "max": 100, "particleMaxSpeed": 60})
+    assert abs(v["windMaxSpeedMs"] - 100 / 2.236936292054402) < 1e-6, (
+        "a stray particleMaxSpeed overrode the stretch; it should be "
+        "inert")
+    # And the client reads the renamed keys, not the old ones.
+    src = _strip_js_comments(JS.read_text(encoding="utf-8"))
+    assert "v.particleMinSpeed" not in src and "v.particleMaxSpeed" not in src
+    assert "v.windMinSpeedMs" in src and "v.windMaxSpeedMs" in src
+
+
+def test_the_units_conversion_is_the_right_way_round():
+    """``SPEED_UNITS`` holds the multiplier FROM m/s, so a stretch is
+    DIVIDED by it. Multiplying instead turns 100 mi/hr into 224 m/s --
+    a ceiling no wind reaches, i.e. no ceiling at all, and nothing would
+    look wrong until a hurricane smeared across the screen."""
+    import geeViz.weather as wx
+    got = _wind_viz({"units": "mi/hr", "max": 100})["windMaxSpeedMs"]
+    assert 44 < got < 45, f"100 mi/hr came to {got:.1f} m/s; it is 44.7"
+    assert got < 100 * wx.SPEED_UNITS["mi/hr"]
+
+
+def test_the_notebooks_stated_defaults_are_true():
+    """The example annotates each knob with "default N". Check the N.
+
+    The notebook deliberately shows some NON-default values (mi/hr, a
+    0..100 stretch), so its literals are not the contract -- but its
+    parenthetical claims about the defaults are, and they are exactly
+    the sort of thing that rots silently as the defaults are retuned.
+    Nothing else in this file compares them.
+    """
+    import json
+    import re as _re
+    nb = json.loads((ROOT / "geeViz" / "examples" /
+                     "weather_forecast_examples.ipynb").read_text(encoding="utf-8"))
+    cell = None
+    for c in nb["cells"]:
+        src = "".join(c["source"])
+        if "addWindLayer" in src and "particleSpeed" in src:
+            cell = src
+            break
+    assert cell, "the wind-layer cell is gone from the notebook"
+
+    viz = _stamped_viz()
+    # Split into one block per parameter, then read the claim out of the
+    # comment that follows it.
+    entries = _re.split(r"\n(?=\s*#?\s*'particle)", cell)
+    claims, checked = {}, 0
+    for e in entries:
+        m = _re.search(r"'(particle[A-Za-z]+)'\s*:", e)
+        if not m:
+            continue
+        d = _re.search(r"default\s+([0-9.]+)", e)
+        if not d:
+            continue
+        claims[m.group(1)] = float(d.group(1).rstrip("."))
+
+    assert len(claims) >= 8, (
+        f"only found {len(claims)} 'default N' claims in the notebook — "
+        f"the parser has drifted and is checking almost nothing")
+
+    wrong = []
+    for key, claimed in claims.items():
+        if key not in viz:
+            continue          # particleCount is deliberately not sent
+        actual = float(viz[key])
+        # particleMinAge/MaxSize are derived from another default, so
+        # compare loosely; everything else is exact.
+        if abs(actual - claimed) > 1e-6:
+            wrong.append(f"{key}: notebook says {claimed}, actual {actual}")
+        checked += 1
+    assert checked >= 8, f"only compared {checked} claims"
+    assert not wrong, "notebook documents stale defaults — " + "; ".join(wrong)
+
+
+def test_screen_speed_does_not_vary_with_latitude():
+    """No cos(lat) in the advection.
+
+    It used to divide by it, because Mercator genuinely does stretch a
+    fixed ground speed into more pixels toward the poles. True, but it
+    made the Arctic unreadable: in a world view spanning -60..+80 the
+    streaks at the top ran SIX TIMES those at the equator in the same
+    frame, and past 85 degrees the factor diverges.
+
+    Dropping it costs nothing geometric. Mercator is conformal, so at
+    any point the projection scales u and v by the SAME factor --
+    dividing the whole vector field by a scalar field leaves the
+    direction at every point unchanged, and therefore leaves the shape
+    of every streamline unchanged. Only the speed ALONG a streamline
+    differs. The streaks trace exactly the same curves at an even rate.
+
+    It is also the consistent choice: length stopped representing ground
+    speed the moment it was made zoom-invariant, so keeping one
+    projection term after dropping the other was the odd state.
+    """
+    body = _strip_js_comments(_js_fn_body("buildField"))
+    assert "Math.cos" not in body, (
+        "the latitude term is back; a world view will blow up at the "
+        "poles again")
+    assert "cosLat" not in body
+    assert "var scale = cfg.speed;" in body
+
+
+def test_width_and_length_are_named_for_what_they_measure():
+    """WIDTH across the streak, LENGTH along it. ``size`` said neither."""
+    src = _strip_js_comments(JS.read_text(encoding="utf-8"))
+    for gone in ("particleMinSize", "particleMaxSize", "cfg.minSize",
+                 "cfg.maxSize"):
+        assert gone not in src, f"{gone} survived the rename"
+    for want in ("particleMinWidth", "particleMaxWidth", "cfg.minWidth",
+                 "cfg.maxWidth", "particleTrailLength"):
+        assert want in src, f"{want} missing"
+    viz = _stamped_viz()
+    assert "particleMinWidth" in viz and "particleMaxWidth" in viz
+    assert "particleMinSize" not in viz and "particleMaxSize" not in viz
+
+
+def test_a_hidden_layer_clears_its_progress_fill():
+    """Unchecking the layer must blank the white fill across its row.
+
+    The viewer sets ``layer.percent = 0`` wherever it hides a layer, and
+    the fill is painted from that. Reporting a flat 100 whenever nothing
+    was in flight left this one row painted while every other unchecked
+    layer went blank -- a small thing, but it makes the particle layer
+    look like it is still doing something.
+    """
+    body = _strip_js_comments(_js_fn_body("reportProgress"))
+    assert "var visible = L.visible !== false;" in body, (
+        "progress is reported without consulting visibility")
+    assert "var percent = !visible ? 0" in body, (
+        "a hidden layer must report 0 percent, not 100")
+    assert "var loading = visible && inflight > 0;" in body, (
+        "a hidden layer must not report as loading either — the spinner "
+        "would spin on a layer nobody is looking at")
+
+
+def test_the_canvas_is_restacked_when_layers_are_reordered():
+    """Dragging a raster above the particles must actually reorder them.
+
+    ``overlayLayer`` is documented as the pane holding "polylines,
+    polygons, ground overlays and TILE LAYER OVERLAYS" -- so
+    ``map.overlayMapTypes`` and this canvas share one pane, and a
+    z-index orders them against each other. ``layerId`` is the index the
+    viewer passes to ``overlayMapTypes.setAt``, so matching it puts the
+    particles into the same stack the rasters use.
+
+    The z-index must be RE-APPLIED rather than written once. Dragging
+    runs the viewer's updateMapLayerOrder, which reassigns every
+    ``layer.layerId`` and re-adds the rasters at their new index; a
+    value written at adoption keeps whatever order the list had when the
+    layer was created, and the drag appears to do nothing.
+    """
+    src = _strip_js_comments(JS.read_text(encoding="utf-8"))
+    assert "function applyStacking(st, canvas)" in src
+    body = _strip_js_comments(_js_fn_body("applyStacking"))
+    assert "L.layerId" in body, (
+        "the stack position must come from layerId — that is the index "
+        "the rasters are placed at")
+    assert "c.style.zIndex = z;" in body
+
+    # Applied on the refresh tick, not only at adoption.
+    refresh = _strip_js_comments(_js_fn_body("refreshRunState"))
+    assert "applyStacking(st)" in refresh, (
+        "the z-index is never refreshed, so a drag cannot reorder the "
+        "particles")
+    # ...and still set on first paint, so the first frame is not wrong.
+    add = _strip_js_comments(JS.read_text(encoding="utf-8"))
+    assert "applyStacking(st, c);" in add, (
+        "onAdd no longer stacks the canvas; the first paint would sit "
+        "at the default position")
+
+
+def test_the_canvas_stays_in_the_tile_overlay_pane():
+    """``overlayLayer``, not ``mapPane``.
+
+    mapPane is below the tile overlays entirely, which would bury the
+    particles under every raster no matter what the list says -- the
+    opposite error, equally wrong. Sharing overlayLayer is what makes
+    the ordering a z-index question at all.
+    """
+    src = _strip_js_comments(JS.read_text(encoding="utf-8"))
+    assert "getPanes().overlayLayer" in src, (
+        "the canvas moved out of the tile-overlay pane; z-index can no "
+        "longer order it against the rasters")
+    assert "getPanes().mapPane" not in src

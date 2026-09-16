@@ -107,3 +107,52 @@ def test_every_local_asset_is_covered_one_way_or_the_other():
     assert not uncovered, (
         f"local assets with no cache strategy: {sorted(uncovered)} — add "
         f"a ?v= stamp (shipped) or no-store (per-session)")
+
+
+def test_the_proxy_serves_geeview_with_no_store():
+    """``Map.view()`` rewrites ``runGeeViz.js`` in place, so the URL
+    never changes while the content does.
+
+    Starlette's ``StaticFiles`` sends ``last-modified`` and ``etag`` but
+    no ``Cache-Control``, and with no explicit directive a browser may
+    serve a heuristically-fresh copy without revalidating -- showing the
+    PREVIOUS map, silently. geeViz's own handler forces no-store for
+    exactly this reason; running behind the eeAuth proxy lost it, and
+    the proxy is the default path.
+
+    Observed before the fix, on a regenerated map:
+
+        HTTP/1.1 200 OK
+        last-modified: ...
+        etag: ...
+        (no Cache-Control)
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    src = (root / "geeViz" / "eeAuth" / "server.py").read_text(encoding="utf-8")
+    code = "\n".join(ln for ln in src.splitlines()
+                     if not ln.strip().startswith("#"))
+
+    assert "class _NoStoreStatic(StaticFiles):" in code, (
+        "the /geeView mount is plain StaticFiles again; a regenerated "
+        "map can be served from cache")
+    assert '_NoStoreStatic(directory=_GEEVIEW_DIR' in code, (
+        "the no-store subclass exists but the mount does not use it")
+    assert re.search(r'Cache-Control"\]\s*=\s*"no-store', code), (
+        "the subclass does not actually set no-store")
+    # The bare class must not be what gets mounted.
+    assert re.search(r'\n\s+StaticFiles\(directory=_GEEVIEW_DIR', code) is None
+
+
+def test_both_servers_agree_on_no_store():
+    """geeViz can serve its own pages or sit behind the proxy. A caching
+    rule that holds on one path and not the other is worse than either,
+    because it only bites in one deployment."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    for rel in ("geeViz/geeView.py", "geeViz/eeAuth/server.py"):
+        src = (root / rel).read_text(encoding="utf-8")
+        assert "no-store" in src, f"{rel} does not force no-store"
