@@ -3637,6 +3637,7 @@ def summarize_and_chart(
     max_class_label_length=30,
     x_label=None,
     y_label=None,
+    hovertemplate=None,
     **_compat,
 ):
     """
@@ -3761,6 +3762,24 @@ def summarize_and_chart(
             name strings in legends and labels. Longer names are truncated
             with ``...`` in the middle, preserving the end. Set to ``None``
             or ``0`` to disable. Default 30.
+
+    Customizing the look:
+        ``hovertemplate`` sets the Plotly hover text on every trace, e.g.
+        ``"<b>%{x}</b><br>%{y:.1f} degF<extra></extra>"``; use
+        ``%{customdata}`` for a second unit or an extra field.
+
+        For anything this function has no argument for, mutate the
+        returned Figure -- do NOT rebuild it. ``result["chart"]`` is a
+        live ``plotly.graph_objects.Figure``, so::
+
+            r = summarize_and_chart(ic, geom, chart_type="line+markers")
+            r["chart"].update_traces(selector=dict(name="Tmax"),
+                                     hovertemplate="...")
+
+        reaches one trace and keeps the tick-label capping, class-label
+        truncation and layout defaults set here. Rebuilding with
+        ``go.Figure()`` throws all of that away and re-derives series
+        that ``result["df"]`` already holds.
 
     Returns:
         dict: Depends on chart type:
@@ -3908,7 +3927,11 @@ def summarize_and_chart(
         )
 
     def _apply_axis_overrides(result_dict):
-        """Override the chart's axis titles with the user-passed labels, if any."""
+        """Apply the user's axis-title and hover overrides, if any.
+
+        Every chart type returns through here, so this is the one place
+        a presentational override has to be wired to reach all of them.
+        """
         fig = result_dict.get("chart")
         if fig is not None and hasattr(fig, "update_layout"):
             kwargs = {}
@@ -3920,6 +3943,24 @@ def summarize_and_chart(
                 try:
                     fig.update_layout(**kwargs)
                 except Exception:
+                    pass
+            # Hover text was the one presentational thing this function
+            # could not express, and the gap was expensive: an agent
+            # wanting degrees F and C in the same tooltip rebuilt the
+            # whole figure with go.Figure() and 80-odd lines of
+            # add_trace, discarding the tick-label capping, label
+            # truncation and layout defaults set above.
+            #
+            # Applied to every trace. Per-trace templates remain
+            # available on the returned Figure via update_traces(
+            # selector=...), which is the documented escape hatch and
+            # does not require rebuilding anything.
+            if hovertemplate is not None and hasattr(fig, "update_traces"):
+                try:
+                    fig.update_traces(hovertemplate=hovertemplate)
+                except Exception:
+                    # Same posture as the axis overrides above: a bad
+                    # template must not cost the caller the chart.
                     pass
         return result_dict
 

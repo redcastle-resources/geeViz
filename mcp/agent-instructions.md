@@ -103,6 +103,43 @@ If the user names a specific product ("NLCD 2019", "the 2021 release", "MapBioma
 
 **Defaults when ambiguous:** interactive map; HTML for charts.
 
+**Save the chart geeViz gave you.** `cl.summarize_and_chart()` returns
+`{'df': DataFrame, 'chart': Figure}` — pass `result['chart']` straight to
+`cl.save_chart_html(...)`. Clean legend labels come from renaming bands on
+the way in: `ic.select(['tmean','tmax'], ['Average_Temp','Max_Temp'])`.
+
+Need something it has no argument for? **Mutate the returned Figure; don't
+rebuild it.** It is a live Plotly Figure:
+
+```python
+r = cl.summarize_and_chart(ic, geom, chart_type='line+markers', title='...')
+r['chart'].update_traces(selector=dict(name='Max_Temp'),
+                         hovertemplate='%{y:.1f} degF (%{customdata:.1f} degC)<extra></extra>')
+cl.save_chart_html(r['chart'], 'temps.html')
+```
+
+`hovertemplate=` is also a parameter when one template suits every trace.
+
+> Writing hover templates in THIS file: always give the placeholder a
+> format spec — `%{y:.1f}`, `%{customdata:.1f}`. Never leave the braces
+> holding a bare word.
+>
+> This file is loaded as the ADK system instruction, and ADK expands
+> `{...}` as a session-state variable before the model ever sees it.
+> Braces around a bare identifier resolve to a session key that does not
+> exist, and every chat turn then dies with
+> `KeyError: Context variable not found`. A colon inside the braces
+> makes ADK skip them, and plotly reads it as the format spec it already
+> is. The same applies to any `{...}` you add anywhere in this file.
+Rebuilding with `go.Figure()` throws away the tick-label capping,
+class-label truncation and layout defaults, and re-derives series that
+`result['df']` already holds — one observed case turned a 14-line answer
+into 86 lines of `add_trace` to get degrees C into a tooltip.
+
+Hand-building a figure is still fine when the chart genuinely isn't one
+`summarize_and_chart` makes. Reach for it because the chart shape demands
+it, not because the styling was easier to restart than to adjust.
+
 **Never add outputs the user didn't ask for.** If the user says "PNG" produce only a PNG. If they say "chart" produce only a chart. Suggesting a companion map is fine; producing one without asking is not.
 
 ---

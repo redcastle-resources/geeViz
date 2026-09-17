@@ -182,17 +182,40 @@ def test_a_custom_lapse_rate_is_used():
 def test_flat_terrain_changes_nothing():
     """dz is zero everywhere, so the correction must be too. Catches a
     reference elevation of sea level, which would shift the whole field
-    by 1500 * lapse."""
+    by 1500 * lapse -- about 9.75 C at the default rate.
+
+    Asserted on ``dz`` itself rather than on the temperature difference.
+    ``downscaleTemperature`` does ``img.add(dz.multiply(lapse))``, and the
+    arithmetic forces a reprojection, so sampling the result and sampling
+    the untouched input read two different grids. That costs ~0.02 C of
+    pure interpolation difference even when dz is exactly zero -- which
+    it is, measured -- so a tolerance tight enough to be meaningful
+    against a 9.75 C bug was failing on resampling noise instead.
+
+    dz is the quantity the docstring is actually making a claim about,
+    and it is exact.
+    """
     import ee
     import geeViz.weather as wx
     t = _fc("temperature_2m")
     flat = (ee.Image.constant(1500).rename("elevation")
               .setDefaultProjection("EPSG:4326", None, 500))
+
+    dz, _ = wx._elevation_delta(t, flat, 500)
+    for pt in (VALLEY, SUMMIT):
+        v = list(dz.reduceRegion(
+            ee.Reducer.first(), ee.Geometry.Point(pt), 500).getInfo().values())[0]
+        assert v is not None, f"dz is masked at {pt}"
+        assert abs(v) < 1e-6, (
+            f"flat terrain gave dz={v:+.4f} m at {pt}; a sea-level "
+            f"reference would give -1500")
+
+    # And end to end, loosely: far below the 9.75 C the bug produces,
+    # but not so tight that cross-projection sampling trips it.
     ds = wx.downscaleTemperature(t, dem=flat, scale=500)
     for pt in (VALLEY, SUMMIT):
-        assert abs(_at(ds, pt) - _at(t, pt)) < 0.02, (
-            f"flat terrain shifted {pt} by "
-            f"{_at(ds, pt) - _at(t, pt):+.3f} C")
+        d = _at(ds, pt) - _at(t, pt)
+        assert abs(d) < 0.1, f"flat terrain shifted {pt} by {d:+.3f} C"
 
 
 def test_the_reference_is_the_cell_mean_not_sea_level():
