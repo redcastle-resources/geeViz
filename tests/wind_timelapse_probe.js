@@ -20,6 +20,10 @@
 const fs = require("fs");
 const vm = require("vm");
 
+// Tiles the speed raster composited. Counting drawImage is how "did it
+// paint" and "did it skip a repaint it did not need" become observable.
+let drawnTiles = 0;
+
 // ---- a map, and the positional overlay array the viewer relies on ----
 function MVCArray() { this.a = []; }
 MVCArray.prototype.setAt = function (i, v) {
@@ -84,13 +88,28 @@ sandbox.document = {
   hidden: false,
   addEventListener() {},
   createElement: () => ({
-    style: {},
-    getContext: () => ({ clearRect() {}, setTransform() {}, beginPath() {},
-                         moveTo() {}, lineTo() {}, stroke() {} }),
+    width: 0, height: 0, style: {},
+    getContext: () => ({
+      clearRect() {}, setTransform() {}, beginPath() {},
+      moveTo() {}, lineTo() {}, stroke() {},
+      // The speed raster's scratch tile, and the composite onto the
+      // canvas. Counting drawImage is how "did it actually paint" and
+      // "did it skip a repaint it did not need" become observable.
+      createImageData: (w, h) => ({ width: w, height: h,
+                                    data: new Uint8ClampedArray(w * h * 4) }),
+      putImageData() {},
+      drawImage() { drawnTiles++; },
+      globalAlpha: 1,
+    }),
   }),
 };
 sandbox.google = {
   maps: {
+    Point: function (x, y) { this.x = x; this.y = y; },
+    LatLng: function (lat, lng) {
+      this.la = lat; this.ln = lng;
+      this.lat = () => lat; this.lng = () => lng;
+    },
     OverlayView: function () {
       this.setMap = function () {};
       this.getPanes = () => ({ overlayLayer: { appendChild() {} } });
@@ -107,12 +126,32 @@ sandbox.map = {
   // what a browser without IntersectionObserver also does.
 };
 sandbox.layerObj = LAYERS;
+// The viewer builds queryObj asynchronously, so it starts ABSENT here --
+// retargetQuery has to cope with that and retry, which is the case that
+// actually happens in a browser.
+sandbox.queryObj = {};
+sandbox.ee = {
+  Deserializer: {
+    fromJSON: (raw) => ({ decodedFrom: raw }),
+  },
+};
 
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), sandbox);
 const W = sandbox.geeVizWindParticles;
 
 W.scan();
+
+// Real Maps returns an eager LatLng; buildField and the speed raster
+// both reuse one Point and mutate it between calls, so a stub that
+// closed over the point would report every corner as the last one read.
+function snapshotLatLng(span, lat0, lon0, deg) {
+  return (p) => {
+    const x = p.x, y = p.y;
+    return { lat: () => lat0 - (y / span) * deg,
+             lng: () => lon0 + (x / span) * deg };
+  };
+}
 
 const out = {};
 const adopted = W._adopted;
@@ -145,6 +184,11 @@ function selectFrame(i) {
   W._refreshRunState();
 }
 
+// The Maps API calls onAdd when the overlay joins the map; the stub
+// does not, so do it by hand. This is what builds the canvas the
+// opacity now rides on.
+st.overlay.onAdd();
+
 out.beforeAnyFrame = { frameId: st ? st.frameId : null,
                        running: st ? st.running : null };
 
@@ -170,11 +214,21 @@ frameIds.forEach((id, i) => { LAYERS[id].opacity = i <= 5 ? 0.9 : 0; });
 W._refreshRunState();
 out.cumulative = { frameId: st.frameId };
 
-// Stopped: every frame back to zero. Nothing is showing, so nothing
-// should be drawing the encoded field of a frame the user cannot see.
+// Dimmed to nothing, but still ON. Every frame goes to opacity 0 and
+// none looks "raised" -- yet the lapse is playing and its checkbox is
+// ticked. It must keep running, or dragging the raster's opacity down
+// would silently kill the particles too.
+selectFrame(4);
 frameIds.forEach((id) => { LAYERS[id].opacity = 0; });
 W._refreshRunState();
-out.whenAllZero = { frameId: st.frameId, running: st.running };
+out.whenDimmedToZero = { frameId: st.frameId, running: st.running };
+
+// Switched OFF, which is a different thing: no frame is visible. Then
+// nothing should be drawing a field nobody can see.
+frameIds.forEach((id) => { LAYERS[id].visible = false; });
+W._refreshRunState();
+out.whenSwitchedOff = { running: st.running };
+frameIds.forEach((id) => { LAYERS[id].visible = true; });
 
 // Stacking: the canvas takes its z-index from the frame on screen.
 // For a lapse st.id is the group key and is not a registry entry at
@@ -203,14 +257,24 @@ LAYERS[frameIds[3]].layerId = 3;
 // value or each drag compounds on the last.
 st.cfg.baseOpacity = 0.9; st.cfg.opacity = 0.9;
 selectFrame(2);
-out.opacityAtFull = +st.cfg.opacity.toFixed(4);
+out.opacityAtFull = +st.canvas.style.opacity;
+out.fadeIsEased = /opacity \d+ms/.test(st.canvas.style.transition || "");
 frameIds.forEach(function (k) { LAYERS[k].opacity = 0; });
 LAYERS[frameIds[2]].opacity = 0.5;          // slider dragged to 50%
 W._refreshRunState();
-out.opacityAtHalf = +st.cfg.opacity.toFixed(4);
+out.opacityAtHalf = +st.canvas.style.opacity;
 W._refreshRunState();                        // idle ticks must not compound
 W._refreshRunState();
-out.opacityAfterIdleTicks = +st.cfg.opacity.toFixed(4);
+out.opacityAfterIdleTicks = +st.canvas.style.opacity;
+// The stroke alpha is the trail's SHAPE and must survive a drag: it is
+// taper and head boost, not a user preference.
+out.strokeAlphaUntouched = +st.cfg.opacity.toFixed(4);
+
+// A playing lapse zeroes every frame before raising the next. A
+// refresh landing in that gap must not blank the layer.
+frameIds.forEach(function (k) { LAYERS[k].opacity = 0; });
+W._refreshRunState();
+out.opacityDuringFrameGap = +st.canvas.style.opacity;
 
 // ---- and the plain layer is still driven by `visible` ----------------
 const pst = adopted["plain"];
@@ -222,5 +286,91 @@ out.plainAfterHide = pst.running;
 LAYERS["plain"].visible = true;
 W._refreshRunState();
 out.plainAfterShow = pst.running;
+
+// ---- the merged layer: one lapse drawing both halves -----------------
+{
+  const N2 = 3, LAP = "merged";
+  const L2 = {};
+  const fids = [];
+  const TILE = new Uint8ClampedArray(256 * 256 * 4);
+  for (let i = 0; i < 256 * 256; i++) {
+    TILE[i * 4] = 200; TILE[i * 4 + 1] = 90;
+    TILE[i * 4 + 2] = 128; TILE[i * 4 + 3] = 255;
+  }
+  for (let i = 0; i < N2; i++) {
+    const id = LAP + "-f" + i;
+    fids.push(id);
+    L2[id] = {
+      layerId: i, visible: true, opacity: i === 0 ? 1 : 0, name: id,
+      layer: { sh: (c, z) => "https://t.example/" + i + "/" + z + "/" + c.x
+                             + "/" + c.y },
+      viz: {
+        windParticles: true, isTimeLapse: true, timeLapseID: LAP,
+        windTileMin: -40, windTileMax: 40, particleColor: "#fff",
+        windSpeedRaster: true,
+        windSpeedPalette: ["3d6ea3", "4ca44c", "ffffff"],
+        windRampMinMs: 0, windRampMaxMs: 30,
+        windQueryItem: "SERIALIZED_SPEED_IC",
+      },
+    };
+  }
+  sandbox.layerObj = L2;
+  sandbox.map.getDiv = () => ({ offsetWidth: 512, offsetHeight: 512 });
+  W.scan();
+  const mst = W._adopted["tl:" + LAP];
+  out.merged = { adopted: !!mst, frames: mst ? Object.keys(mst.frames).length : 0,
+                 speedRaster: mst ? mst.cfg.speedRaster : null };
+
+  // onAdd builds BOTH canvases, the raster under the trails.
+  mst.overlay.onAdd();
+  out.mergedHasSpeedCanvas = !!mst.speedCanvas && !!mst.speedCtx;
+
+  // The query must be retargeted once queryObj exists -- and it did NOT
+  // exist at adoption, so this is the retry path.
+  out.retargetBeforePanel = mst.queryRetargeted;
+  sandbox.queryObj[LAP] = { queryItem: "THE_UV_ENCODING" };
+  W._refreshRunState();
+  out.retargetAfterPanel = mst.queryRetargeted;
+  out.queryItemNow = sandbox.queryObj[LAP].queryItem
+    && sandbox.queryObj[LAP].queryItem.decodedFrom;
+
+  // Two opacities, independent. The lapse's own slider drives the
+  // raster; particleDim drives the trails.
+  mst.cfg.baseOpacity = 0.9;
+  fids.forEach((id) => { L2[id].opacity = 0; });
+  L2[fids[1]].opacity = 0.4;            // lapse slider at 40%
+  mst.particleDim = 1;
+  W._refreshRunState();
+  out.speedAlphaAt40 = +mst.speedCanvas.style.opacity;
+  out.particleAlphaUnaffected = +mst.canvas.style.opacity;
+  mst.particleDim = 0.5;                 // particle slider at 50%
+  W._refreshRunState();
+  out.speedAlphaStill40 = +mst.speedCanvas.style.opacity;
+  out.particleAlphaAtHalf = +mst.canvas.style.opacity;
+  out.bothCanvasesEased =
+    /opacity \d+ms/.test(mst.speedCanvas.style.transition || "") &&
+    /opacity \d+ms/.test(mst.canvas.style.transition || "");
+
+  // The raster paints from the tiles the particles already decoded.
+  mst.origin = { x: 0, y: 0 }; mst.w = 512; mst.h = 512; mst.tileZoom = 4;
+  mst.proj = { fromDivPixelToLatLng: snapshotLatLng(512, 45, -110, 20),
+               fromLatLngToDivPixel: (ll) => ({ x: 0, y: 0 }) };
+  Object.keys(mst.frames).forEach((fid) => {
+    for (let tx = 0; tx < 16; tx++) {
+      for (let ty = 0; ty < 16; ty++) {
+        mst.tiles[fid + "/4/" + tx + "/" + ty] = TILE;
+      }
+    }
+  });
+  out.paintDrew = W._renderSpeedRaster(mst);
+  out.paintCached = typeof mst.speedKey === "string";
+  out.paintTileDraws = drawnTiles;
+  const before = drawnTiles;
+  W._ensureSpeedRaster(mst);             // unchanged view: must not repaint
+  out.paintSkippedWhenUnchanged = drawnTiles === before;
+  mst.frameId = fids[2];                 // new hour: must repaint
+  W._ensureSpeedRaster(mst);
+  out.paintRedrewOnFrameChange = drawnTiles > before;
+}
 
 console.log(JSON.stringify(out, null, 1));

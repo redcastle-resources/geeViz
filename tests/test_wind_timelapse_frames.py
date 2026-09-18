@@ -127,10 +127,26 @@ def test_cumulative_mode_picks_the_latest_raised_frame(result):
         f"expected the newest raised frame")
 
 
-def test_a_stopped_lapse_draws_nothing(result):
-    """Every frame back to zero opacity means nothing is on screen.
-    Animating a field the user cannot see burns a core for nothing."""
-    assert result["whenAllZero"]["running"] is False
+def test_dimming_a_lapse_does_not_stop_it(result):
+    """Opacity zero is not the same as switched off.
+
+    With the raster and the particles on independent controls, dragging
+    the raster down to nothing takes every frame to opacity 0 and leaves
+    no frame looking "raised" — but the lapse is still playing and still
+    ticked. Reading that as off would stop the particles the user was
+    trying to look at on their own.
+    """
+    assert result["whenDimmedToZero"]["running"] is True, (
+        "dimming the raster to zero stopped the particles")
+    assert result["whenDimmedToZero"]["frameId"] == LAPSE + "-frame4", (
+        "the frame was lost when every opacity went to zero")
+
+
+def test_a_lapse_that_is_switched_off_draws_nothing(result):
+    """The other half. Animating a field nobody can see burns a core
+    for nothing, and this is what "off" actually looks like: no frame
+    visible."""
+    assert result["whenSwitchedOff"]["running"] is False
 
 
 def test_a_plain_wind_layer_is_still_driven_by_visibility(result):
@@ -176,12 +192,41 @@ def test_the_opacity_slider_reaches_the_particles(result):
     opacity setting, so reading that one frame is a faithful reading of
     the slider.
     """
-    assert result["opacityAtFull"] == 0.9, (
-        f"at a full slider the particles should sit at the configured "
-        f"particleOpacity, got {result['opacityAtFull']}")
-    assert result["opacityAtHalf"] == 0.45, (
+    assert result["opacityAtFull"] == 1, (
+        f"at a full slider the layer should be undimmed, got "
+        f"{result['opacityAtFull']}")
+    assert result["opacityAtHalf"] == 0.5, (
         f"dragging the lapse's opacity to 50% left the particles at "
         f"{result['opacityAtHalf']} — the slider does not reach them")
+    assert result["strokeAlphaUntouched"] == 0.9, (
+        "the slider rewrote the stroke alpha; that is the trail's SHAPE "
+        "— taper and head boost — not a user preference, and rewriting "
+        "it discards the configured particleOpacity")
+
+
+def test_the_opacity_change_is_eased(result):
+    """A slider drags in 0.05 steps and a playing lapse re-raises a
+    frame on every step. Applying either instantly reads as a jump
+    rather than as a control, so the dimmer rides on the canvas ELEMENT
+    where CSS can transition it."""
+    assert result["fadeIsEased"], (
+        "the canvas has no opacity transition — every change lands "
+        "instantly and reads as flicker")
+    assert result["bothCanvasesEased"], (
+        "the merged layer's two canvases are not both eased")
+
+
+def test_the_frame_gap_does_not_blank_the_layer(result):
+    """selectFrame() zeroes EVERY frame and then raises one.
+
+    A refresh landing between those two steps sees no raised frame at
+    all. Reading that as an opacity would hand the layer a zero alpha on
+    every step of a playing lapse — a strobe, at the frame rate. The
+    last positive value has to stand until a new one arrives.
+    """
+    assert result["opacityDuringFrameGap"] == 0.5, (
+        f"the layer went to {result['opacityDuringFrameGap']} while the "
+        f"lapse was between frames")
 
 
 def test_the_opacity_slider_does_not_compound(result):
@@ -195,3 +240,85 @@ def test_the_opacity_slider_does_not_compound(result):
     assert result["opacityAfterIdleTicks"] == result["opacityAtHalf"], (
         f"opacity drifted from {result['opacityAtHalf']} to "
         f"{result['opacityAfterIdleTicks']} on idle ticks alone")
+
+
+# ---------------------------------------------------------------------------
+# The merged layer: one lapse drawing both halves
+# ---------------------------------------------------------------------------
+
+
+def test_the_merged_layer_gets_its_own_raster_canvas(result):
+    """Two canvases, not one.
+
+    frame() clears and repaints the trails thirty times a second; the
+    speed field only changes when the view or the hour does. Sharing a
+    canvas would mean ~800,000 palette lookups per animation frame to
+    redraw a picture that did not change.
+    """
+    assert result["merged"]["adopted"]
+    assert result["merged"]["frames"] == 3
+    assert result["merged"]["speedRaster"] is True
+    assert result["mergedHasSpeedCanvas"], (
+        "no raster canvas — the merged layer would show trails over "
+        "nothing")
+
+
+def test_the_query_is_retargeted_once_the_panel_exists(result):
+    """The retry path, which is the one that happens.
+
+    The merged layer draws u/v bytes; clicking it would report those
+    bytes as if they were a wind reading. queryObj is built
+    asynchronously and is NOT there when the layer is adopted, so
+    retargeting has to keep trying rather than give up on first look.
+    """
+    assert result["retargetBeforePanel"] is False, (
+        "the probe did not exercise the retry path")
+    assert result["retargetAfterPanel"] is True, (
+        "the query was never retargeted; the inspector reports the "
+        "encoding")
+    assert result["queryItemNow"] == "SERIALIZED_SPEED_IC", (
+        "queryObj is not pointed at the speed collection")
+
+
+def test_the_two_opacities_are_independent(result):
+    """The whole point of one client owning both renders.
+
+    The lapse's own slider drives the raster — it is the layer-shaped
+    thing on screen — and the injected slider drives the trails. Moving
+    either must leave the other exactly where it was; with two Earth
+    Engine layers that was not possible without a second slider in the
+    viewer bundle.
+    """
+    assert result["speedAlphaAt40"] == 0.4, (
+        f"the lapse slider did not reach the raster: "
+        f"{result['speedAlphaAt40']}")
+    assert result["particleAlphaUnaffected"] == 1, (
+        f"dimming the raster also dimmed the trails: "
+        f"{result['particleAlphaUnaffected']}")
+    assert result["speedAlphaStill40"] == 0.4, (
+        "moving the particle slider moved the raster too")
+    assert result["particleAlphaAtHalf"] == 0.5, (
+        f"the particle slider did not reach the trails: "
+        f"{result['particleAlphaAtHalf']}")
+
+
+def test_the_raster_paints_from_the_tiles_already_decoded(result):
+    """No extra requests. u and v are in the red and green of the tiles
+    this module fetches anyway, and speed is sqrt(u^2 + v^2) — the same
+    bytes, read a second way."""
+    assert result["paintDrew"], "the raster painted nothing"
+    assert result["paintTileDraws"] > 0
+    assert result["paintCached"], (
+        "a complete paint was not cached, so it repaints every "
+        "animation frame")
+
+
+def test_the_raster_repaints_only_when_it_must(result):
+    """Skipped on an unchanged view, redrawn on a new hour. Getting
+    either wrong is expensive in opposite directions: a stale raster
+    under a moving lapse, or ~800,000 palette lookups per frame."""
+    assert result["paintSkippedWhenUnchanged"], (
+        "the raster repainted with nothing changed")
+    assert result["paintRedrewOnFrameChange"], (
+        "the raster did not repaint when the hour advanced — the colors "
+        "would stay on the previous frame's wind")

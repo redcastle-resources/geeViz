@@ -61,26 +61,54 @@ PAST_A = (NOW - datetime.timedelta(days=2)).strftime("%Y-%m-%d")
 PAST_B = (NOW - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
 
 
-@pytest.fixture
-def wind_map():
-    """A cleared Map carrying exactly one wind layer (so, two layers).
-
-    Function-scoped ON PURPOSE. ``gv.Map`` is a module-level singleton,
-    so a module-scoped fixture hands every test the same object and the
-    broken-layer test below clears it out from under the others.
-    """
+def _wind_map(**kw):
     import geeViz.geeView as gv
     import geeViz.weather as wx
     ee = gv.ee
     Map = gv.Map
     Map.clearMap()
     img = ee.Image(wx.getForecastData(PAST_A, PAST_B, "gfs").first())
-    Map.addWindLayer(img, {"units": "km/hr"}, "Wind")
+    Map.addWindLayer(img, {"units": "km/hr"}, "Wind", **kw)
     return Map
+
+
+@pytest.fixture
+def wind_map():
+    """A cleared Map carrying one UNGROUPED wind layer (so, two layers).
+
+    Ungrouped deliberately: the tests below are about the three tools
+    seeing BOTH halves, and the halves only exist separately here. The
+    grouped default gets its own test.
+
+    Function-scoped ON PURPOSE. ``gv.Map`` is a module-level singleton,
+    so a module-scoped fixture hands every test the same object and the
+    broken-layer test below clears it out from under the others.
+    """
+    return _wind_map(groupWindLayers=False)
 
 
 def _names(Map):
     return [d.get("name") for d in Map.idDictList]
+
+
+def test_a_grouped_wind_layer_is_one_ordinary_layer():
+    """The default. One layer carrying the u/v encoding, which the
+    client reads twice -- once for the colored speed field and once for
+    the trails -- so the tools see one ordinary geeImage layer and need
+    to know nothing about wind."""
+    Map = _wind_map()
+    assert _names(Map) == ["Wind"]
+    d = Map.idDictList[0]
+    assert d.get("_ee_obj") is not None, (
+        "the grouped layer has no _ee_obj — testLayers, exportLayerJson "
+        "and previewMap all key off it")
+    assert d.get("function") == "addSerializedLayer"
+    viz = d["_viz"]
+    assert viz["windParticles"] is True and viz["windSpeedRaster"] is True
+    r = Map.testLayers()
+    by = {L["name"]: L for L in r["layers"]}
+    assert by["Wind"]["status"] == "ok", by["Wind"].get("error")
+    assert r["pass"] is True, r
 
 
 def test_a_wind_layer_is_two_ordinary_layers(wind_map):

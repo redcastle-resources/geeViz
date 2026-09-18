@@ -1046,7 +1046,7 @@ def _rgb_of(color):
 
 
 def _particle_swatch(rgb, opacity, taper, head_boost, max_width,
-                     palette=None, ramp_opacity=0.5):
+                     palette=None, ramp_opacity=0.5, wide=False):
     """A CSS background that draws the particle itself, in miniature.
 
     The viewer renders a class legend entry as
@@ -1105,9 +1105,21 @@ Underneath it sits the layer's own SPEED RAMP, at low opacity. That
     comet = (f"linear-gradient(90deg, {', '.join(stops)}) "
              f"center / 100% {thick}px no-repeat")
 
+    # When this entry IS the color bar -- the grouped layer has only
+    # one -- it needs a bar's proportions, not a chip's.
+    #
+    # The width rides through the same value slot as the background,
+    # because that slot is the only thing this side controls: the
+    # viewer writes `background:${value};` into the span's style, so a
+    # value that closes with `; width: ...` contributes further
+    # declarations to the same rule. Blunt, but it keeps the legend
+    # entirely in the layer's own hands rather than requiring a
+    # stylesheet change in a bundle shared with every other viewer.
+    tail = "; width: 132px; height: 13px; vertical-align: middle" if wide else ""
+
     pal = [c for c in (palette or []) if c]
     if len(pal) < 2:
-        return f"{comet}, #24303a"
+        return f"{comet}, #24303a{tail}"
 
     # The ramp, spread across the swatch in the same order the color
     # bar runs. Alpha is baked per stop rather than set on the element:
@@ -1118,7 +1130,7 @@ Underneath it sits the layer's own SPEED RAMP, at low opacity. That
         "rgba({},{},{},{:.2f}) {:.0f}%".format(
             *_rgb_of(c), ramp_opacity, i * 100.0 / n)
         for i, c in enumerate(pal))
-    return f"{comet}, linear-gradient(90deg, {ramp})"
+    return f"{comet}, linear-gradient(90deg, {ramp}){tail}"
 
 
 
@@ -1658,6 +1670,20 @@ def _wind_vizzes(viz):
         "windMinSpeedMs": floor_ms,
         "windMaxSpeedMs": vmax_ms,
 
+        # The COLOR ramp, for a client that draws the speed field itself
+        # rather than putting a second Earth Engine layer under the
+        # particles -- see addWindTimeLapse. Deliberately not `min`,
+        # `max` and `palette`: those reach getMapId, and the image these
+        # ride on is already `visualize`d, so they would re-stretch an
+        # RGB that is finished.
+        #
+        # Unclamped, unlike windMinSpeedMs above: the 1 m/s floor is an
+        # advection floor, and applying it to the ramp would shift every
+        # color on a stretch that starts at zero.
+        "windRampMinMs": vmin_ms,
+        "windRampMaxMs": vmax_ms,
+        "windSpeedPalette": palette,
+
         # ---- lifetime ------------------------------------------
         # Each particle draws its own lifetime from
         # [particleMinAge, particleMaxAge], so short, medium and long
@@ -1670,7 +1696,8 @@ def _wind_vizzes(viz):
     return speed_viz, particle_viz
 
 
-def addWindLayer(Map, image, viz=None, name="Wind", visible=True):
+def addWindLayer(Map, image, viz=None, name="Wind", visible=True,
+                 groupWindLayers=True):
     """Add a wind field: a queryable speed raster plus animated particles.
 
     Two layers, in the style of windy.com -- a smooth speed raster
@@ -1683,9 +1710,20 @@ def addWindLayer(Map, image, viz=None, name="Wind", visible=True):
             speed stretch are both absolute.
         name: base name for the pair; the layers appear as
             ``"<name> speed"`` and ``"<name> particles"``.
-        visible: whether both layers start switched on. They are one
-            unit — showing particles over a hidden raster would leave
-            the flow with no legend and nothing to click.
+        visible: whether the layer starts switched on.
+        groupWindLayers: ``True`` (the default) draws the whole thing as
+            ONE layer. :func:`windTiles` already carries everything the
+            picture needs -- u in red, v in green, speed is
+            ``sqrt(u**2 + v**2)`` -- so the client paints the colored
+            speed field and the trails from the same decoded bytes. That
+            halves the tiles, gives the two halves independent opacity
+            sliders, and leaves one entry in the layer list. Clicks
+            still report real speed and direction: the query is pointed
+            at the speed image rather than at the encoding.
+
+            ``False`` restores the original two layers, where Earth
+            Engine renders the speed raster instead of the client. That
+            is the only thing grouping gives up.
         viz: Same spirit as ``Map.addLayer``'s viz dict.
 
             * ``bands`` (list or comma string) -- the dx/dy components.
@@ -1780,28 +1818,116 @@ def addWindLayer(Map, image, viz=None, name="Wind", visible=True):
             * ``directionConvention`` -- ``"from"`` (default) or ``"to"``.
 
     Returns:
-        ``(speed_direction_image, encoded_tiles_image)``.
+        ``(speed_direction_image, encoded_tiles_image)``. Grouped, only
+        the second goes on the map; the first is what clicks are
+        answered from.
     """
     viz = dict(viz or {})
     speed_viz, particle_viz = _wind_vizzes(viz)
 
+    q = windImage(image, viz)
+    tiles = windTiles(image, viz)
+
+    if groupWindLayers:
+        # ONE layer. windTiles already carries everything the picture
+        # needs -- u in red, v in green, speed is sqrt(u^2 + v^2) -- so
+        # a second Earth Engine layer underneath would double the tiles
+        # for data already on the wire. The client paints the speed
+        # field and the trails from the same decoded bytes, which is
+        # also what makes their opacities independent.
+        Map.addLayer(tiles, _merged_viz(viz, speed_viz, particle_viz, q),
+                     name, visible)
+        return q, tiles
+
+    # Two layers, the original arrangement. Kept because the speed
+    # raster is rendered by Earth Engine here rather than by the client,
+    # which is the one thing the grouped form gives up.
+    #
     # 1. The speed raster, and the layer a click reads. Both derived
     #    bands ride along so a query reports direction beside speed.
-    q = windImage(image, viz)
     Map.addLayer(q, speed_viz, name + " speed", visible)
 
     # 2. The particle layer. A real geeImage layer, so the viewer mints
     #    tiles for it and gives it a panel entry -- but the RGB is never
     #    shown. wind-particles.js hides it and reads those tiles
     #    numerically instead.
-    tiles = windTiles(image, viz)
     Map.addLayer(tiles, particle_viz, name + " particles", visible)
 
     return q, tiles
 
 
+def _merged_viz(viz, speed_viz, particle_viz, query_obj, date_format=None):
+    """The viz for ONE layer that draws the speed field and the flow.
+
+    Shared by :func:`addWindLayer` and :func:`addWindTimeLapse` so the
+    grouped form cannot drift between the single frame and the lapse.
+
+    Built on ``particle_viz``, not ``speed_viz``, and that matters:
+    ``bands``, ``min``, ``max`` and ``palette`` are forwarded to
+    ``getMapId``, and the image underneath is already ``visualize``d --
+    a finished 8-bit RGB. Applying a palette to it is an error in Earth
+    Engine ("palette can only be used with single-band images"), and a
+    re-stretch would corrupt the very u/v bytes the client decodes. The
+    ramp travels under client-only names instead; see ``_wind_vizzes``.
+    """
+    merged = dict(particle_viz)
+
+    # The client draws the colored speed field from the same tiles.
+    merged["windSpeedRaster"] = True
+
+    # The click query still reads real weather. The viewer keeps the
+    # queried object separate from the drawn one, so the inspector can
+    # be pointed at speed/direction while the map shows the encoding --
+    # without this a click would report bytes as if they were wind.
+    #
+    # Serialized because viz travels as JSON: an ee object here raises
+    # "not JSON serializable" at Map.view() time. wind-particles.js
+    # decodes it onto queryObj once the panel exists.
+    merged["windQueryItem"] = query_obj.serialize()
+    merged["canQuery"] = True
+    merged["yLabel"] = speed_viz["yLabel"]
+    if date_format:
+        merged["queryDateFormat"] = date_format
+
+    # ONE legend entry, because there is now one layer.
+    #
+    # _particle_swatch already draws the comet OVER the speed ramp --
+    # which is exactly what the map shows -- so the grouped layer needs
+    # nothing else. At full ramp opacity it reads as the color bar it
+    # has to stand in for, rather than as a backdrop behind the comet.
+    merged["classLegendDict"] = {
+        _speed_ramp_label(viz): _particle_swatch(
+            _rgb_of(viz.get("particleColor", "#fff")),
+            particle_viz["particleOpacity"],
+            particle_viz["particleTaper"],
+            particle_viz["particleHeadBoost"],
+            particle_viz["particleMaxWidth"],
+            palette=speed_viz["palette"],
+            ramp_opacity=1.0,
+            wide=True,
+        )
+    }
+    merged["addToLegend"] = True
+    return merged
+
+
+def _speed_ramp_label(viz):
+    """The color bar's label: the stretch and the unit it is in."""
+    units = viz.get("units", "km/hr")
+    vmin = viz.get("min", 0)
+    vmax = viz.get("max", DEFAULT_MAX_SPEED[units])
+    return f"Wind speed {_trim(vmin)}-{_trim(vmax)} {units}"
+
+
+def _trim(x):
+    """5.0 -> '5'. A color-bar label is not the place for a float tail."""
+    f = float(x)
+    return str(int(f)) if f == int(f) else f"{f:g}"
+
+
 def addWindTimeLapse(Map, collection, viz=None, name="Wind", visible=True,
-                     dateFormat=None, advanceInterval=None, mosaic=False):
+                     dateFormat=None, advanceInterval=None, mosaic=False,
+                     groupWindLayers=True):
     """Add an animated wind field that is itself a time lapse.
 
     The same two layers :func:`addWindLayer` adds -- a queryable speed
@@ -1827,7 +1953,11 @@ def addWindTimeLapse(Map, collection, viz=None, name="Wind", visible=True,
             cannot drift between the two entry points.
         name: base name; layers appear as ``"<name> speed"`` and
             ``"<name> particles"``.
-        visible: whether the pair starts switched on.
+        visible: whether the layer starts switched on.
+        groupWindLayers: ``True`` (the default) animates the whole thing
+            as ONE time lapse -- each frame carries the speed field and
+            the particles, from one set of tiles. See
+            :func:`addWindLayer` for what that buys and what it costs.
         dateFormat: slider label format. Defaults to ``"YYYYMMdd HH"`` --
             forecast wind is hourly-to-three-hourly, and the annual
             ``"YYYY"`` default of :meth:`addTimeLapse` would collapse
@@ -1880,23 +2010,36 @@ def addWindTimeLapse(Map, collection, viz=None, name="Wind", visible=True,
         return _inner
 
     speed_ic = collection.map(_stamped(windImage))
-    Map.addTimeLapse(speed_ic, {**speed_viz, **tl},
-                     name + " speed", visible)
-
-    # 2. Particle frames. Each is the same u/v-in-RGB encoding the
-    #    single-frame layer uses; wind-particles.js hides the RGB and
-    #    reads the tiles numerically.
-    #
-    #    The client groups these by ``viz.timeLapseID``, which the
-    #    viewer stamps on every frame of a time lapse, so ONE overlay
-    #    serves the whole lapse: the decoded vector field is cached per
-    #    frame and switching frames swaps which field the particles
-    #    sample. Nothing is torn down, so the trails keep advecting
-    #    across a frame change instead of resetting to a fresh scatter
-    #    every step.
     tiles_ic = collection.map(_stamped(windTiles))
-    Map.addTimeLapse(tiles_ic, {**particle_viz, **tl},
-                     name + " particles", visible)
+
+    # ONE time lapse, not two.
+    #
+    # The u/v frames are the only ones the viewer mints tiles for, and
+    # the client draws BOTH the speed field and the particles out of
+    # them. That is possible because windTiles already carries
+    # everything: u in red, v in green, and speed is sqrt(u^2 + v^2).
+    # Blue is a spare channel. _uv_image bicubic-resamples before
+    # encoding, so the client's raster is the same resampling of the
+    # same forecast grid the separate speed layer used to show.
+    #
+    # What this buys, beyond one entry in the layer list instead of two:
+    # HALF the tiles per frame, which on a lapse is the difference
+    # between arriving at each hour warm and arriving cold; and two
+    # opacity controls that are genuinely independent, because one
+    # client owns both renders instead of two Earth Engine layers each
+    # owning one.
+    if not groupWindLayers:
+        # Two lapses, the original arrangement.
+        Map.addTimeLapse(speed_ic, {**speed_viz, **tl},
+                         name + " speed", visible)
+        Map.addTimeLapse(tiles_ic, {**particle_viz, **tl},
+                         name + " particles", visible)
+        return speed_ic, tiles_ic
+
+    lapse_viz = {**_merged_viz(viz, speed_viz, particle_viz, speed_ic,
+                               date_format=tl["dateFormat"]), **tl}
+
+    Map.addTimeLapse(tiles_ic, lapse_viz, name, visible)
 
     return speed_ic, tiles_ic
 

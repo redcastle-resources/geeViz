@@ -101,6 +101,12 @@
   // the last one actually took, which holds the cost near 1/(1+duty) of
   // the thread on any machine and any window size. The floor only
   // matters for small maps where a build is genuinely cheap.
+  // How long an opacity change takes to land. A slider drags in 0.05
+  // steps and a playing lapse re-raises a frame on every step, so
+  // applying either instantly reads as a jump rather than as a control.
+  // Short enough not to feel laggy, long enough to stop the flicker.
+  var FADE_MS = 220;
+
   var REBUILD_MS = 150;
   var REBUILD_DUTY = 2;
 
@@ -142,6 +148,9 @@
   // a map that is never observed, behaves exactly as before rather than
   // silently never animating.
   var inView = true;
+
+  // One <style> for the two opacity sliders; see injectSliderStyle.
+  var styleInjected = false;
 
   /**
    * The tile-URL builder on a google.maps.ImageMapType.
@@ -531,23 +540,314 @@
     return isNaN(n) ? [255, 255, 255] : [(n >> 16) & 255, (n >> 8) & 255, n & 255];
   }
 
+  /**
+   * Point the inspector at real weather, not at the encoding.
+   *
+   * The merged layer draws u/v bytes. Clicking it would report those
+   * bytes -- 0..255 per channel -- as if they were a wind reading. The
+   * viewer keeps the queried object separate from the drawn one, so the
+   * fix is to hand queryObj the speed/direction collection instead.
+   *
+   * It arrives serialized because viz travels as JSON, and is decoded
+   * here with the viewer's own deserializer. Failure is not fatal: the
+   * layer keeps working and the query simply stays as it was, which is
+   * better than a layer that will not load.
+   */
+  function retargetQuery(st) {
+    if (st.queryRetargeted || !st.cfg.queryItemJson) return;
+    var ee = global.ee, qo = global.queryObj;
+    if (!ee || !ee.Deserializer || !qo) return;
+    var id = st.id.indexOf("tl:") === 0 ? st.id.slice(3) : st.id;
+    if (!qo[id]) return;                       // panel not built yet
+    try {
+      var raw = st.cfg.queryItemJson;
+      var decoded = ee.Deserializer.fromJSON
+          ? ee.Deserializer.fromJSON(raw)
+          : ee.Deserializer.decode(JSON.parse(raw));
+      qo[id].queryItem = decoded;
+      st.queryRetargeted = true;
+    } catch (e) {
+      st.queryRetargeted = true;               // do not retry every tick
+      if (global.console) {
+        console.warn("wind particles: could not retarget the query", e);
+      }
+    }
+  }
+
+  /**
+   * A second opacity slider, for the particles alone.
+   *
+   * The viewer gives a time lapse ONE opacity slider, and on a merged
+   * wind layer that one drives the speed raster -- it is the
+   * layer-shaped thing on screen. The trails need their own, or the two
+   * halves of the layer can only be faded together, which defeats
+   * drawing them separately.
+   *
+   * Injected here rather than added to the viewer: this is the only
+   * layer type that has two things to fade, and the markup it needs is
+   * the markup the existing slider already uses, so it costs one
+   * sibling div and no change to a bundle shared with every other
+   * viewer. It is skipped silently wherever jQuery UI is absent -- the
+   * layer then behaves as it did, with one control.
+   */
+  /**
+   * The little that the two sliders need beyond the panel's own CSS.
+   *
+   * Injected once, scoped to classes this file owns, rather than edited
+   * into a stylesheet shared with every other viewer. Two sliders
+   * stacked with no separation read as one broken control, and two
+   * identical tracks give no clue which fades what -- so the tracks are
+   * tinted to match what they govern: the speed ramp's own colors for
+   * the raster, white for the trails.
+   */
+  function injectSliderStyle() {
+    if (styleInjected || !global.document) return;
+    styleInjected = true;
+    var css =
+      ".wind-speed-opacity-slider," +
+      ".wind-particle-opacity-slider{margin-top:3px !important;}" +
+      ".wind-speed-opacity-slider{background:linear-gradient(90deg," +
+      "#3d6ea3,#4ca44c,#d7d64a,#c4622d,#8a2f4a) !important;" +
+      "border:none !important;}" +
+      ".wind-particle-opacity-slider{background:linear-gradient(90deg," +
+      "rgba(255,255,255,.15),rgba(255,255,255,.95)) !important;" +
+      "border:none !important;}" +
+      ".wind-particle-opacity-slider .ui-slider-handle," +
+      ".wind-speed-opacity-slider .ui-slider-handle{cursor:ew-resize;}";
+    try {
+      var el = document.createElement("style");
+      el.type = "text/css";
+      el.appendChild(document.createTextNode(css));
+      (document.head || document.documentElement).appendChild(el);
+    } catch (e) { /* styling is a nicety; the sliders still work */ }
+  }
+
+  function addParticleSlider(st) {
+    var $ = global.$;
+    if (!$ || st.sliderAdded || !st.isLapse) return;
+    var id = st.id.indexOf("tl:") === 0 ? st.id.slice(3) : st.id;
+    var host = $("#" + id + "-opacity-slider");
+    if (!host.length || typeof host.slider !== "function") return;
+
+    var sid = id + "-particle-opacity-slider";
+    if ($("#" + sid).length) { st.sliderAdded = true; return; }
+
+    injectSliderStyle();
+
+    // Same classes as the one above it, so it inherits the panel's
+    // sizing and theme, plus one of our own for the differences.
+    host.addClass("wind-speed-opacity-slider");
+    host.attr("title", "Wind speed opacity");
+    host.after(
+      "<div title='Particle opacity' id='" + sid + "'" +
+      " class='simple-time-lapse-layer-range-first" +
+      " wind-particle-opacity-slider'>" +
+      "<div id='" + sid + "-handle'" +
+      " class=' time-lapse-slider-handle ui-slider-handle'></div></div>");
+
+    try {
+      $("#" + sid).slider({
+        min: 0, max: 1, step: 0.05, value: 1,
+        create: function () {
+          $("#" + sid + "-handle").text("");
+        },
+        slide: function (e, ui) {
+          st.particleDim = ui.value;
+          refreshRunState();
+        },
+      });
+      st.sliderAdded = true;
+    } catch (e) { /* no jQuery UI: one control, as before */ }
+  }
+
+  // ---- the speed raster ---------------------------------------------
+
+  /**
+   * A 256-entry lookup from the palette, as flat RGB bytes.
+   *
+   * Built once per layer. The alternative -- interpolating the palette
+   * per pixel -- is ~800,000 interpolations per repaint for a picture
+   * with 256 distinct colors in it.
+   */
+  function buildRampLut(palette) {
+    var lut = new Uint8Array(256 * 3);
+    var cols = [];
+    for (var i = 0; i < palette.length; i++) {
+      cols.push(hexToRgb(String(palette[i])));
+    }
+    if (!cols.length) cols = [[255, 255, 255]];
+    if (cols.length === 1) cols.push(cols[0]);
+    var segs = cols.length - 1;
+    for (var k = 0; k < 256; k++) {
+      var t = (k / 255) * segs;
+      var a = Math.min(segs - 1, Math.floor(t));
+      var f = t - a;
+      var c0 = cols[a], c1 = cols[a + 1];
+      lut[k * 3] = c0[0] + (c1[0] - c0[0]) * f;
+      lut[k * 3 + 1] = c0[1] + (c1[1] - c0[1]) * f;
+      lut[k * 3 + 2] = c0[2] + (c1[2] - c0[2]) * f;
+    }
+    return lut;
+  }
+
+  /** What the raster was painted for. Same idea as viewKey. */
+  function speedKey(st) {
+    return viewKey(st) + "|" + (st.tileZoom | 0);
+  }
+
+  /**
+   * Paint the speed field from the tiles the particles already decoded.
+   *
+   * There is no second Earth Engine layer under this one: u and v are
+   * in the red and green of the tiles this module fetches anyway, and
+   * speed is sqrt(u^2 + v^2). So the raster costs no extra requests --
+   * it is the same bytes, read a second way.
+   *
+   * Drawn tile by tile at the tile's own resolution and then scaled by
+   * the browser, which is exactly what a raster layer does. Painting
+   * per SCREEN pixel instead would mean an inverse projection per pixel
+   * and no reuse between frames.
+   */
+  function renderSpeedRaster(st) {
+    if (!st.speedCtx || !st.proj || !st.w || !st.h) return false;
+    var ctx = st.speedCtx;
+    var z = st.tileZoom, n = 1 << z;
+    var proj = st.proj;
+
+    var lo = st.cfg.rampMinMs, span = st.cfg.rampMaxMs - lo;
+    if (!(span > 0)) return false;
+    if (!st.rampLut) st.rampLut = buildRampLut(st.cfg.rampPalette);
+    var lut = st.rampLut;
+    var tmin = st.cfg.tileMin, tspan = st.cfg.tileMax - tmin;
+
+    // The tile rect under the view, from its two corners.
+    var pt = new google.maps.Point(st.origin.x, st.origin.y);
+    var nw = proj.fromDivPixelToLatLng(pt);
+    pt.x = st.origin.x + st.w; pt.y = st.origin.y + st.h;
+    var se = proj.fromDivPixelToLatLng(pt);
+    if (!nw || !se) return false;
+    var x0 = Math.floor(lonToTileX(nw.lng(), z));
+    var x1 = Math.floor(lonToTileX(se.lng(), z));
+    var y0 = Math.floor(latToTileY(Math.min(85, Math.max(-85, nw.lat())), z));
+    var y1 = Math.floor(latToTileY(Math.min(85, Math.max(-85, se.lat())), z));
+    if (x1 < x0) x1 = x0;
+    if (y1 < y0) { var sw = y0; y0 = y1; y1 = sw; }
+
+    ctx.clearRect(0, 0, st.w, st.h);
+
+    // One tile's worth of scratch, reused. A fresh ImageData per tile
+    // is a 256 KB allocation each.
+    if (!st.tileImage || st.tileImage.width !== TILE_PX) {
+      st.tileImage = ctx.createImageData(TILE_PX, TILE_PX);
+      st.tileCanvas = document.createElement("canvas");
+      st.tileCanvas.width = TILE_PX; st.tileCanvas.height = TILE_PX;
+      st.tileCtx = st.tileCanvas.getContext("2d");
+    }
+    var img = st.tileImage, outPx = img.data;
+    var any = false, missing = false;
+
+    for (var tx = x0; tx <= x1; tx++) {
+      for (var ty = y0; ty <= y1; ty++) {
+        if (ty < 0 || ty >= n) continue;
+        var wrapped = ((tx % n) + n) % n;
+        var data = getTile(st, z, wrapped, ty);
+        if (!data) { if (data !== false) missing = true; continue; }
+
+        for (var i = 0, o = 0; i < TILE_PX * TILE_PX; i++, o += 4) {
+          if (data[o + 3] === 0) { outPx[o + 3] = 0; continue; }
+          var u = tmin + (data[o] / 255) * tspan;
+          var v = tmin + (data[o + 1] / 255) * tspan;
+          var t = (Math.sqrt(u * u + v * v) - lo) / span;
+          t = t < 0 ? 0 : (t > 1 ? 1 : t);
+          var c = ((t * 255) | 0) * 3;
+          outPx[o] = lut[c];
+          outPx[o + 1] = lut[c + 1];
+          outPx[o + 2] = lut[c + 2];
+          outPx[o + 3] = 255;
+        }
+        st.tileCtx.putImageData(img, 0, 0);
+
+        // Where this tile lands on the canvas. Its NW corner in
+        // lat/lng, projected, minus the canvas origin.
+        var tlat = tileYToLat(ty, z), tlon = tileXToLon(tx, z);
+        var dp = proj.fromLatLngToDivPixel(
+            new google.maps.LatLng(tlat, tlon));
+        if (!dp) continue;
+        var lat2 = tileYToLat(ty + 1, z), lon2 = tileXToLon(tx + 1, z);
+        var dp2 = proj.fromLatLngToDivPixel(
+            new google.maps.LatLng(lat2, lon2));
+        if (!dp2) continue;
+        ctx.drawImage(st.tileCanvas,
+                      dp.x - st.origin.x, dp.y - st.origin.y,
+                      dp2.x - dp.x, dp2.y - dp.y);
+        any = true;
+      }
+    }
+
+    ctx.globalAlpha = 1;
+    // Cached only once every tile is in. A partial paint left cached
+    // would leave the gaps on screen for as long as the view held
+    // still, which is the same bug the field key had.
+    st.speedKey = (any && !missing) ? speedKey(st) : null;
+    return any;
+  }
+
+  function tileXToLon(x, z) { return (x / (1 << z)) * 360 - 180; }
+
+  function tileYToLat(y, z) {
+    var m = Math.PI - (2 * Math.PI * y) / (1 << z);
+    return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(m) - Math.exp(-m)));
+  }
+
+  /** Repaint only when the view, the hour or the size moved. */
+  function ensureSpeedRaster(st) {
+    if (!st.cfg.speedRaster || !st.speedCanvas) return;
+    if (st.speedKey && st.speedKey === speedKey(st)) return;
+    renderSpeedRaster(st);
+  }
+
   // ---- overlay ------------------------------------------------------
 
   function makeOverlay(st) {
     var ov = new google.maps.OverlayView();
 
     ov.onAdd = function () {
+      var pane = this.getPanes().overlayLayer;
+
+      // The speed raster, when this layer draws its own. A SECOND
+      // canvas rather than painting into the particle one: frame()
+      // clears and repaints the particles thirty times a second, and
+      // the raster only changes when the view or the hour does. Sharing
+      // a canvas would mean redrawing ~800,000 palette lookups per
+      // animation frame to show a picture that did not change.
+      //
+      // Appended first, so it sits under the trails at the same
+      // z-index. Same pane, so both order against the tile layers.
+      if (st.cfg.speedRaster) {
+        var sc = document.createElement("canvas");
+        sc.style.position = "absolute";
+        sc.style.pointerEvents = "none";
+        sc.style.left = "0px";
+        sc.style.top = "0px";
+        sc.style.transition = "opacity " + FADE_MS + "ms ease-out";
+        applyStacking(st, sc);
+        st.speedCanvas = sc;
+        st.speedCtx = sc.getContext("2d");
+        pane.appendChild(sc);
+      }
+
       var c = document.createElement("canvas");
       c.style.position = "absolute";
       c.style.pointerEvents = "none";      // never eat a query click
       c.style.left = "0px";
       c.style.top = "0px";
+      c.style.transition = "opacity " + FADE_MS + "ms ease-out";
       // First paint. Kept in sync afterwards by refreshRunState --
       // see applyStacking.
       applyStacking(st, c);
       st.canvas = c;
       st.ctx = c.getContext("2d");
-      this.getPanes().overlayLayer.appendChild(c);
+      pane.appendChild(c);
     };
 
     ov.draw = function () {
@@ -572,6 +872,14 @@
       if (st.canvas.width !== w || st.canvas.height !== h) {
         st.canvas.width = w; st.canvas.height = h;
         st.particles = null;
+      }
+      if (st.speedCanvas) {
+        st.speedCanvas.style.left = p.x + "px";
+        st.speedCanvas.style.top = p.y + "px";
+        if (st.speedCanvas.width !== w || st.speedCanvas.height !== h) {
+          st.speedCanvas.width = w; st.speedCanvas.height = h;
+          st.speedKey = null;            // a resize invalidates the paint
+        }
       }
       st.origin = p; st.proj = proj; st.w = w; st.h = h;
       // Tiles track the map, so Earth Engine's bicubic is evaluated at
@@ -1089,6 +1397,9 @@
       for (var id in adopted) {
         var st = adopted[id];
         if (!st.running) continue;
+        // The raster first: it is what the trails are drawn over, and
+        // it repaints only when the view or the hour actually moved.
+        ensureSpeedRaster(st);
         if (!ensureField(st)) continue;   // tiles not in yet; retry next frame
         if (!st.particles) seed(st);
         frame(st);
@@ -1132,6 +1443,13 @@
     if (c.style.zIndex !== z) c.style.zIndex = z;
   }
 
+  /** Element alpha, written only when it actually changed. */
+  function setCanvasAlpha(el, a) {
+    if (!el) return;
+    var v = String(a === undefined || a === null ? 1 : a);
+    if (el.style.opacity !== v) el.style.opacity = v;
+  }
+
   function refreshRunState() {
     var reg = registry();
     var pageVisible = !global.document || !global.document.hidden;
@@ -1157,17 +1475,24 @@
       // and therefore the order selectFrame indexes. It is NOT sorted
       // by date -- an observed registry ran ...0919-06 before
       // ...0919-00 -- but slider order is the one that matters here.
-      var shown = null, anyFrame = false, best = 0;
+      var shown = null, anyFrame = false, best = 0, anyVisible = false;
       for (var fid in st.frames) {
         anyFrame = true;
         var FL = reg && reg[fid];
         if (!FL || FL.visible === false) continue;
+        anyVisible = true;
         if (!st.isLapse) { if (shown === null) shown = fid; continue; }
         // Undefined opacity means the viewer has not built the slider
         // yet; treat it as shown so a lapse of one frame still runs.
         var op = typeof FL.opacity === "number" ? FL.opacity : 1;
         if (op > 0 && op >= best) { best = op; shown = fid; }
       }
+      // Dragging a lapse's opacity to zero is not the same as switching
+      // it off. Every frame goes to 0 and no frame looks "raised", but
+      // the lapse is still playing and its checkbox is still ticked --
+      // so keep the frame already showing rather than stopping. Off is
+      // `visible === false`, which is handled above.
+      if (st.isLapse && !shown && anyVisible) shown = st.frameId;
       if (shown && shown !== st.frameId) {
         // Swap which decoded field the particles sample. Deliberately
         // NOT resetting st.particles: the trails carry on advecting
@@ -1186,7 +1511,7 @@
 
       var L = reg && reg[st.frameId];
       var want = pageVisible && inView &&
-                 (anyFrame ? !!shown : (L ? L.visible !== false : true));
+                 (anyFrame ? anyVisible : (L ? L.visible !== false : true));
       if (want !== st.running) {
         st.running = want;
         if (!want && st.ctx) st.ctx.clearRect(0, 0, st.w, st.h);
@@ -1194,25 +1519,34 @@
         // does not pass through here, so trails survive it.
         if (want) st.particles = null;
       }
-      // Follow the opacity slider.
+      // Follow the opacity sliders.
       //
-      // A plain layer's slider is a straight user preference. A LAPSE's
-      // per-frame opacities are not -- they are the frame-selection
-      // mechanism, eight of nine sitting at 0 at any instant, so taking
-      // one as an alpha would make the particles lurch between 0 and
-      // full as the lapse plays. But the frame that IS raised carries
-      // exactly the lapse's own opacity setting (selectFrame pushes
-      // timeLapseObj[id].opacity onto it), so the raised frame is a
-      // faithful reading of that slider.
+      // The dimmers ride on the CANVAS ELEMENTS, not on the stroke
+      // alpha. cfg.opacity is the SHAPE of a trail's fade -- taper,
+      // head boost -- so rewriting it per drag both discarded the
+      // configured look and changed instantly. Element opacity scales
+      // the finished picture, and CSS eases it over FADE_MS for free.
       //
-      // Scaled rather than replaced, and always off baseOpacity: the
-      // configured particleOpacity is the look the layer asked for, and
-      // the slider should dim THAT rather than discard it.
+      // A LAPSE's per-frame opacities are the frame-SELECTION
+      // mechanism, eight of nine sitting at 0 at any instant, so only
+      // RAISED frames are read. selectFrame() zeroes every frame and
+      // then raises one; a refresh landing between those two steps
+      // would see 0 and blank the raster -- on every step of a playing
+      // lapse, which is a strobe. The last positive value stands until
+      // a new one arrives.
       if (L && typeof L.opacity === "number") {
-        var base = st.cfg.baseOpacity;
-        if (base === undefined) base = st.cfg.opacity;
-        st.cfg.opacity = st.isLapse ? base * L.opacity : L.opacity;
+        if (st.isLapse) {
+          if (best > 0) st.cfg.speedOpacity = best;
+        } else {
+          st.cfg.speedOpacity = L.opacity;
+        }
       }
+      if (st.cfg.speedRaster && !st.sliderAdded) addParticleSlider(st);
+      if (st.cfg.speedRaster && !st.queryRetargeted) retargetQuery(st);
+      setCanvasAlpha(st.speedCanvas, st.cfg.speedOpacity);
+      setCanvasAlpha(st.canvas, st.cfg.speedRaster
+          ? st.particleDim
+          : st.cfg.speedOpacity);
       // Re-checking the layer makes the viewer rebuild and re-add the
       // encoded RGB. Undo it here rather than in scan(), which skips
       // anything already adopted. Re-adding also re-flips loading via
@@ -1409,6 +1743,21 @@
       // so without a pristine copy each slider move would compound on
       // the last and the particles would fade to nothing in a few drags.
       baseOpacity: v.particleOpacity !== undefined ? v.particleOpacity : 0.9,
+
+      // ---- the speed raster, when this layer draws its own ----------
+      // windSpeedRaster says the layer is the merged kind: one set of
+      // u/v tiles behind BOTH the colored speed field and the trails.
+      speedRaster: !!v.windSpeedRaster,
+      rampPalette: v.windSpeedPalette || [],
+      // Unclamped bounds -- see weather.py. windMinSpeedMs carries a
+      // 1 m/s advection floor that must not reach the colors.
+      rampMinMs: v.windRampMinMs !== undefined ? v.windRampMinMs : 0,
+      rampMaxMs: v.windRampMaxMs !== undefined ? v.windRampMaxMs : 40,
+      // Its own alpha, independent of the particles'. Driven by the
+      // lapse's existing opacity slider; the particles get their own.
+      speedOpacity: 1,
+      // The speed/direction collection, serialized. See retargetQuery.
+      queryItemJson: v.windQueryItem || null,
       rgb: hexToRgb(v.particleColor || "#fff"),
 
       // Sent by geeViz.weather.addWindLayer. Reading them rather than
@@ -1469,6 +1818,10 @@
         // for builds that came out incomplete. See buildField.
         fieldB: null, fieldOkB: null, fieldBW: 0, fieldBH: 0,
         buildAgainAt: 0,
+        // 0..1 from the injected particle-opacity slider. 1 until the
+        // user touches it, so the layer looks exactly as configured.
+        particleDim: 1, sliderAdded: false, queryRetargeted: false,
+        speedCanvas: null, speedCtx: null, speedKey: null, rampLut: null,
         fieldSpacing: FIELD_SPACING, fieldKey: null, fieldAny: false,
         canvas: null, ctx: null, particles: null, running: false,
         inflight: 0, burst: 0,
@@ -1483,6 +1836,7 @@
       // else would, and the spinner would spin on an idle layer.
       reportProgress(st);
       bindOnce();
+      if (st.cfg.speedRaster) { addParticleSlider(st); retargetQuery(st); }
       refreshRunState();
     }
   }
@@ -1556,6 +1910,8 @@
     _getTile: getTile,
     _warmNextFrames: warmNextFrames,
     _ensureField: ensureField,
+    _renderSpeedRaster: renderSpeedRaster,
+    _ensureSpeedRaster: ensureSpeedRaster,
     _range: [TILE_MIN, TILE_MAX],
   };
 })(typeof window !== "undefined" ? window : this);

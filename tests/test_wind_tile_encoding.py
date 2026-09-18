@@ -350,8 +350,11 @@ def test_python_sends_the_lifetime_range():
     import ee
     img = ee.Image([1, 2]).rename(["u", "v"])
     wx.addWindLayer(FakeMap(), img, {}, "W", True)
-    particles = [v for k, v in sent.items() if "particle" in k.lower()
-                 or "particles" in (k or "")]
+    # Found by what the viz SAYS, not by the layer's name. Grouped --
+    # the default -- there is one layer called "W" and it is the
+    # particle layer; ungrouped there are two and only one of them is.
+    # Matching on the name pinned an arrangement rather than a contract.
+    particles = [v for v in sent.values() if v.get("windParticles")]
     assert particles, f"no particle layer was added; got {list(sent)}"
     v = particles[0]
     assert v["particleMaxAge"] == 45

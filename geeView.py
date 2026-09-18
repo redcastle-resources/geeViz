@@ -2667,7 +2667,8 @@ class mapper:
         else:
             self.eeAuthMode = None
 
-    def addWindLayer(self, image: ee.Image, viz: dict = {}, name: str = "Wind", visible: bool = True):
+    def addWindLayer(self, image: ee.Image, viz: dict = {}, name: str = "Wind", visible: bool = True,
+                     groupWindLayers: bool = True):
         """Add a wind field: a queryable speed raster plus animated particles.
 
         Two layers, in the style of windy.com — a smooth speed raster
@@ -2699,9 +2700,17 @@ class mapper:
                   feel.
                 * ``directionConvention`` (str): ``"from"`` (default,
                   meteorological — 270 is a westerly) or ``"to"``.
-            name (str): Base name; the two layers are suffixed
-                ``" speed"`` and ``" particles"``.
-            visible (bool): Initial visibility of both.
+            name (str): Layer name. Ungrouped, the two layers are
+                suffixed ``" speed"`` and ``" particles"``.
+            visible (bool): Initial visibility.
+            groupWindLayers (bool): ``True`` (the default) draws the
+                whole thing as ONE layer -- the client paints the
+                colored speed field and the trails from the same
+                decoded tiles, which halves the tiles and gives the two
+                halves independent opacity sliders. Clicks still report
+                real speed and direction. ``False`` restores the
+                original two layers, where Earth Engine renders the
+                speed raster instead of the client.
 
         Returns:
             tuple: ``(speed_direction_image, encoded_tiles_image)``.
@@ -2715,13 +2724,15 @@ class mapper:
         # this method is actually called.
         from geeViz.weather import addWindLayer as _addWindLayer
 
-        return _addWindLayer(self, image, viz, name=name, visible=visible)
+        return _addWindLayer(self, image, viz, name=name, visible=visible,
+                             groupWindLayers=groupWindLayers)
 
     def addWindTimeLapse(self, collection: ee.ImageCollection, viz: dict = {},
                          name: str = "Wind", visible: bool = True,
                          dateFormat: str | None = None,
                          advanceInterval: str | None = None,
-                         mosaic: bool = False):
+                         mosaic: bool = False,
+                         groupWindLayers: bool = True):
         """Add an animated wind field that is itself a time lapse.
 
         The same two layers :meth:`addWindLayer` adds -- a queryable
@@ -2743,6 +2754,11 @@ class mapper:
                 every frame onto one label.
             advanceInterval (str): frame width. Defaults to ``"hour"``.
             mosaic (bool): reduce multiple images per step.
+            groupWindLayers (bool): ``True`` (the default) animates the
+                whole thing as ONE time lapse -- each frame carries the
+                speed field and the particles, drawn by the client from
+                one set of tiles, with independent opacity sliders.
+                ``False`` restores two separate lapses.
 
         Returns:
             tuple: ``(speed_collection, tiles_collection)``.
@@ -2759,7 +2775,8 @@ class mapper:
         return _addWindTimeLapse(self, collection, viz, name=name,
                                  visible=visible, dateFormat=dateFormat,
                                  advanceInterval=advanceInterval,
-                                 mosaic=mosaic)
+                                 mosaic=mosaic,
+                                 groupWindLayers=groupWindLayers)
 
     def clearMap(self):
         """

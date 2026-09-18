@@ -43,11 +43,20 @@ class _FakeImage:
 
 
 class _FakeCollection:
-    def __init__(self, images):
+    def __init__(self, images, tag="src"):
         self.images = list(images)
+        self.tag = tag
 
     def map(self, fn):
-        return _FakeCollection([fn(i) for i in self.images])
+        out = _FakeCollection([fn(i) for i in self.images])
+        # windImage frames are the speed collection; that is the one the
+        # query must be retargeted to.
+        out.tag = self.images and fn(self.images[0]).name.split(":")[0] or "?"
+        return out
+
+    def serialize(self):
+        """viz travels as JSON, so the query target goes over serialized."""
+        return "SERIALIZED:" + self.tag
 
 
 class _FakeMap:
@@ -145,28 +154,116 @@ def test_an_explicit_format_wins(monkeypatch):
         assert call["viz"]["advanceInterval"] == "day"
 
 
-def test_both_layers_are_added_as_time_lapses(lapse):
-    """A speed raster to read and a particle field to watch — the same
-    pair ``addWindLayer`` gives, each one animated."""
+def test_it_adds_exactly_one_lapse(lapse):
+    """One layer, not two.
+
+    Each frame carries the speed field AND the particles, because
+    windTiles already holds both: u in red, v in green, and speed is
+    sqrt(u^2 + v^2). A second Earth Engine layer under the particles
+    would double the tiles per frame for data already on the wire.
+    """
     Map, _, _, wx = lapse
-    assert [c["name"] for c in Map.calls] == ["GFS wind speed",
-                                             "GFS wind particles"]
-    assert all(c["visible"] for c in Map.calls)
+    assert len(Map.calls) == 1, (
+        f"expected one time lapse, got {[c['name'] for c in Map.calls]}")
+    assert Map.calls[0]["name"] == "GFS wind"
+    assert Map.calls[0]["visible"] is True
 
 
-def test_the_particle_frames_carry_the_tile_encoding(lapse):
-    """The client decodes u/v with the bounds in viz. If the frames went
-    out without them it would fall back to its own constants, and a
-    mismatch there yields wind wrong by a scale and an offset — which
-    still looks like weather."""
+def test_the_frames_are_the_uv_encoding(lapse):
+    """It is the u/v frames that go on the map — the client reads them
+    numerically and paints both halves. The speed collection is returned
+    for querying and re-use, not drawn."""
+    _, speed_ic, tiles_ic, _wx = lapse
+    Map = lapse[0]
+    assert Map.calls[0]["collection"] is tiles_ic
+    assert [i.name for i in tiles_ic.images] == ["tiles:h0", "tiles:h1",
+                                                 "tiles:h2"]
+
+
+def test_the_layer_carries_the_tile_encoding(lapse):
+    """The client decodes u/v with the bounds in viz. Without them it
+    falls back to its own constants, and a mismatch there yields wind
+    wrong by a scale and an offset — which still looks like weather."""
     Map, _, _, wx = lapse
-    particles = Map.calls[1]["viz"]
-    assert particles["windParticles"] is True
-    assert particles["windTileMin"] == wx.WIND_TILE_MIN_MS
-    assert particles["windTileMax"] == wx.WIND_TILE_MAX_MS
-    assert particles["canQuery"] is False, (
-        "the particle frames answer clicks with encoded RGB; the speed "
-        "raster is the queryable half")
+    viz = Map.calls[0]["viz"]
+    assert viz["windParticles"] is True
+    assert viz["windTileMin"] == wx.WIND_TILE_MIN_MS
+    assert viz["windTileMax"] == wx.WIND_TILE_MAX_MS
+
+
+def test_the_client_is_told_to_draw_the_speed_field(lapse):
+    """windSpeedRaster is what makes it the merged layer rather than a
+    bare particle layer, and the ramp has to travel with it."""
+    Map, _, _, wx = lapse
+    viz = Map.calls[0]["viz"]
+    assert viz["windSpeedRaster"] is True
+    assert viz["windSpeedPalette"], "no palette for the client to color with"
+    assert viz["windRampMinMs"] == 0, (
+        "the ramp must use the UNCLAMPED stretch; windMinSpeedMs carries "
+        "a 1 m/s advection floor that would shift every color")
+    assert viz["windRampMaxMs"] > 0
+
+
+def test_no_rendering_keys_leak_onto_the_merged_layer(lapse):
+    """The one that would break the map silently.
+
+    ``bands``, ``min``, ``max`` and ``palette`` are forwarded to
+    ``getMapId``. The image they would be applied to is already
+    ``visualize``d — a finished 8-bit RGB — so re-stretching it there
+    would corrupt the very u/v bytes the client decodes, and the wind
+    would come out wrong rather than absent.
+    """
+    Map, _, _, wx = lapse
+    viz = Map.calls[0]["viz"]
+    for key in ("bands", "min", "max", "palette", "gain", "bias", "gamma"):
+        assert key not in viz, (
+            f"{key!r} reached the merged layer; it goes to getMapId and "
+            f"will re-stretch an already-visualized RGB")
+
+
+def test_the_query_still_reads_real_weather(lapse):
+    """The inspector must report speed and direction, not bytes.
+
+    The viewer takes ``viz.queryItem`` in place of the item it draws, so
+    the layer on screen can be the u/v encoding while clicks are
+    answered from the speed/direction collection.
+    """
+    Map, speed_ic, _tiles, _wx = lapse
+    viz = Map.calls[0]["viz"]
+    assert viz["canQuery"] is True
+    assert viz["windQueryItem"] == "SERIALIZED:speed", (
+        "the query is not pointed at the speed collection — clicking the "
+        "wind layer would report the u/v encoding as if it were weather")
+    # Serialized, not the object: viz travels to the browser as JSON, and
+    # an ee object here raises "not JSON serializable" at Map.view().
+    assert isinstance(viz["windQueryItem"], str)
+    assert "queryItem" not in viz, (
+        "a raw ee object under `queryItem` would break json.dumps(viz)")
+
+
+def test_the_legend_is_one_entry(lapse):
+    """One layer, one key.
+
+    The separate speed layer used to bring its own color bar, and for a
+    while the grouped layer carried two entries — a ramp and a comet —
+    which is two rows describing one thing. ``_particle_swatch`` already
+    draws the comet OVER the ramp, which is exactly what the map shows,
+    so the grouped layer needs nothing else.
+    """
+    Map, _, _, wx = lapse
+    legend = Map.calls[0]["viz"]["classLegendDict"]
+    assert len(legend) == 1, (
+        f"the grouped layer should have one legend entry, got "
+        f"{list(legend)}")
+    label, swatch = next(iter(legend.items()))
+    assert "kt" in label and "0-60" in label, (
+        f"the entry is not labelled with its stretch and unit: {label!r}")
+    assert swatch.count("linear-gradient") >= 2, (
+        "the swatch is not the comet over the ramp — one of the two "
+        "halves of the layer has nothing in the key")
+    assert "width:" in swatch, (
+        "the entry stands in for a color bar, so it needs a bar's width "
+        "rather than a chip's")
 
 
 def test_both_entry_points_build_one_viz(lapse):
@@ -177,9 +274,98 @@ def test_both_entry_points_build_one_viz(lapse):
     coincidence of the moment.
     """
     Map, _, _, wx = lapse
-    speed_viz, particle_viz = wx._wind_vizzes({"units": "kt", "min": 0,
-                                               "max": 60})
+    _speed_viz, particle_viz = wx._wind_vizzes({"units": "kt", "min": 0,
+                                                "max": 60})
+    viz = Map.calls[0]["viz"]
+    # classLegendDict is deliberately extended with the ramp, and
+    # canQuery deliberately flipped; everything else must match.
     for key, value in particle_viz.items():
-        assert Map.calls[1]["viz"][key] == value, key
-    for key, value in speed_viz.items():
-        assert Map.calls[0]["viz"][key] == value, key
+        if key in ("classLegendDict", "canQuery"):
+            continue
+        assert viz[key] == value, key
+
+
+# ---------------------------------------------------------------------------
+# groupWindLayers: the plain layer works the same way
+# ---------------------------------------------------------------------------
+
+
+def _plain(monkeypatch, **kw):
+    """Run addWindLayer against fakes and hand back the Map's calls."""
+    import geeViz.weather as wx
+
+    monkeypatch.setattr(wx.ee, "Image", lambda x: x)
+    monkeypatch.setattr(wx.ee, "ImageCollection", lambda x: x)
+    monkeypatch.setattr(wx, "windImage",
+                        lambda img, viz: _FakeCollection([], "speed"))
+    monkeypatch.setattr(wx, "windTiles",
+                        lambda img, viz: _FakeCollection([], "tiles"))
+
+    class _M:
+        def __init__(self):
+            self.calls = []
+
+        def addLayer(self, item, viz, name, visible):
+            self.calls.append({"item": item, "viz": viz, "name": name,
+                               "visible": visible})
+
+    Map = _M()
+    wx.addWindLayer(Map, _FakeImage("img"), {"units": "kt", "min": 0,
+                                             "max": 60}, "W", **kw)
+    return Map, wx
+
+
+def test_a_plain_wind_layer_is_grouped_by_default(monkeypatch):
+    """groupWindLayers defaults to True, so a single-frame wind layer
+    gets the same one-layer treatment the lapse does: one entry, one
+    tile set, two independent opacity controls."""
+    Map, wx = _plain(monkeypatch)
+    assert len(Map.calls) == 1, (
+        f"expected one layer, got {[c['name'] for c in Map.calls]}")
+    assert Map.calls[0]["name"] == "W"
+    viz = Map.calls[0]["viz"]
+    assert viz["windSpeedRaster"] is True
+    assert viz["windParticles"] is True
+    assert viz["canQuery"] is True
+    assert viz["windQueryItem"] == "SERIALIZED:speed", (
+        "the query is not pointed at the speed image")
+    assert len(viz["classLegendDict"]) == 1
+
+
+def test_grouping_can_be_turned_off(monkeypatch):
+    """The two-layer arrangement is still reachable. It is the one thing
+    grouping gives up: there, the speed raster is rendered by Earth
+    Engine rather than by the client."""
+    Map, wx = _plain(monkeypatch, groupWindLayers=False)
+    assert [c["name"] for c in Map.calls] == ["W speed", "W particles"]
+    assert "windSpeedRaster" not in Map.calls[1]["viz"]
+
+
+def test_an_ungrouped_lapse_is_still_two_lapses(monkeypatch):
+    """Same escape hatch on the time lapse."""
+    import geeViz.weather as wx
+
+    monkeypatch.setattr(wx.ee, "Image", lambda x: x)
+    monkeypatch.setattr(wx.ee, "ImageCollection", lambda x: x)
+    monkeypatch.setattr(wx, "windImage",
+                        lambda img, viz: _FakeImage("speed:" + img.name))
+    monkeypatch.setattr(wx, "windTiles",
+                        lambda img, viz: _FakeImage("tiles:" + img.name))
+    Map = _FakeMap()
+    src = _FakeCollection([_FakeImage("h0", {"system:time_start": TIMES[0]})])
+    wx.addWindTimeLapse(Map, src, {}, "W", groupWindLayers=False)
+    assert [c["name"] for c in Map.calls] == ["W speed", "W particles"]
+
+
+def test_both_grouped_paths_build_one_viz(monkeypatch):
+    """addWindLayer and addWindTimeLapse share ``_merged_viz``.
+
+    Two copies of the merged dict would not throw when they diverged --
+    they would yield a layer whose query, legend or ramp quietly
+    disagreed with the other entry point's.
+    """
+    import inspect
+
+    import geeViz.weather as wx
+    for fn in (wx.addWindLayer, wx.addWindTimeLapse):
+        assert "_merged_viz(" in inspect.getsource(fn), fn.__name__
