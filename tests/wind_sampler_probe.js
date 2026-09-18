@@ -38,9 +38,17 @@ const st = {
   tiles: {},
   getTileUrl: () => "http://example/",
   inflight: 0, burst: 0, id: "probe",
+  // The tile cache is keyed by FRAME as well as tile, so one overlay can
+  // serve every frame of a wind time lapse without frame 2 reading
+  // frame 1's pixels. Seed under the same key getTile builds, or the
+  // probe falls through to a real fetch and dies on `new Image()`,
+  // which does not exist in node.
+  frameId: "probe",
 };
 for (let tx = 0; tx < n; tx++) {
-  for (let ty = 0; ty < n; ty++) st.tiles[z + "/" + tx + "/" + ty] = ramp;
+  for (let ty = 0; ty < n; ty++) {
+    st.tiles[st.frameId + "/" + z + "/" + tx + "/" + ty] = ramp;
+  }
 }
 
 // Deliberately away from a tile seam: the synthetic tiles repeat, so a

@@ -313,7 +313,11 @@
    * every decode silently yields nothing.
    */
   function getTile(st, z, x, y) {
-    var key = z + "/" + x + "/" + y;
+    // Keyed by FRAME as well as tile. One overlay serves every frame of
+    // a time lapse, so without the prefix frame 2 would read frame 1's
+    // decoded pixels out of the cache and the wind would stop changing
+    // while the slider moved.
+    var key = (st.frameId || "_") + "/" + z + "/" + x + "/" + y;
     var hit = st.tiles[key];
     // A tile that failed was cached as false and never asked for again,
     // so one 404 or one decode error left a tile-shaped hole in the
@@ -609,9 +613,13 @@
   /** What the field was built for. Changes on pan, zoom or resize. */
   function viewKey(st) {
     var c = global.map && global.map.getCenter();
+    // st.frameId is part of the key: the field is a resample of the
+    // decoded tiles, and advancing a frame changes the data under an
+    // unchanged view. Without it the lapse would play with frame 1's
+    // vectors forever.
     return [global.map && global.map.getZoom(),
             c ? c.lat().toFixed(5) : "?", c ? c.lng().toFixed(5) : "?",
-            st.w, st.h].join("|");
+            st.w, st.h, st.frameId || "_"].join("|");
   }
 
   /**
@@ -944,7 +952,14 @@
     var c = canvas || st.canvas;
     if (!c) return;
     var reg = registry();
-    var L = reg && reg[st.id];
+    // st.frameId, not st.id. For a time lapse st.id is the GROUP key
+    // ("tl:<timeLapseID>"), which is not a registry entry at all -- this
+    // found nothing and returned, so the lapse's canvas never got a
+    // z-index and dragging the lapse in the layer list left the
+    // particles where they were. The showing frame is a real layer and
+    // carries the layerId the viewer is using. For a plain layer
+    // frameId and id are the same thing.
+    var L = reg && reg[st.frameId];
     if (!L || typeof L.layerId !== "number") return;
     var z = String(L.layerId);
     if (c.style.zIndex !== z) c.style.zIndex = z;
@@ -955,20 +970,83 @@
     var pageVisible = !global.document || !global.document.hidden;
     for (var id in adopted) {
       var st = adopted[id];
-      var L = reg && reg[id];
-      var want = pageVisible && inView && (L ? L.visible !== false : true);
+
+      // Which frame is on? NOT the one whose checkbox is ticked.
+      //
+      // A geeImage time lapse turns EVERY frame's visibility on at once
+      // -- turnOnTimeLapseLayers() clicks all of them -- and then picks
+      // the current frame with the OPACITY slider: selectFrame() zeroes
+      // every frame and raises just the one. Only a tileMapService
+      // lapse advances by clicking a checkbox. Reading `visible` here
+      // pinned the particles to frame 0 forever; they animated
+      // perfectly well, through a field that never changed, which is
+      // the kind of wrong that looks right.
+      //
+      // Cumulative mode raises frames 0..current to the SAME opacity,
+      // so the current one is the LAST non-zero in frame order -- hence
+      // >= on the tie rather than >. "Frame order" is st.frames'
+      // insertion order, i.e. the order the viewer registered the
+      // layers, which is the order its own `sliders` array is built in
+      // and therefore the order selectFrame indexes. It is NOT sorted
+      // by date -- an observed registry ran ...0919-06 before
+      // ...0919-00 -- but slider order is the one that matters here.
+      var shown = null, anyFrame = false, best = 0;
+      for (var fid in st.frames) {
+        anyFrame = true;
+        var FL = reg && reg[fid];
+        if (!FL || FL.visible === false) continue;
+        if (!st.isLapse) { if (shown === null) shown = fid; continue; }
+        // Undefined opacity means the viewer has not built the slider
+        // yet; treat it as shown so a lapse of one frame still runs.
+        var op = typeof FL.opacity === "number" ? FL.opacity : 1;
+        if (op > 0 && op >= best) { best = op; shown = fid; }
+      }
+      if (shown && shown !== st.frameId) {
+        // Swap which decoded field the particles sample. Deliberately
+        // NOT resetting st.particles: the trails carry on advecting
+        // through the new field, which is the whole point of one
+        // overlay per lapse. Resetting here would scatter fresh
+        // particles on every frame and play as stutter.
+        st.frameId = shown;
+        st.getTileUrl = st.frames[shown];
+        st.fieldKey = null;            // resample from the cache
+      }
+
+      var L = reg && reg[st.frameId];
+      var want = pageVisible && inView &&
+                 (anyFrame ? !!shown : (L ? L.visible !== false : true));
       if (want !== st.running) {
         st.running = want;
         if (!want && st.ctx) st.ctx.clearRect(0, 0, st.w, st.h);
+        // Only a genuine off->on gets a fresh scatter. A frame change
+        // does not pass through here, so trails survive it.
         if (want) st.particles = null;
       }
-      if (L && typeof L.opacity === "number") st.cfg.opacity = L.opacity;
+      // A plain layer's opacity slider is a user preference, and the
+      // particles should follow it. A LAPSE's frame opacities are not:
+      // they are the frame-selection mechanism, eight of nine sitting
+      // at 0 at any instant. Inheriting whichever frame is raised would
+      // make the particle alpha lurch between 0 and the lapse's value
+      // as it plays, and land on 0 outright before the first frame is
+      // chosen. Keep the configured particleOpacity for a lapse.
+      if (!st.isLapse && L && typeof L.opacity === "number") {
+        st.cfg.opacity = L.opacity;
+      }
       // Re-checking the layer makes the viewer rebuild and re-add the
       // encoded RGB. Undo it here rather than in scan(), which skips
       // anything already adopted. Re-adding also re-flips loading via
       // the viewer's getTileUrl, so the progress report belongs on the
       // same tick.
-      if (L) { detach(L); reportProgress(st); applyStacking(st); }
+      // Detach EVERY frame, not just the showing one: an unhidden
+      // frame would paint the encoded u/v RGB over the map as a
+      // magenta-green wash.
+      if (anyFrame) {
+        for (var dfid in st.frames) {
+          var DL = reg && reg[dfid];
+          if (DL) detach(DL);
+        }
+        reportProgress(st); applyStacking(st);
+      } else if (L) { detach(L); reportProgress(st); applyStacking(st); }
     }
     if (anyRunning() && rafId === null) rafId = global.requestAnimationFrame(tick);
   }
@@ -1159,6 +1237,26 @@
       if (adopted[id]) continue;
       var L = reg[id];
       if (!L || !L.viz || !L.viz.windParticles) continue;
+
+      // Every frame of a time lapse is its own geeImage layer, and they
+      // all carry windParticles. Adopting each one would stack N
+      // particle fields on the map at once. Group them instead: the
+      // viewer stamps viz.timeLapseID on every frame, so that is the
+      // overlay's identity and the layer id becomes a frame within it.
+      var gid = (L.viz.timeLapseID ? "tl:" + L.viz.timeLapseID : id);
+      if (adopted[gid]) {
+        var g = adopted[gid];
+        // Same guard the single-layer path below uses: the viewer
+        // creates the registry entry before it mints the ImageMapType,
+        // so L.layer is undefined for a beat and findTileUrlFn throws
+        // on it. A time lapse adds N frames, so this window is hit N
+        // times per scan instead of once.
+        if (!g.frames[id] && L.layer) {
+          var fn = findTileUrlFn(L.layer);
+          if (fn) { g.frames[id] = fn; detach(L); reportProgress(g); }
+        }
+        continue;
+      }
       // Needs the ImageMapType the viewer built; that is where the tile
       // URL lives.
       if (!L.layer) continue;
@@ -1167,7 +1265,13 @@
       detach(L);
 
       var st = {
-        id: id, getTileUrl: getUrl, cfg: cfgFrom(L.viz),
+        id: gid, getTileUrl: getUrl, cfg: cfgFrom(L.viz),
+        // frames: layerId -> getTileUrl. One entry for a plain layer,
+        // one per frame for a lapse. frameId says which is showing.
+        frames: (function (o) { o[id] = getUrl; return o; })(
+            Object.create(null)),
+        frameId: id,
+        isLapse: !!L.viz.timeLapseID,
         tiles: Object.create(null), tileFails: Object.create(null),
         tileZoom: 4,
         field: null, fieldOk: null, fieldW: 0, fieldH: 0,
@@ -1178,7 +1282,7 @@
       };
       st.overlay = makeOverlay(st);
       st.overlay.setMap(global.map);
-      adopted[id] = st;
+      adopted[gid] = st;
       // findTileUrlFn probes the viewer's own getTileUrl, which flips
       // layer.loading = true as a side effect. Settle it now: if this
       // layer never requests a tile (it is switched off, say) nothing
@@ -1243,6 +1347,14 @@
     _lonToTileX: lonToTileX,
     _latToTileY: latToTileY,
     _hexToRgb: hexToRgb,
+    // The overlay table, and the tick that maintains it. A time lapse
+    // is N registry layers behind ONE overlay, and which frame that
+    // overlay is sampling is decided here rather than by the viewer --
+    // so a test that cannot see `adopted` can only check that the
+    // particles move, which they do whether or not the frame ever
+    // advances. That is precisely the bug this pair exists to catch.
+    _adopted: adopted,
+    _refreshRunState: function () { return refreshRunState(); },
     _range: [TILE_MIN, TILE_MAX],
   };
 })(typeof window !== "undefined" ? window : this);

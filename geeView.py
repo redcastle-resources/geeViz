@@ -2717,6 +2717,50 @@ class mapper:
 
         return _addWindLayer(self, image, viz, name=name, visible=visible)
 
+    def addWindTimeLapse(self, collection: ee.ImageCollection, viz: dict = {},
+                         name: str = "Wind", visible: bool = True,
+                         dateFormat: str | None = None,
+                         advanceInterval: str | None = None,
+                         mosaic: bool = False):
+        """Add an animated wind field that is itself a time lapse.
+
+        The same two layers :meth:`addWindLayer` adds -- a queryable
+        speed raster and the particle flow over it -- but each is a time
+        lapse, so the slider scrubs the field while the particles keep
+        flowing through it.
+
+        Args:
+            collection (ee.ImageCollection): images carrying the wind
+                components **in m/s** with ``system:time_start`` set.
+                :func:`geeViz.weather.getForecastData` returns this.
+            viz (dict): exactly what :meth:`addWindLayer` accepts.
+            name (str): base name; the layers appear as
+                ``"<name> speed"`` and ``"<name> particles"``.
+            visible (bool): whether the pair starts switched on.
+            dateFormat (str): slider label format. Defaults to
+                ``"YYYYMMdd HH"`` -- forecast wind is sub-daily, and
+                :meth:`addTimeLapse`'s annual default would collapse
+                every frame onto one label.
+            advanceInterval (str): frame width. Defaults to ``"hour"``.
+            mosaic (bool): reduce multiple images per step.
+
+        Returns:
+            tuple: ``(speed_collection, tiles_collection)``.
+
+        >>> import geeViz.weather as wx
+        >>> ic = wx.getForecastData("2026-09-18", "2026-09-20", "gfs")
+        >>> Map.addWindTimeLapse(ic, {"units": "kt"}, "GFS wind")
+        >>> Map.view()
+        """
+        # Lazy for the same reason as addWindLayer above: geeViz.weather
+        # pulls in geeViz.fireLib, and geeView is imported by everything.
+        from geeViz.weather import addWindTimeLapse as _addWindTimeLapse
+
+        return _addWindTimeLapse(self, collection, viz, name=name,
+                                 visible=visible, dateFormat=dateFormat,
+                                 advanceInterval=advanceInterval,
+                                 mosaic=mosaic)
+
     def clearMap(self):
         """
         Removes all map layers and commands - useful if running geeViz in a notebook and don't want layers/commands from a prior code block to still be included.

@@ -121,7 +121,12 @@ def test_in_view_gates_the_same_want_the_other_conditions_do():
     places deciding whether to animate is how they disagree."""
     js = _wind_js()
     i = js.index("function refreshRunState()")
-    body = js[i:i + 900]
+    # Bounded by the NEXT function, not by a fixed character count. This
+    # was js[i:i + 900]; adding the time-lapse frame selection ahead of
+    # the `want` line pushed that line past 900, and the test failed on
+    # a change that left the gate exactly where it was.
+    j = js.find("\n  function ", i + 10)
+    body = js[i:j if j > 0 else i + 4000]
     code = "\n".join(ln for ln in body.splitlines()
                      if not ln.strip().startswith("//"))
     assert "pageVisible && inView" in code, (

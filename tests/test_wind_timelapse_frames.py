@@ -1,0 +1,165 @@
+"""A wind time lapse is N layers behind ONE particle overlay.
+
+``Map.addWindTimeLapse`` adds every forecast hour as its own geeImage
+layer, and each one carries ``windParticles``. Read naively, that is
+nine particle fields adopted at once, nine canvases stacked on the map,
+nine independent flows drawn over each other.
+
+So the frames are grouped: ``viz.timeLapseID`` is the overlay's
+identity, the layer id becomes a frame within it, and one overlay
+samples whichever frame the lapse is showing. Nothing is torn down
+between frames, so the trails keep advecting through each new field
+instead of resetting to a fresh scatter on every step.
+
+The part that is easy to get wrong -- and was wrong -- is *which frame
+is showing*. A geeImage lapse does not tick checkboxes. The viewer turns
+every frame visible at once (``turnOnTimeLapseLayers``) and then raises
+one frame's OPACITY (``selectFrame`` -> ``setFrameOpacity``); only a
+``tileMapService`` lapse switches by clicking. Selecting on ``visible``
+gives a flow that animates beautifully and never leaves frame 0: no
+error, no exception, and no tell on screen beyond a two-day forecast in
+which the weather never changes.
+
+Driven through node against the real source, so this tests the shipped
+file rather than a description of it.
+"""
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+SRC = ROOT / "geeViz" / "geeView" / "src" / "js" / "wind-particles.js"
+PROBE = Path(__file__).with_name("wind_timelapse_probe.js")
+
+LAPSE = "GFS-wind-particles"
+
+
+def _node():
+    exe = shutil.which("node")
+    if not exe:
+        pytest.skip("node not available")
+    return exe
+
+
+@pytest.fixture(scope="module")
+def result():
+    out = subprocess.run([_node(), str(PROBE), str(SRC)],
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_nine_frames_become_one_overlay(result):
+    """The whole reason the grouping exists."""
+    assert result["adoptedLapse"], "the lapse was never adopted at all"
+    assert result["overlayIds"] == ["plain", "tl:" + LAPSE], (
+        f"expected one overlay for the lapse and one for the plain layer, "
+        f"got {result['overlayIds']}")
+    assert result["frameCount"] == 9, (
+        f"the overlay is serving {result['frameCount']} frames, not 9")
+    assert result["perFrameOverlays"] == 0, (
+        f"{result['perFrameOverlays']} frames got their own particle "
+        f"overlay — that many flows are drawing on top of each other")
+
+
+def test_every_frame_is_taken_off_the_map(result):
+    """Not just the showing one.
+
+    The frames carry u/v encoded as RGB. A frame left on the map paints
+    that encoding over the basemap as a magenta-green wash, and with a
+    lapse there are eight of them behind the one being watched.
+    """
+    slots = result["overlayAfterScan"]
+    assert all(s is None for s in slots), (
+        f"an encoded u/v raster is still on the map: {slots}")
+    # setAt(null), never removeAt: the array is positional and every
+    # other layer addresses it by a fixed index.
+    assert len(slots) == 10, (
+        f"overlayMapTypes went from 10 slots to {len(slots)} — every "
+        f"layerId above the particle layers now addresses the wrong tiles")
+
+
+def test_the_overlay_follows_the_frame_the_lapse_raised(result):
+    """Opacity is the discriminator, not the visibility checkbox.
+
+    This is the mutation guard: put the selection back on ``visible``
+    and every one of these lands on frame0.
+    """
+    assert result["atFrame0"]["frameId"] == LAPSE + "-frame0"
+    assert result["atFrame4"]["frameId"] == LAPSE + "-frame4", (
+        "the lapse raised frame 4 and the particles stayed on "
+        f"{result['atFrame4']['frameId']} — the field never advances")
+    assert result["atFrame8"]["frameId"] == LAPSE + "-frame8"
+
+
+def test_the_tile_source_advances_with_the_frame(result):
+    """frameId alone proves nothing if the tiles keep coming from
+    frame 0: the particles sample DECODED TILES, so the getTileUrl has
+    to move too."""
+    urls = [result[k]["url"] for k in ("atFrame0", "atFrame4", "atFrame8")]
+    assert len(set(urls)) == 3, f"the frames share a tile source: {urls}"
+    assert "/0/" in urls[0] and "/4/" in urls[1] and "/8/" in urls[2], urls
+
+
+def test_the_trails_survive_a_frame_change(result):
+    """The point of one overlay per lapse.
+
+    Reseeding on every step would play as a stutter -- the flow would
+    restart from a fresh random scatter nine times instead of carrying
+    on through an evolving field.
+    """
+    assert result["particlesSurvivedFrameChange"], (
+        "the particles were reseeded on a frame change; the trails "
+        "restart from scratch every step")
+    assert result["fieldKeyCleared"], (
+        "the sampled field was not invalidated, so the new frame's "
+        "tiles are decoded and then ignored")
+
+
+def test_cumulative_mode_picks_the_latest_raised_frame(result):
+    """Cumulative mode raises frames 0..current to the SAME opacity.
+    The current one is the last of them, not the first."""
+    assert result["cumulative"]["frameId"] == LAPSE + "-frame5", (
+        f"cumulative mode selected {result['cumulative']['frameId']}, "
+        f"expected the newest raised frame")
+
+
+def test_a_stopped_lapse_draws_nothing(result):
+    """Every frame back to zero opacity means nothing is on screen.
+    Animating a field the user cannot see burns a core for nothing."""
+    assert result["whenAllZero"]["running"] is False
+
+
+def test_a_plain_wind_layer_is_still_driven_by_visibility(result):
+    """The opacity rule is for lapses only.
+
+    A single ``addWindLayer`` has no lapse controlling it; its checkbox
+    is the whole story, and it sits at opacity 1 the entire time. Read
+    through the lapse rule it would be indistinguishable from a raised
+    frame and would never switch off.
+    """
+    assert result["plain"]["adopted"] and result["plain"]["isLapse"] is False
+    assert result["plain"]["running"] is True
+    assert result["plainAfterHide"] is False, (
+        "unchecking a plain wind layer left the particles running")
+    assert result["plainAfterShow"] is True
+
+
+def test_the_canvas_stacks_at_the_showing_frames_slot(result):
+    """The particle canvas shares the ``overlayLayer`` pane with the
+    rasters, so a z-index is what orders it against them.
+
+    A lapse's ``st.id`` is the group key, which is not a registry entry
+    at all — looked up by it the layerId was never found, the canvas
+    kept whatever z-index it had, and dragging the lapse in the layer
+    list moved the rasters while the particles stayed put.
+    """
+    assert result["zAtFrame3"] == "3", (
+        f"the canvas is at z-index {result['zAtFrame3']!r}, not the "
+        f"showing frame's layerId")
+    assert result["zAfterReorder"] == "7", (
+        "the canvas did not follow updateMapLayerOrder — a z-index "
+        "written once keeps the order the list had at adoption")

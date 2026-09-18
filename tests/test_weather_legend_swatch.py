@@ -38,7 +38,7 @@ def _alphas(css, rgb=(255, 255, 255)):
     return [float(a) for a in re.findall(pat, css)]
 
 
-def test_the_value_is_not_mistaken_for_a_hex_colour():
+def test_the_value_is_not_mistaken_for_a_hex_color():
     """``addColorHash`` prepends '#' to anything ``isHexColor`` accepts.
     If that ever fired on this, the span's background becomes
     ``#linear-gradient(...)`` and the swatch renders as nothing."""
@@ -88,7 +88,7 @@ def test_the_background_is_the_speed_ramp_at_low_opacity():
         r, g, b = (int(hexc[i:i + 2], 16) for i in (1, 3, 5))
         assert f"rgba({r},{g},{b},0.50)" in css, (
             f"{hexc} is not in the swatch ramp")
-    # Faded, not the real thing: the speed raster has its own colour bar
+    # Faded, not the real thing: the speed raster has its own color bar
     # and that is the one to read values off.
     assert "1.00)" not in css.split("linear-gradient", 2)[2]
 
@@ -111,28 +111,53 @@ def test_it_falls_back_to_a_flat_chip_without_a_palette():
     assert _swatch(palette=["#abc"]).endswith("#24303a")
 
 
-def test_addWindLayer_puts_this_on_the_particle_layer():
-    """The wiring. The swatch can be perfect and never reach the map."""
+def test_the_swatch_reaches_the_particle_layer():
+    """The wiring. The swatch can be perfect and never reach the map.
+
+    Asserted on the viz dict that is actually handed to ``addLayer``,
+    not by grepping ``addWindLayer``'s body. The construction now lives
+    in ``_wind_vizzes``, shared with ``addWindTimeLapse`` so the two
+    entry points cannot drift apart. The old grep pinned a LOCATION,
+    so it broke on a move that changed nothing a user can see -- while
+    still passing if the dict stopped reaching the map.
+    """
     import geeViz.weather as wx
+    _speed, particle = wx._wind_vizzes({})
+    legend = particle.get("classLegendDict") or {}
+    assert legend, "the particle layer carries no legend entry"
+    css = " ".join(legend.values())
+    assert "rgba(" in css or "linear-gradient" in css, (
+        "the legend entry is not a rendered swatch")
+
+
+def test_the_swatch_gets_the_layers_own_speed_ramp():
+    """A swatch drawn with the default palette beside a layer using a
+    custom one is a key describing a different map."""
+    import geeViz.weather as wx
+    _s, particle = wx._wind_vizzes({"palette": ["#000000", "#ff0000"]})
+    css = " ".join((particle.get("classLegendDict") or {}).values())
+    assert "255,0,0" in css or "ff0000" in css.lower(), (
+        "the swatch ignored the layer's palette")
+
+
+def test_both_entry_points_share_one_swatch():
+    """addWindLayer and addWindTimeLapse must not build separate
+    legends -- that shared construction is why _wind_vizzes exists."""
     import inspect
-    src = inspect.getsource(wx.addWindLayer)
-    code = "\n".join(ln for ln in src.splitlines()
-                     if not ln.strip().startswith("#"))
-    assert "_particle_swatch(" in code, (
-        "addWindLayer no longer builds the swatch")
-    assert "classLegendDict" in code
-    assert "palette=palette" in code, (
-        "the swatch is not being given the layer's own speed ramp")
+
+    import geeViz.weather as wx
+    for fn in (wx.addWindLayer, wx.addWindTimeLapse):
+        assert "_wind_vizzes(" in inspect.getsource(fn), fn.__name__
 
 
-def test_the_particle_colour_is_what_is_drawn():
+def test_the_particle_color_is_what_is_drawn():
     """Whatever particleColor says, in the swatch too -- two wind layers
     up at once are told apart by exactly this."""
     import geeViz.weather as wx
     css = wx._particle_swatch(wx._rgb_of("#ffe066"), 0.9, 2.1, 1.6, 3.0,
                               palette=PALETTE)
     assert "rgba(255,224,102," in css
-    assert _alphas(css, (255, 224, 102)), "no trail in the particle colour"
+    assert _alphas(css, (255, 224, 102)), "no trail in the particle color"
 
 
 def test_rgb_parsing_is_forgiving_but_not_silent_about_shape():
@@ -141,4 +166,4 @@ def test_rgb_parsing_is_forgiving_but_not_silent_about_shape():
     assert wx._rgb_of("ffe066") == (255, 224, 102)
     assert wx._rgb_of("#fff") == (255, 255, 255)
     # A legend chip is not worth failing a map layer over.
-    assert wx._rgb_of("not-a-colour") == (255, 255, 255)
+    assert wx._rgb_of("not-a-color") == (255, 255, 255)

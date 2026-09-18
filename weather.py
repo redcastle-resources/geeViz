@@ -195,6 +195,7 @@ __all__ = [
     "windImage",
     "windTiles",
     "addWindLayer",
+    "addWindTimeLapse",
     "VARIABLES",
     "CANONICAL_UNITS",
     "publishes",
@@ -1067,11 +1068,11 @@ Underneath it sits the layer's own SPEED RAMP, at low opacity. That
     a swatch on a flat ground shows the comet in a context it never
     actually appears in, and a white comet on the legend's white ground
     shows nothing at all. Low opacity because the ramp here is a
-    backdrop, not a reading: the speed raster has its own colour-bar
+    backdrop, not a reading: the speed raster has its own color-bar
     entry and that is the one to measure against.
 
     Args:
-        rgb: the particle colour, as an ``(r, g, b)`` triple.
+        rgb: the particle color, as an ``(r, g, b)`` triple.
         opacity, taper, head_boost, max_width: the same numbers
             ``wind-particles.js`` draws the trail with, so the key
             cannot drift from the map.
@@ -1080,9 +1081,9 @@ Underneath it sits the layer's own SPEED RAMP, at low opacity. That
         ramp_opacity: alpha on that ramp, 0-1. 0.5 by default, chosen
             by rendering the alternatives: below about 0.4 the ramp
             stops reading as the ramp and a white comet -- the default
-            colour -- loses its contrast against it, while at 1.0 the
+            color -- loses its contrast against it, while at 1.0 the
             swatch is indistinguishable from the speed layer's own
-            colour bar and invites being read as one.
+            color bar and invites being read as one.
     """
     r, g, b = rgb
 
@@ -1108,7 +1109,7 @@ Underneath it sits the layer's own SPEED RAMP, at low opacity. That
     if len(pal) < 2:
         return f"{comet}, #24303a"
 
-    # The ramp, spread across the swatch in the same order the colour
+    # The ramp, spread across the swatch in the same order the color
     # bar runs. Alpha is baked per stop rather than set on the element:
     # the comet has to stay at full strength, and one opacity on the
     # span would fade both.
@@ -1477,117 +1478,17 @@ def windTiles(image, viz=None):
                          min=WIND_TILE_MIN_MS, max=WIND_TILE_MAX_MS)
 
 
-def addWindLayer(Map, image, viz=None, name="Wind", visible=True):
-    """Add a wind field: a queryable speed raster plus animated particles.
+def _wind_vizzes(viz):
+    """The two viz dicts ``addWindLayer`` and ``addWindTimeLapse`` share.
 
-    Two layers, in the style of windy.com -- a smooth speed raster
-    carrying the reading, with particle trails over it showing the flow.
+    Pure: no ``Map``, no ``ee`` call. Extracted so the single-frame
+    and time-lapse entry points cannot drift apart -- the particle
+    dict carries the tile encoding bounds the client decodes with,
+    and a copy of that in two places would not throw when it
+    diverged, it would yield winds wrong by a scale and offset,
+    which still look like weather.
 
-    Args:
-        Map: the geeViz ``Map`` object to add the two layers to.
-        image: ``ee.Image`` whose bands include the wind components,
-            **in m/s** — the particle tile encoding and the default
-            speed stretch are both absolute.
-        name: base name for the pair; the layers appear as
-            ``"<name> speed"`` and ``"<name> particles"``.
-        visible: whether both layers start switched on. They are one
-            unit — showing particles over a hidden raster would leave
-            the flow with no legend and nothing to click.
-        viz: Same spirit as ``Map.addLayer``'s viz dict.
-
-            * ``bands`` (list or comma string) -- the dx/dy components.
-              Defaults to the image's FIRST TWO bands, in order.
-            * ``units`` -- ``"km/hr"`` (default), ``"m/s"``,
-              ``"mi/hr"`` or ``"kt"``. Knots is what aviation, marine
-              forecasts and windy.com use.
-            * ``min`` / ``max`` -- speed stretch. ``max`` defaults to a
-              value chosen FOR THE UNIT (15 m/s, 54 km/h, 34 mi/h), so
-              switching units cannot leave the raster all one colour.
-            * ``palette`` -- speed ramp. Defaults to
-              :data:`WIND_PALETTE`, taken from windy.com's legend.
-            * ``particleColor`` -- trail colour, default ``"#fff"``.
-            * ``particleOpacity`` (0.9) -- alpha at the head.
-
-            **Width.** Across the streak; LENGTH along it is
-            ``particleTrailLength``. ``particleStrokeWeight`` (1.1) is
-            the base, and ``particleMinWidth`` / ``particleMaxWidth``
-            are the absolute pixel widths at the tail and the head,
-            defaulting to 0.45x and 1.5x the weight so changing the
-            weight alone rescales the whole taper. Equal min and max
-            give a constant-width ribbon instead of a comet.
-            ``particleLineWidth`` is the old name for
-            ``particleStrokeWeight`` and still works.
-
-            **Shape.** ``particleTrailLength`` (13) is how many frames
-            of history each trail draws -- that, times the per-frame
-            step, IS the streak length. ``particleTaper`` (2.1) is the
-            exponent on the tail fade: 1 is a linear wedge, higher
-            stretches the faint part out. ``particleHeadBoost`` (1.6)
-            brightens the leading segment. ``particleLineCap``
-            (``"round"``, or ``"butt"`` for blunt tips).
-
-            **Speed.** ``particleSpeed`` (0.5) is pixels per frame
-            for each m/s of wind, at the equator -- so it sets both how
-            fast the field moves and, since length is proportional to
-            it, how long the streaks are. Zoom does not enter into it:
-            a streak is the same size on screen however far in you are.
-            That is the ONLY speed knob. The floor and ceiling on
-            apparent speed are taken from ``min`` and ``max``, converted
-            from ``units`` to m/s, so the streaks start and stop
-            growing exactly where the colour ramp does. Past ``max`` the
-            raster is one flat colour and a longer streak there claims a
-            difference the map has stopped showing; the same in reverse
-            below ``min``.
-
-            A stretch starting at 0 -- nearly every wind map -- would
-            leave no floor, so 0 becomes 1 m/s: length is proportional
-            to speed, and without a floor a light breeze draws a
-            one-pixel dot and a calm map reads as broken.
-
-            The bounds apply to the ADVECTION only. Direction is
-            untouched, and the speed raster and the click query still
-            report the true value, so never read a wind speed off a
-            streak. There are no separate floor/ceiling parameters:
-            widen ``min`` / ``max`` to widen the range the streaks
-            respond over.
-
-            NOTE ``particleSpeed``, ``particleTrailLength``,
-            ``particleMaxAge`` and the renderer's 30fps cap are ONE
-            group. Streak length is ``trailLength * speed`` and apparent
-            motion is ``speed * frameRate``, so at a fixed rate the
-            trail cannot be shortened without speeding the field up, and
-            lifetimes are counted in frames so they scale with the rate
-            too. Changing one of the four alone changes the look.
-
-            **Lifetime.** ``particleMinAge`` / ``particleMaxAge``
-            (11.25 and 45) -- the range each particle's lifetime is drawn
-            from. A young particle has laid down less trail, so
-            spreading lifetimes is what puts short streaks alongside
-            long ones. Equal values give one uniform length. At the end
-            of its life a particle stops advancing and its trail
-            RETRACTS over ``particleTrailLength`` frames, so the streak
-            slides away rather than blinking out.
-
-            **Layout.** ``particleLayout`` -- where particles start.
-            ``"random"`` (default) scatters them, which is what a flow
-            field usually wants: the eye reads the streaks, not their
-            origins. ``"grid"`` is a strict lattice and ``"randomGrid"``
-            the same lattice under one random offset -- both trade
-            scatter for even coverage, the way a barb or quiver plot is
-            laid out, and a lattice particle respawns in its own cell so
-            the pattern does not erode into noise.
-
-            **Count.** Derived from canvas WIDTH:
-            ``particleDensity`` (1.2) particles per pixel of width, so
-            about 2000 on a 1700 px canvas. Pass ``particleCount`` to
-            override it outright. There is no floor or ceiling --
-            width times density cannot run away, and a phone and a 5K
-            display each get the right number for their screen.
-
-            * ``directionConvention`` -- ``"from"`` (default) or ``"to"``.
-
-    Returns:
-        ``(speed_direction_image, encoded_tiles_image)``.
+    Returns ``(speed_viz, particle_viz)``.
     """
     viz = dict(viz or {})
     # Two bases the rest of the particle defaults hang off. Resolved
@@ -1606,9 +1507,9 @@ def addWindLayer(Map, image, viz=None, name="Wind", visible=True):
     # The particle speed bounds ARE the raster stretch.
     #
     # They used to be two separate numbers in m/s while the stretch was
-    # in `units`, so `units='km/hr', max=30` saturated the colour ramp at
+    # in `units`, so `units='km/hr', max=30` saturated the color ramp at
     # 8.3 m/s while particles went on lengthening to a fixed 45. Past
-    # `max` the raster is one flat colour, and a streak still growing
+    # `max` the raster is one flat color, and a streak still growing
     # there claims a difference the map has stopped showing; below `min`
     # the same in reverse. Deriving both leaves one speed knob --
     # `particleSpeed`, in pixels per frame per m/s -- and the stretch
@@ -1636,11 +1537,8 @@ def addWindLayer(Map, image, viz=None, name="Wind", visible=True):
         palette = [c.strip() for c in palette.split(",")]
     pal_csv = ",".join(c.lstrip("#") for c in palette)
 
-    q = windImage(image, viz)
 
-    # 1. The speed raster, and the layer a click reads. Both derived
-    #    bands ride along so a query reports direction beside speed.
-    Map.addLayer(q, {
+    speed_viz = {
         "layerType": "geeImage",
         "bands": "speed",
         "min": vmin, "max": vmax,
@@ -1650,21 +1548,21 @@ def addWindLayer(Map, image, viz=None, name="Wind", visible=True):
         "yLabel": "Wind speed (" + units + ")",
         "legendLabelLeftBefore": "Calm",
         "legendLabelRightAfter": " " + units,
-    }, name + " speed", visible)
+    }
 
     # 2. The particle layer. A real geeImage layer, so the viewer mints
     #    tiles for it and gives it a panel entry -- but the RGB is never
     #    shown. wind-particles.js hides it and reads those tiles
     #    numerically instead.
-    tiles = windTiles(image, viz)
-    Map.addLayer(tiles, {
+
+    particle_viz = {
         "layerType": "geeImage",
         "windParticles": True,
         "windTileMin": WIND_TILE_MIN_MS,
         "windTileMax": WIND_TILE_MAX_MS,
         "windUnits": units,
         "canQuery": False,          # the speed raster answers clicks
-        # One swatch, in the particle colour.
+        # One swatch, in the particle color.
         #
         # The layer had no legend entry at all, which left an animated
         # field on the map with nothing in the key explaining it -- and
@@ -1673,7 +1571,7 @@ def addWindLayer(Map, image, viz=None, name="Wind", visible=True):
         # non-vector layer, which is exactly one line here.
         #
         # The value is a CSS background rather than a hex, so the swatch
-        # is a small comet in the particle's own colour instead of a
+        # is a small comet in the particle's own color instead of a
         # flat chip. ``addColorHash`` only prepends '#' to a bare hex,
         # so this reaches the span untouched.
         "addToLegend": True,
@@ -1767,9 +1665,240 @@ def addWindLayer(Map, image, viz=None, name="Wind", visible=True):
         # for a uniform look.
         "particleMaxAge": max_age,
         "particleMinAge": viz.get("particleMinAge", max_age * 0.25),
-    }, name + " particles", visible)
+    }
+
+    return speed_viz, particle_viz
+
+
+def addWindLayer(Map, image, viz=None, name="Wind", visible=True):
+    """Add a wind field: a queryable speed raster plus animated particles.
+
+    Two layers, in the style of windy.com -- a smooth speed raster
+    carrying the reading, with particle trails over it showing the flow.
+
+    Args:
+        Map: the geeViz ``Map`` object to add the two layers to.
+        image: ``ee.Image`` whose bands include the wind components,
+            **in m/s** — the particle tile encoding and the default
+            speed stretch are both absolute.
+        name: base name for the pair; the layers appear as
+            ``"<name> speed"`` and ``"<name> particles"``.
+        visible: whether both layers start switched on. They are one
+            unit — showing particles over a hidden raster would leave
+            the flow with no legend and nothing to click.
+        viz: Same spirit as ``Map.addLayer``'s viz dict.
+
+            * ``bands`` (list or comma string) -- the dx/dy components.
+              Defaults to the image's FIRST TWO bands, in order.
+            * ``units`` -- ``"km/hr"`` (default), ``"m/s"``,
+              ``"mi/hr"`` or ``"kt"``. Knots is what aviation, marine
+              forecasts and windy.com use.
+            * ``min`` / ``max`` -- speed stretch. ``max`` defaults to a
+              value chosen FOR THE UNIT (15 m/s, 54 km/h, 34 mi/h), so
+              switching units cannot leave the raster all one color.
+            * ``palette`` -- speed ramp. Defaults to
+              :data:`WIND_PALETTE`, taken from windy.com's legend.
+            * ``particleColor`` -- trail color, default ``"#fff"``.
+            * ``particleOpacity`` (0.9) -- alpha at the head.
+
+            **Width.** Across the streak; LENGTH along it is
+            ``particleTrailLength``. ``particleStrokeWeight`` (1.1) is
+            the base, and ``particleMinWidth`` / ``particleMaxWidth``
+            are the absolute pixel widths at the tail and the head,
+            defaulting to 0.45x and 1.5x the weight so changing the
+            weight alone rescales the whole taper. Equal min and max
+            give a constant-width ribbon instead of a comet.
+            ``particleLineWidth`` is the old name for
+            ``particleStrokeWeight`` and still works.
+
+            **Shape.** ``particleTrailLength`` (13) is how many frames
+            of history each trail draws -- that, times the per-frame
+            step, IS the streak length. ``particleTaper`` (2.1) is the
+            exponent on the tail fade: 1 is a linear wedge, higher
+            stretches the faint part out. ``particleHeadBoost`` (1.6)
+            brightens the leading segment. ``particleLineCap``
+            (``"round"``, or ``"butt"`` for blunt tips).
+
+            **Speed.** ``particleSpeed`` (0.5) is pixels per frame
+            for each m/s of wind, at the equator -- so it sets both how
+            fast the field moves and, since length is proportional to
+            it, how long the streaks are. Zoom does not enter into it:
+            a streak is the same size on screen however far in you are.
+            That is the ONLY speed knob. The floor and ceiling on
+            apparent speed are taken from ``min`` and ``max``, converted
+            from ``units`` to m/s, so the streaks start and stop
+            growing exactly where the color ramp does. Past ``max`` the
+            raster is one flat color and a longer streak there claims a
+            difference the map has stopped showing; the same in reverse
+            below ``min``.
+
+            A stretch starting at 0 -- nearly every wind map -- would
+            leave no floor, so 0 becomes 1 m/s: length is proportional
+            to speed, and without a floor a light breeze draws a
+            one-pixel dot and a calm map reads as broken.
+
+            The bounds apply to the ADVECTION only. Direction is
+            untouched, and the speed raster and the click query still
+            report the true value, so never read a wind speed off a
+            streak. There are no separate floor/ceiling parameters:
+            widen ``min`` / ``max`` to widen the range the streaks
+            respond over.
+
+            NOTE ``particleSpeed``, ``particleTrailLength``,
+            ``particleMaxAge`` and the renderer's 30fps cap are ONE
+            group. Streak length is ``trailLength * speed`` and apparent
+            motion is ``speed * frameRate``, so at a fixed rate the
+            trail cannot be shortened without speeding the field up, and
+            lifetimes are counted in frames so they scale with the rate
+            too. Changing one of the four alone changes the look.
+
+            **Lifetime.** ``particleMinAge`` / ``particleMaxAge``
+            (11.25 and 45) -- the range each particle's lifetime is drawn
+            from. A young particle has laid down less trail, so
+            spreading lifetimes is what puts short streaks alongside
+            long ones. Equal values give one uniform length. At the end
+            of its life a particle stops advancing and its trail
+            RETRACTS over ``particleTrailLength`` frames, so the streak
+            slides away rather than blinking out.
+
+            **Layout.** ``particleLayout`` -- where particles start.
+            ``"random"`` (default) scatters them, which is what a flow
+            field usually wants: the eye reads the streaks, not their
+            origins. ``"grid"`` is a strict lattice and ``"randomGrid"``
+            the same lattice under one random offset -- both trade
+            scatter for even coverage, the way a barb or quiver plot is
+            laid out, and a lattice particle respawns in its own cell so
+            the pattern does not erode into noise.
+
+            **Count.** Derived from canvas WIDTH:
+            ``particleDensity`` (1.2) particles per pixel of width, so
+            about 2000 on a 1700 px canvas. Pass ``particleCount`` to
+            override it outright. There is no floor or ceiling --
+            width times density cannot run away, and a phone and a 5K
+            display each get the right number for their screen.
+
+            * ``directionConvention`` -- ``"from"`` (default) or ``"to"``.
+
+    Returns:
+        ``(speed_direction_image, encoded_tiles_image)``.
+    """
+    viz = dict(viz or {})
+    speed_viz, particle_viz = _wind_vizzes(viz)
+
+    # 1. The speed raster, and the layer a click reads. Both derived
+    #    bands ride along so a query reports direction beside speed.
+    q = windImage(image, viz)
+    Map.addLayer(q, speed_viz, name + " speed", visible)
+
+    # 2. The particle layer. A real geeImage layer, so the viewer mints
+    #    tiles for it and gives it a panel entry -- but the RGB is never
+    #    shown. wind-particles.js hides it and reads those tiles
+    #    numerically instead.
+    tiles = windTiles(image, viz)
+    Map.addLayer(tiles, particle_viz, name + " particles", visible)
 
     return q, tiles
+
+
+def addWindTimeLapse(Map, collection, viz=None, name="Wind", visible=True,
+                     dateFormat=None, advanceInterval=None, mosaic=False):
+    """Add an animated wind field that is itself a time lapse.
+
+    The same two layers :func:`addWindLayer` adds -- a queryable speed
+    raster and the particle flow over it -- but each is a time lapse, so
+    the slider scrubs the field while the particles keep flowing through
+    it.
+
+    Why this works without a new frame format: :func:`windTiles` already
+    packs u and v into ONE RGB image (u->R, v->G), so a "paired" wind
+    frame is a single ``ee.Image`` by the time the viewer sees it. There
+    is nothing to pair up at the frame level; mapping the same encoder
+    over the collection is the whole server side.
+
+    Args:
+        Map: the geeViz ``Map`` object.
+        collection: ``ee.ImageCollection`` whose images carry the wind
+            components **in m/s**, with ``system:time_start`` set --
+            that is what the slider reads. :func:`getForecastData`
+            returns this shape.
+        viz: exactly what :func:`addWindLayer` accepts; see that
+            docstring. Both layers are built from one call to
+            ``_wind_vizzes`` so the encoding the client decodes with
+            cannot drift between the two entry points.
+        name: base name; layers appear as ``"<name> speed"`` and
+            ``"<name> particles"``.
+        visible: whether the pair starts switched on.
+        dateFormat: slider label format. Defaults to ``"YYYYMMdd HH"`` --
+            forecast wind is hourly-to-three-hourly, and the annual
+            ``"YYYY"`` default of :meth:`addTimeLapse` would collapse
+            every frame onto one label.
+        advanceInterval: frame step. Defaults to ``"hour"`` for the same
+            reason.
+        mosaic: passed through; ``True`` reduces multiple images per
+            step with ``lastNonNull``.
+
+    Returns:
+        ``(speed_collection, tiles_collection)`` -- the two mapped
+        ImageCollections, for inspection or re-use.
+
+    Example:
+        >>> ic = wx.getForecastData("2026-09-18", "2026-09-20",
+        ...                         model="gfs", variable="wind")
+        >>> wx.addWindTimeLapse(Map, ic, {"units": "kt"}, "GFS wind")
+        >>> Map.view()
+    """
+    viz = dict(viz or {})
+    speed_viz, particle_viz = _wind_vizzes(viz)
+
+    # Hourly by default. addTimeLapse defaults to annual, which is right
+    # for land cover and wrong for weather: every frame of a two-day
+    # forecast would carry the same "2026" label and the slider would
+    # read as broken.
+    tl = {
+        "dateFormat": dateFormat or "YYYYMMdd HH",
+        "advanceInterval": advanceInterval or "hour",
+        "mosaic": mosaic,
+    }
+
+    collection = ee.ImageCollection(collection)
+
+    # 1. Speed raster, per frame. windImage is pure server-side -- no
+    #    getInfo anywhere in _uv / _uv_image / windImage -- so it maps.
+    def _stamped(fn):
+        """Map ``fn`` and put ``system:time_start`` back.
+
+        windImage and windTiles both build a NEW image (speed/direction,
+        or the u/v RGB encoding), and a new image carries no time. The
+        viewer builds its frame list from the distinct dates present, so
+        an unstamped collection formats every frame to the same label
+        and the lapse collapses to ONE frame -- silently, with no error.
+        """
+        def _inner(img):
+            img = ee.Image(img)
+            return ee.Image(fn(img, viz)).set(
+                "system:time_start", img.get("system:time_start"))
+        return _inner
+
+    speed_ic = collection.map(_stamped(windImage))
+    Map.addTimeLapse(speed_ic, {**speed_viz, **tl},
+                     name + " speed", visible)
+
+    # 2. Particle frames. Each is the same u/v-in-RGB encoding the
+    #    single-frame layer uses; wind-particles.js hides the RGB and
+    #    reads the tiles numerically.
+    #
+    #    The client groups these by ``viz.timeLapseID``, which the
+    #    viewer stamps on every frame of a time lapse, so ONE overlay
+    #    serves the whole lapse: the decoded vector field is cached per
+    #    frame and switching frames swaps which field the particles
+    #    sample. Nothing is torn down, so the trails keep advecting
+    #    across a frame change instead of resetting to a fresh scatter
+    #    every step.
+    tiles_ic = collection.map(_stamped(windTiles))
+    Map.addTimeLapse(tiles_ic, {**particle_viz, **tl},
+                     name + " particles", visible)
+
+    return speed_ic, tiles_ic
 
 
 #: Global DEM for terrain downscaling. 30 m, and the only one with
