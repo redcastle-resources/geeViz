@@ -138,7 +138,10 @@ adopted["plain"].overlay.onAdd();
 // selectFrame: zero every frame, raise the chosen one.
 function selectFrame(i) {
   frameIds.forEach((id) => { LAYERS[id].opacity = 0; });
-  LAYERS[frameIds[i]].opacity = 0.9;
+  // 1, not 0.9: setFrameOpacity pushes the LAPSE's opacity onto the
+  // raised frame, and a slider at full is 1. Using 0.9 here would make
+  // the opacity numbers below read as a product of two coincidences.
+  LAYERS[frameIds[i]].opacity = 1;
   W._refreshRunState();
 }
 
@@ -192,6 +195,22 @@ LAYERS[frameIds[3]].layerId = 7;            // as updateMapLayerOrder does
 W._refreshRunState();
 out.zAfterReorder = zOf(st);
 LAYERS[frameIds[3]].layerId = 3;
+
+// Opacity. The raised frame carries the LAPSE's own opacity setting
+// (selectFrame pushes timeLapseObj[id].opacity onto it), so it is a
+// faithful reading of that slider -- but it has to scale the configured
+// particleOpacity, not replace it, and it has to scale the PRISTINE
+// value or each drag compounds on the last.
+st.cfg.baseOpacity = 0.9; st.cfg.opacity = 0.9;
+selectFrame(2);
+out.opacityAtFull = +st.cfg.opacity.toFixed(4);
+frameIds.forEach(function (k) { LAYERS[k].opacity = 0; });
+LAYERS[frameIds[2]].opacity = 0.5;          // slider dragged to 50%
+W._refreshRunState();
+out.opacityAtHalf = +st.cfg.opacity.toFixed(4);
+W._refreshRunState();                        // idle ticks must not compound
+W._refreshRunState();
+out.opacityAfterIdleTicks = +st.cfg.opacity.toFixed(4);
 
 // ---- and the plain layer is still driven by `visible` ----------------
 const pst = adopted["plain"];

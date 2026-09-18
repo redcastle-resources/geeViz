@@ -81,6 +81,29 @@
   // tile-shaped hole in the field for the life of the page.
   var TILE_RETRIES = 3;
 
+  // How many frames ahead of the one on screen to warm. See
+  // warmNextFrames: 2 covers the viewer's 666 ms step with room to
+  // spare without turning a wide view into a request storm.
+  var WARM_FRAMES = 2;
+
+  // Floor on the wait between attempts at a field that came out
+  // INCOMPLETE, and the share of the clock rebuilding may take.
+  //
+  // buildField is ~34,000 cells on a full-screen map, each an inverse
+  // projection plus a tile lookup -- measured at ~220 ms with every tile
+  // already decoded. Retrying that at the animation rate asks for
+  // several seconds of main thread per second of wall clock, which is
+  // why a time lapse felt like a GPU problem when it is entirely CPU.
+  //
+  // A fixed wait cannot work: any constant shorter than the build lets
+  // the rebuilds run back to back. So the back-off is measured in
+  // BUILDS, not milliseconds -- wait REBUILD_DUTY times however long
+  // the last one actually took, which holds the cost near 1/(1+duty) of
+  // the thread on any machine and any window size. The floor only
+  // matters for small maps where a build is genuinely cheap.
+  var REBUILD_MS = 150;
+  var REBUILD_DUTY = 2;
+
   // Alpha bands across a trail. Not a viz knob: more bands cost a full
   // pass over every particle each and buy nothing the eye can see, and
   // fewer start to show as stripes along the streak.
@@ -312,12 +335,35 @@
    * it the canvas is tainted and getImageData throws a SecurityError, so
    * every decode silently yields nothing.
    */
-  function getTile(st, z, x, y) {
+  function getTile(st, z, x, y, frame) {
     // Keyed by FRAME as well as tile. One overlay serves every frame of
     // a time lapse, so without the prefix frame 2 would read frame 1's
     // decoded pixels out of the cache and the wind would stop changing
     // while the slider moved.
-    var key = (st.frameId || "_") + "/" + z + "/" + x + "/" + y;
+    //
+    // `frame` names a frame OTHER than the one on screen, which is how
+    // the next hours are warmed before the lapse reaches them. A warm
+    // fetch is deliberately QUIET: it must not touch st.inflight, because
+    // buildField reads that to decide whether the CURRENT frame is fully
+    // resolved. Counting prefetches there would leave every build looking
+    // incomplete and the field key would never be stamped.
+    var quiet = frame !== undefined && frame !== st.frameId;
+    var fid = frame === undefined ? st.frameId : frame;
+
+    // One-entry memo, and it earns its keep: buildField walks the grid
+    // in scan order, so runs of hundreds of consecutive cells fall in
+    // the same tile. Without it every one of ~34,000 cells rebuilds the
+    // cache key STRING and hashes it, which was most of the cost of a
+    // build. Only decoded tiles are memoized -- caching a null would
+    // hide a tile that arrives mid-build.
+    if (!quiet && st.memoFrame === fid && st.memoZ === z &&
+        st.memoX === x && st.memoY === y && st.memoData) {
+      return st.memoData;
+    }
+
+    var getUrl = quiet ? st.frames[fid] : st.getTileUrl;
+    if (!getUrl) return null;
+    var key = (fid || "_") + "/" + z + "/" + x + "/" + y;
     var hit = st.tiles[key];
     // A tile that failed was cached as false and never asked for again,
     // so one 404 or one decode error left a tile-shaped hole in the
@@ -330,20 +376,26 @@
       st.tileFails[key] = fails + 1;
       hit = undefined;                         // fall through and refetch
     }
-    if (hit !== undefined) return hit;
+    if (hit !== undefined) {
+      if (!quiet && hit) {
+        st.memoFrame = fid; st.memoZ = z; st.memoX = x; st.memoY = y;
+        st.memoData = hit;
+      }
+      return hit;
+    }
     st.tiles[key] = null;                      // in flight
 
     var url;
     try {
-      url = st.getTileUrl({ x: x, y: y }, z);
+      url = getUrl({ x: x, y: y }, z);
     } catch (e) { st.tiles[key] = false; return null; }
     if (!url) { st.tiles[key] = false; return null; }
-    tileStarted(st);
+    if (!quiet) tileStarted(st);
 
     var img = new Image();
     img.crossOrigin = "anonymous";
     img.onload = function () {
-      tileFinished(st);
+      if (!quiet) tileFinished(st);
       try {
         var c = document.createElement("canvas");
         c.width = TILE_PX; c.height = TILE_PX;
@@ -358,9 +410,60 @@
         }
       }
     };
-    img.onerror = function () { st.tiles[key] = false; tileFinished(st); };
+    img.onerror = function () {
+      st.tiles[key] = false;
+      if (!quiet) tileFinished(st);
+    };
     img.src = url;
     return null;
+  }
+
+  /**
+   * Fetch the tiles the NEXT frames will need, before they are asked for.
+   *
+   * Without this, a lapse arrives at each hour with an empty cache: the
+   * frame changes, every tile for it is requested from scratch, and the
+   * field cannot be built until they land. At the viewer's 666 ms per
+   * frame that is most of the time, which is what "the particles don't
+   * update quickly enough" actually is -- not a slow renderer, a cold
+   * cache. Tiles are ~10 KB and already cached by the browser after the
+   * first pass, so the cost is one pass over the loop.
+   *
+   * Bounded to WARM_FRAMES ahead: warming all nine at once on a wide
+   * view is a few hundred requests in one burst, which competes with the
+   * tiles the frame ON SCREEN still needs.
+   */
+  function warmNextFrames(st) {
+    if (!st.isLapse || !st.proj || !st.w || !st.h) return;
+    var ids = Object.keys(st.frames);
+    var at = ids.indexOf(st.frameId);
+    if (at < 0) return;
+
+    var z = st.tileZoom, n = Math.pow(2, z);
+    // The tile rect the current view covers, from its two corners.
+    var pt = new google.maps.Point(st.origin.x, st.origin.y);
+    var nw = st.proj.fromDivPixelToLatLng(pt);
+    pt.x = st.origin.x + st.w; pt.y = st.origin.y + st.h;
+    var se = st.proj.fromDivPixelToLatLng(pt);
+    if (!nw || !se) return;
+
+    var x0 = Math.floor(lonToTileX(nw.lng(), z));
+    var x1 = Math.floor(lonToTileX(se.lng(), z));
+    var y0 = Math.floor(latToTileY(Math.min(85, Math.max(-85, nw.lat())), z));
+    var y1 = Math.floor(latToTileY(Math.min(85, Math.max(-85, se.lat())), z));
+    if (x1 < x0) x1 = x0;                    // dateline: warm what we can
+    if (y1 < y0) { var t = y0; y0 = y1; y1 = t; }
+
+    for (var k = 1; k <= WARM_FRAMES; k++) {
+      var fid = ids[(at + k) % ids.length];
+      if (fid === st.frameId) break;         // lapse shorter than the window
+      for (var x = x0; x <= x1; x++) {
+        for (var y = y0; y <= y1; y++) {
+          if (y < 0 || y >= n) continue;
+          getTile(st, z, ((x % n) + n) % n, y, fid);
+        }
+      }
+    }
   }
 
   /**
@@ -372,11 +475,13 @@
    * caller works in pixels and never has to know about tile edges.
    */
   function pixelUV(st, z, gx, gy) {
-    var n = Math.pow(2, z), W = n * TILE_PX;
+    // 1 << z, not Math.pow: this runs once per grid cell -- ~34,000
+    // times per build -- and z is a small integer zoom.
+    var W = (1 << z) * TILE_PX;
     gx = Math.floor(gx); gy = Math.floor(gy);
     if (gy < 0 || gy >= W) return null;
     gx = ((gx % W) + W) % W;                   // wrap the dateline
-    var data = getTile(st, z, Math.floor(gx / TILE_PX), Math.floor(gy / TILE_PX));
+    var data = getTile(st, z, (gx / TILE_PX) | 0, (gy / TILE_PX) | 0);
     if (!data) return null;
     var i = ((gy % TILE_PX) * TILE_PX + (gx % TILE_PX)) * 4;
     if (data[i + 3] === 0) return null;        // transparent = no data
@@ -517,32 +622,64 @@
    */
   function buildField(st) {
     if (!st.proj || !st.w || !st.h) return false;
+    var startedAt = nowMs();
     var cfg = st.cfg;
     var sp = FIELD_SPACING;
     var gw = Math.ceil(st.w / sp) + 1, gh = Math.ceil(st.h / sp) + 1;
 
-    // Reallocate only when the CANVAS resizes. A pan or a zoom refills
-    // the same arrays -- the grid is the same shape, it is the places it
-    // refers to that changed.
-    if (!st.field || st.fieldW !== gw || st.fieldH !== gh) {
-      st.field = new Float32Array(gw * gh * 2);
-      st.fieldOk = new Uint8Array(gw * gh);
+    // Built into SCRATCH buffers, never over the field being drawn.
+    //
+    // This used to fill straight into st.field, blanking it first. On a
+    // time lapse that is a freeze on every frame: the instant the hour
+    // advances none of the new frame's tiles are decoded yet, so the
+    // build resolves nothing, fieldAny goes false, tick() skips the draw
+    // entirely and the particles stop dead until the tiles land. Two
+    // buffers mean the previous hour's field keeps the flow moving for
+    // the few hundred milliseconds the new one needs, and the swap is a
+    // pointer swap the eye never catches.
+    if (!st.fieldB || st.fieldBW !== gw || st.fieldBH !== gh) {
+      st.fieldB = new Float32Array(gw * gh * 2);
+      st.fieldOkB = new Uint8Array(gw * gh);
+      st.fieldBW = gw; st.fieldBH = gh;
     } else {
-      st.fieldOk.fill(0);
+      st.fieldOkB.fill(0);
     }
-    var f = st.field, ok = st.fieldOk;
+    var f = st.fieldB, ok = st.fieldOkB;
     var ox = st.origin.x, oy = st.origin.y, proj = st.proj;
     var pt = new google.maps.Point(0, 0);
     var any = false;
 
+    // One inverse projection PER ROW and PER COLUMN, not per cell.
+    //
+    // The map is Web Mercator, which is cylindrical: latitude is a
+    // function of the pixel y alone and longitude of the pixel x alone.
+    // So the grid needs gh + gw projections, not gh * gw of them. On a
+    // full-screen map that is 376 instead of 34,560 -- and it is exact,
+    // not an approximation, because that separability IS the projection.
+    //
+    // fromDivPixelToLatLng was ~90% of a build that measured 290 ms with
+    // every tile already decoded. At the animation rate the rebuilds
+    // alone asked for roughly nine seconds of main thread per second of
+    // wall clock, which is why a time lapse felt like a GPU problem.
+    var lats = new Float64Array(gh), lngs = new Float64Array(gw);
+    var latOk = new Uint8Array(gh), lngOk = new Uint8Array(gw);
+    for (var ry = 0; ry < gh; ry++) {
+      pt.x = ox; pt.y = ry * sp + oy;
+      var rl = proj.fromDivPixelToLatLng(pt);
+      if (rl) { lats[ry] = rl.lat(); latOk[ry] = 1; }
+    }
+    for (var cx = 0; cx < gw; cx++) {
+      pt.x = cx * sp + ox; pt.y = oy;
+      var cl = proj.fromDivPixelToLatLng(pt);
+      if (cl) { lngs[cx] = cl.lng(); lngOk[cx] = 1; }
+    }
+
     for (var gy = 0; gy < gh; gy++) {
+      if (!latOk[gy]) continue;
       for (var gx = 0; gx < gw; gx++) {
-        pt.x = gx * sp + ox;
-        pt.y = gy * sp + oy;
-        var ll = proj.fromDivPixelToLatLng(pt);
-        if (!ll) continue;
-        var lat = ll.lat();
-        var uv = sampleUV(st, lat, ll.lng());
+        if (!lngOk[gx]) continue;
+        var lat = lats[gy];
+        var uv = sampleUV(st, lat, lngs[gx]);
         if (!uv) continue;
 
         var u = uv[0], v = uv[1], mag = uv[2];
@@ -593,21 +730,44 @@
       }
     }
 
-    st.fieldW = gw; st.fieldH = gh; st.fieldSpacing = sp;
-    st.fieldAny = any;
-    // Stamp the key only on a COMPLETE build.
+    // A build counts as COMPLETE only with nothing still in flight.
     //
-    // This used to stamp whenever a single cell had data, which meant a
-    // field built while most tiles were still in flight was cached as
+    // The key used to be stamped whenever a single cell had data, which
+    // meant a field built while most tiles were in flight was cached as
     // final -- ensureField then returned true forever and those regions
     // stayed permanently empty. The tiles did arrive; the field was
     // frozen before they did, which is why the loading counter honestly
     // read zero over a half-drawn map.
-    //
-    // Anything still in flight means this build saw holes that are
-    // about to fill, so leave the key null and rebuild next frame.
-    st.fieldKey = (any && !st.inflight) ? viewKey(st) : null;
-    return any;
+    var complete = any && !st.inflight;
+
+    // Take the new field if it is finished, or if there is nothing on
+    // screen yet to keep. A partial field on first load is right --
+    // holes that fill in beat an empty map. A partial field DURING a
+    // lapse is not: the hour on screen is already drawing correctly.
+    if (complete || !st.fieldAny) {
+      var pf = st.field, pok = st.fieldOk;
+      st.field = f; st.fieldOk = ok;
+      st.fieldB = pf; st.fieldOkB = pok;
+      st.fieldW = gw; st.fieldH = gh; st.fieldSpacing = sp;
+      st.fieldAny = any;
+    }
+
+    st.fieldKey = complete ? viewKey(st) : null;
+    // Back off before trying again. Nothing about an incomplete build
+    // changes until a tile arrives, and retrying at the animation rate
+    // costs more than the animation itself.
+    // Charge the wait against what this build cost, so a big window
+    // backs off proportionally instead of thrashing.
+    var took = nowMs() - startedAt;
+    st.buildAgainAt = complete
+        ? 0
+        : nowMs() + Math.max(REBUILD_MS, took * REBUILD_DUTY);
+    return st.fieldAny;
+  }
+
+  function nowMs() {
+    return (global.performance && global.performance.now)
+        ? global.performance.now() : Date.now();
   }
 
   /** What the field was built for. Changes on pan, zoom or resize. */
@@ -907,6 +1067,13 @@
    *  after the last attempt. One string compare when nothing changed. */
   function ensureField(st) {
     if (st.fieldAny && st.fieldKey === viewKey(st)) return true;
+    // Throttled while incomplete -- but only when there is already a
+    // field to draw. With nothing on screen, rebuild as fast as tiles
+    // allow: waiting 150 ms between attempts on first load would show
+    // an empty map for no reason.
+    if (st.fieldAny && st.buildAgainAt && nowMs() < st.buildAgainAt) {
+      return true;                     // keep drawing what is already up
+    }
     return buildField(st);
   }
 
@@ -1010,6 +1177,11 @@
         st.frameId = shown;
         st.getTileUrl = st.frames[shown];
         st.fieldKey = null;            // resample from the cache
+        st.buildAgainAt = 0;           // and do it now, not after a back-off
+        // Warm the hours after this one while this one plays. By the
+        // time the lapse steps again their tiles are decoded and the
+        // rebuild is pure arithmetic with nothing to wait for.
+        warmNextFrames(st);
       }
 
       var L = reg && reg[st.frameId];
@@ -1022,15 +1194,24 @@
         // does not pass through here, so trails survive it.
         if (want) st.particles = null;
       }
-      // A plain layer's opacity slider is a user preference, and the
-      // particles should follow it. A LAPSE's frame opacities are not:
-      // they are the frame-selection mechanism, eight of nine sitting
-      // at 0 at any instant. Inheriting whichever frame is raised would
-      // make the particle alpha lurch between 0 and the lapse's value
-      // as it plays, and land on 0 outright before the first frame is
-      // chosen. Keep the configured particleOpacity for a lapse.
-      if (!st.isLapse && L && typeof L.opacity === "number") {
-        st.cfg.opacity = L.opacity;
+      // Follow the opacity slider.
+      //
+      // A plain layer's slider is a straight user preference. A LAPSE's
+      // per-frame opacities are not -- they are the frame-selection
+      // mechanism, eight of nine sitting at 0 at any instant, so taking
+      // one as an alpha would make the particles lurch between 0 and
+      // full as the lapse plays. But the frame that IS raised carries
+      // exactly the lapse's own opacity setting (selectFrame pushes
+      // timeLapseObj[id].opacity onto it), so the raised frame is a
+      // faithful reading of that slider.
+      //
+      // Scaled rather than replaced, and always off baseOpacity: the
+      // configured particleOpacity is the look the layer asked for, and
+      // the slider should dim THAT rather than discard it.
+      if (L && typeof L.opacity === "number") {
+        var base = st.cfg.baseOpacity;
+        if (base === undefined) base = st.cfg.opacity;
+        st.cfg.opacity = st.isLapse ? base * L.opacity : L.opacity;
       }
       // Re-checking the layer makes the viewer rebuild and re-add the
       // encoded RGB. Undo it here rather than in scan(), which skips
@@ -1109,7 +1290,11 @@
         // Drop the KEY, not the arrays: buildField refills them in
         // place unless the canvas itself changed size.
         adopted[id].fieldKey = null;
+        adopted[id].buildAgainAt = 0;
         adopted[id].particles = null;     // reseed into the new view
+        // A pan or zoom invalidates every frame's warmed tiles, not
+        // just the one showing -- the view covers different tiles now.
+        warmNextFrames(adopted[id]);
       }
       refreshRunState();
     });
@@ -1219,6 +1404,11 @@
 
       // ---- color ---------------------------------------------------
       opacity: v.particleOpacity !== undefined ? v.particleOpacity : 0.9,
+      // The configured value, kept unscaled. cfg.opacity is what the
+      // renderer reads and the layer's opacity slider multiplies into,
+      // so without a pristine copy each slider move would compound on
+      // the last and the particles would fade to nothing in a few drags.
+      baseOpacity: v.particleOpacity !== undefined ? v.particleOpacity : 0.9,
       rgb: hexToRgb(v.particleColor || "#fff"),
 
       // Sent by geeViz.weather.addWindLayer. Reading them rather than
@@ -1275,6 +1465,10 @@
         tiles: Object.create(null), tileFails: Object.create(null),
         tileZoom: 4,
         field: null, fieldOk: null, fieldW: 0, fieldH: 0,
+        // The scratch half of the double buffer, and the back-off clock
+        // for builds that came out incomplete. See buildField.
+        fieldB: null, fieldOkB: null, fieldBW: 0, fieldBH: 0,
+        buildAgainAt: 0,
         fieldSpacing: FIELD_SPACING, fieldKey: null, fieldAny: false,
         canvas: null, ctx: null, particles: null, running: false,
         inflight: 0, burst: 0,
@@ -1355,6 +1549,13 @@
     // advances. That is precisely the bug this pair exists to catch.
     _adopted: adopted,
     _refreshRunState: function () { return refreshRunState(); },
+    // The tile fetch and the frame warmer. Their in-flight bookkeeping
+    // is what buildField reads to decide a field is finished, and it is
+    // asymmetric on purpose (a prefetch must not count) -- so it is
+    // worth exercising rather than describing.
+    _getTile: getTile,
+    _warmNextFrames: warmNextFrames,
+    _ensureField: ensureField,
     _range: [TILE_MIN, TILE_MAX],
   };
 })(typeof window !== "undefined" ? window : this);

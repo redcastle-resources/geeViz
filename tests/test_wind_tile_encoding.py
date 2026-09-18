@@ -10,11 +10,37 @@ factor and an offset -- which still looks like weather, still animates,
 and still flows plausibly around terrain. There is no symptom to notice,
 which is exactly why it is pinned here.
 """
+import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 JS = ROOT / "geeViz" / "geeView" / "src" / "js" / "wind-particles.js"
+
+
+CACHE_PROBE = Path(__file__).with_name("wind_tilecache_probe.js")
+
+
+@pytest.fixture(scope="module")
+def cache():
+    """The real tile fetch and field build, run in node.
+
+    These behaviors were pinned by asserting exact source lines. That
+    breaks on any move and, worse, says nothing about whether the thing
+    still works -- the in-flight accounting here is arithmetic, and
+    arithmetic deserves to be run.
+    """
+    exe = shutil.which("node")
+    if not exe:
+        pytest.skip("node not available")
+    out = subprocess.run([exe, str(CACHE_PROBE), str(JS)],
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
 
 
 def _js_const(name):
@@ -701,27 +727,30 @@ def test_tile_progress_is_reported_from_the_real_queue():
         "'Number of map layers loading' never returns to zero")
 
 
-def test_both_tile_outcomes_leave_the_queue():
+def test_both_tile_outcomes_leave_the_queue(cache):
     """A failed tile must decrement the in-flight count too.
 
     Counting only successes leaves the layer loading forever the first
     time a tile 404s or is blocked — which is the exact bug class this
     replaced, reintroduced from the other side.
     """
-    src = _strip_js_comments(JS.read_text(encoding="utf-8"))
-    body = _strip_js_comments(_js_fn_body("getTile"))
-    assert body.count("tileStarted(st)") == 1
-    assert body.count("tileFinished(st)") == 2, (
-        "tileFinished must run on BOTH onload and onerror; "
-        f"found {body.count('tileFinished(st)')}")
-    assert "img.onerror = function () { st.tiles[key] = false; tileFinished(st); };" in body
+    assert cache["loadInflightDuring"] == 1
+    assert cache["loadInflightAfter"] == 0, "a tile that loaded never left"
+    assert cache["loadDecoded"], "the tile loaded but its pixels were not kept"
+
+    assert cache["errInflightDuring"] == 1
+    assert cache["errInflightAfter"] == 0, (
+        "a tile that 404d stayed in the queue — the layer spins forever")
+    assert cache["errCachedFalse"]
+
     # A URL that never becomes a request must not be counted either.
-    assert "catch (e) { st.tiles[key] = false; return null; }" in body, (
+    assert cache["throwInflight"] == 0, (
+        "a getTileUrl that threw was counted as in flight, and nothing "
+        "will ever decrement it")
+    assert cache["throwCachedFalse"], (
         "a getTileUrl that throws must mark the tile dead, or it is "
-        "retried forever and never counted")
-    fin = _strip_js_comments(_js_fn_body("tileFinished"))
-    assert "Math.max(0, (st.inflight || 1) - 1)" in fin, (
-        "the in-flight count must not go negative")
+        "retried forever")
+    assert cache["throwQueued"] == 0
 
 
 def test_adoption_settles_a_probe_set_flag():
@@ -997,10 +1026,13 @@ def test_the_field_is_rebuilt_when_the_view_moves():
     assert "field = null;" not in idle, (
         "idle throws the field arrays away; only the key should go")
     build = _strip_js_comments(_js_fn_body("buildField"))
-    assert "st.fieldW !== gw || st.fieldH !== gh" in build, (
+    # Reallocation is bounded to a CANVAS resize -- a ~34,000-cell pair
+    # rebuilt on every pan is churn for no gain. Asserted on the scratch
+    # buffer, which is what buildField now fills.
+    assert "st.fieldBW !== gw || st.fieldBH !== gh" in build, (
         "buildField reallocates unconditionally — it should only do so "
         "when the CANVAS resizes")
-    assert "st.fieldOk.fill(0)" in build, (
+    assert "st.fieldOkB.fill(0)" in build, (
         "a reused ok-mask must be cleared, or last view's cells read as "
         "valid where this one has no data")
 
@@ -1289,7 +1321,7 @@ def test_the_layout_maths_run():
 # ---------------------------------------------------------------------------
 
 
-def test_an_incomplete_field_is_not_cached():
+def test_an_incomplete_field_is_not_cached(cache):
     """A field built while tiles were still in flight must be rebuilt.
 
     This stamped the view key whenever a SINGLE cell had data, so a
@@ -1298,10 +1330,16 @@ def test_an_incomplete_field_is_not_cached():
     map whose loading counter honestly read zero, because the tiles
     really had finished. The field was frozen before they arrived.
     """
-    body = _strip_js_comments(_js_fn_body("buildField"))
-    assert "st.fieldKey = (any && !st.inflight) ? viewKey(st) : null;" in body, (
-        "the field is cached without checking for tiles still in "
-        "flight; half-loaded views will stick")
+    assert cache["incompleteInflight"], "the probe never got a tile in flight"
+    assert cache["incompleteKey"] is None, (
+        "the field was cached while tiles were still in flight; the "
+        "regions those tiles cover stick empty for the life of the page")
+    assert cache["completeKeyStamped"], (
+        "a field built with everything decoded was still not cached, so "
+        "it rebuilds ~34,000 cells on every animation frame")
+    assert cache["completeFieldAny"]
+    assert cache["ensureSkipsRebuild"], (
+        "ensureField rebuilt a field whose view key still matched")
 
 
 def test_a_failed_tile_is_retried_but_not_forever():
@@ -1781,3 +1819,92 @@ def test_the_canvas_stays_in_the_tile_overlay_pane():
         "the canvas moved out of the tile-overlay pane; z-index can no "
         "longer order it against the rasters")
     assert "getPanes().mapPane" not in src
+
+
+# ---------------------------------------------------------------------------
+# Keeping a time lapse fluid
+# ---------------------------------------------------------------------------
+
+
+def test_a_frame_change_does_not_blank_the_field(cache):
+    """The particles must keep moving while the next hour loads.
+
+    buildField used to fill straight into the field being drawn,
+    blanking it first. On a time lapse that is a freeze on every step:
+    the instant the hour advances none of the new frame's tiles are
+    decoded, the build resolves nothing, fieldAny goes false, tick()
+    skips the draw entirely — and the flow stops dead until the tiles
+    land. At the viewer's 666 ms per frame that is most of the time,
+    which is what "the particles don't update quickly enough" is.
+    """
+    assert cache["beforeStepFieldAny"], "the probe never got a field up"
+    assert cache["afterStepEnsureTrue"], (
+        "ensureField went false on a frame change, so tick() stops "
+        "drawing and the particles freeze until tiles arrive")
+    assert cache["afterStepFieldAny"], "the field went empty on a frame change"
+    assert cache["afterStepKeptSameBuffer"], (
+        "the live field buffer was replaced before the new frame was "
+        "ready")
+    assert cache["afterStepSampleUnchanged"], (
+        "the field being drawn was overwritten with a half-built one")
+
+
+def test_the_new_frame_takes_over_once_its_tiles_land(cache):
+    """The other half. Holding the old field is only right until the
+    new one is complete — past that it would be the frame-0 bug again,
+    a flow that animates through a field that never changes."""
+    assert cache["afterTilesSwapped"], (
+        "the new frame's field never replaced the old one")
+    assert cache["afterTilesFieldAny"]
+    assert cache["afterTilesKeyStamped"]
+
+
+def test_an_incomplete_build_backs_off(cache):
+    """buildField is ~34,000 cells, each an inverse projection plus a
+    tile lookup. Retrying at the animation rate while tiles stream in
+    spends more main thread on rebuilding than on drawing — which reads
+    as the whole map going sluggish and gets blamed on the GPU."""
+    assert cache["incompleteBackoffArmed"], (
+        "an incomplete build did not arm the back-off; it will rebuild "
+        "every animation frame")
+    assert cache["throttleHeld"], "the back-off did not hold"
+    assert cache["throttleReleased"], (
+        "the back-off never released — the field would never finish")
+    assert cache["completeBackoffCleared"], (
+        "a completed build left the back-off armed")
+
+
+def test_the_next_frames_are_warmed_before_they_are_needed(cache):
+    """A lapse arriving at each hour with an empty cache is the cold
+    start that makes it lag. Warming the hours ahead while the current
+    one plays means the step finds its tiles already decoded."""
+    assert cache["warmedFrames"] == ["f1", "f2"], (
+        f"warmed {cache['warmedFrames']}, expected the two frames after "
+        f"the one on screen")
+    assert cache["warmedCount"] == 8, (
+        f"warmed {cache['warmedCount']} tiles; the view spans a 2x2 tile "
+        f"rect, so two frames is 8")
+
+
+def test_warming_never_enters_the_in_flight_queue(cache):
+    """The load-bearing asymmetry.
+
+    buildField reads st.inflight as "the frame ON SCREEN is not resolved
+    yet". Counting a prefetch for a later hour there would leave every
+    build looking incomplete: the field key would never be stamped, the
+    field would rebuild on every animation frame forever, and the
+    back-off would never disarm. Faster prefetching would have made the
+    thing slower.
+    """
+    assert cache["warmQueued"] == 1, "the warm fetch never happened"
+    assert cache["warmInflight"] == 0, (
+        "a prefetch entered the in-flight queue; the current frame will "
+        "never count as complete")
+    assert cache["warmInflightAfter"] == 0
+    assert cache["warmInflightStillZero"] == 0, (
+        "warmNextFrames left tiles in the in-flight queue")
+    assert cache["warmDecodedUnderOwnKey"], (
+        "the warmed tile was not cached under its own frame's key, so "
+        "the frame it was fetched for will fetch it again")
+    assert cache["warmDidNotTouchCurrentFrame"], (
+        "warming wrote into the showing frame's cache slot")

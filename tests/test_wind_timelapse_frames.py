@@ -163,3 +163,35 @@ def test_the_canvas_stacks_at_the_showing_frames_slot(result):
     assert result["zAfterReorder"] == "7", (
         "the canvas did not follow updateMapLayerOrder — a z-index "
         "written once keeps the order the list had at adoption")
+
+
+def test_the_opacity_slider_reaches_the_particles(result):
+    """It did nothing at all on a lapse.
+
+    The particles skipped opacity inheritance entirely for a lapse,
+    because a lapse's per-frame opacities are the frame-SELECTION
+    mechanism — eight of nine sit at 0 at any instant, and taking one as
+    an alpha would make the flow lurch between invisible and full as it
+    played. But the frame that is RAISED carries exactly the lapse's own
+    opacity setting, so reading that one frame is a faithful reading of
+    the slider.
+    """
+    assert result["opacityAtFull"] == 0.9, (
+        f"at a full slider the particles should sit at the configured "
+        f"particleOpacity, got {result['opacityAtFull']}")
+    assert result["opacityAtHalf"] == 0.45, (
+        f"dragging the lapse's opacity to 50% left the particles at "
+        f"{result['opacityAtHalf']} — the slider does not reach them")
+
+
+def test_the_opacity_slider_does_not_compound(result):
+    """Scaled off the PRISTINE configured value, not off the last result.
+
+    refreshRunState runs on a 500 ms interval, so multiplying
+    cfg.opacity into itself would fade the particles to nothing within a
+    few seconds of sitting still — a bug that looks like a rendering
+    fault rather than an arithmetic one.
+    """
+    assert result["opacityAfterIdleTicks"] == result["opacityAtHalf"], (
+        f"opacity drifted from {result['opacityAtHalf']} to "
+        f"{result['opacityAfterIdleTicks']} on idle ticks alone")
