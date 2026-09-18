@@ -57,6 +57,20 @@
   var TILE_MAX = 40.0;
   var TILE_PX = 256;
 
+  // Side of the palette-mapped tile the speed raster paints, in pixels.
+  //
+  // Deliberately COARSER than the tile it reads. The forecast grid is
+  // 0.25 degrees (GFS) -- about 28 km -- and at zoom 4 a tile pixel is
+  // roughly 2.4 km, so the tile is already a ~10x upsampling of the
+  // data before anything is drawn. Painting it back at full 256 is
+  // 65,536 palette lookups per tile, ~3 million across a full-screen
+  // view, and repeating that on every step of a playing lapse froze the
+  // tab outright. At 64 it is 4,096 per tile, sixteen times less, and
+  // still finer than the numbers underneath; the browser's own scaling
+  // smooths it on the way up, which is what the full-resolution version
+  // was paying to do by hand.
+  var RASTER_PX = 64;
+
   // How far off-canvas a particle may drift before it is recycled.
   // Enough that a trail entering the view is already grown, small
   // enough that nothing far outside keeps pulling tiles.
@@ -316,6 +330,23 @@
     reportProgress(st);
   }
 
+  /**
+   * The viewer's query table.
+   *
+   * Same trap as ``registry`` below: ``queryObj`` is declared with
+   * ``let`` at the top level, so it lives in the global LEXICAL
+   * environment and is NOT a property of ``window``. Reading
+   * ``global.queryObj`` returns undefined and the retarget silently
+   * never happens -- the layer keeps working and the inspector keeps
+   * reporting the u/v encoding as if it were wind.
+   */
+  function queries() {
+    try {
+      if (typeof queryObj !== "undefined" && queryObj) return queryObj;
+    } catch (e) { /* declared later */ }
+    return global.queryObj || null;
+  }
+
   function registry() {
     try {
       if (typeof layerObj !== "undefined" && layerObj) return layerObj;
@@ -449,27 +480,19 @@
     if (at < 0) return;
 
     var z = st.tileZoom, n = Math.pow(2, z);
-    // The tile rect the current view covers, from its two corners.
-    var pt = new google.maps.Point(st.origin.x, st.origin.y);
-    var nw = st.proj.fromDivPixelToLatLng(pt);
-    pt.x = st.origin.x + st.w; pt.y = st.origin.y + st.h;
-    var se = st.proj.fromDivPixelToLatLng(pt);
-    if (!nw || !se) return;
-
-    var x0 = Math.floor(lonToTileX(nw.lng(), z));
-    var x1 = Math.floor(lonToTileX(se.lng(), z));
-    var y0 = Math.floor(latToTileY(Math.min(85, Math.max(-85, nw.lat())), z));
-    var y1 = Math.floor(latToTileY(Math.min(85, Math.max(-85, se.lat())), z));
-    if (x1 < x0) x1 = x0;                    // dateline: warm what we can
-    if (y1 < y0) { var t = y0; y0 = y1; y1 = t; }
+    // Same grid the raster paints -- and the same dateline trap, which
+    // used to warm a single column on a Pacific view.
+    var tile = tileRect(st, z);
+    if (!tile) return;
 
     for (var k = 1; k <= WARM_FRAMES; k++) {
       var fid = ids[(at + k) % ids.length];
       if (fid === st.frameId) break;         // lapse shorter than the window
-      for (var x = x0; x <= x1; x++) {
-        for (var y = y0; y <= y1; y++) {
+      for (var i = 0; i < tile.cols; i++) {
+        for (var j = 0; j < tile.rows; j++) {
+          var y = tile.y0 + j;
           if (y < 0 || y >= n) continue;
-          getTile(st, z, ((x % n) + n) % n, y, fid);
+          getTile(st, z, (((tile.x0 + i) % n) + n) % n, y, fid);
         }
       }
     }
@@ -555,7 +578,7 @@
    */
   function retargetQuery(st) {
     if (st.queryRetargeted || !st.cfg.queryItemJson) return;
-    var ee = global.ee, qo = global.queryObj;
+    var ee = global.ee, qo = queries();
     if (!ee || !ee.Deserializer || !qo) return;
     var id = st.id.indexOf("tl:") === 0 ? st.id.slice(3) : st.id;
     if (!qo[id]) return;                       // panel not built yet
@@ -604,14 +627,23 @@
     if (styleInjected || !global.document) return;
     styleInjected = true;
     var css =
-      ".wind-speed-opacity-slider," +
-      ".wind-particle-opacity-slider{margin-top:3px !important;}" +
+      // Tinted to what each one governs: the speed ramp's own colors
+      // for the raster, white for the trails. Two identical tracks
+      // side by side give no clue which fades what.
       ".wind-speed-opacity-slider{background:linear-gradient(90deg," +
       "#3d6ea3,#4ca44c,#d7d64a,#c4622d,#8a2f4a) !important;" +
       "border:none !important;}" +
       ".wind-particle-opacity-slider{background:linear-gradient(90deg," +
-      "rgba(255,255,255,.15),rgba(255,255,255,.95)) !important;" +
+      "rgba(255,255,255,.18),rgba(255,255,255,.95)) !important;" +
       "border:none !important;}" +
+      // Separation, and it differs by host. An ordinary layer's
+      // controls sit on ONE line, so the pair needs a gap between
+      // them; a time lapse's stack, so the pair needs a gap above.
+      // Without either they read as one broken control.
+      ".simple-layer-opacity-range.wind-particle-opacity-slider" +
+      "{margin-left:7px !important;}" +
+      ".simple-time-lapse-layer-range-first.wind-particle-opacity-slider" +
+      "{margin-top:4px !important;}" +
       ".wind-particle-opacity-slider .ui-slider-handle," +
       ".wind-speed-opacity-slider .ui-slider-handle{cursor:ew-resize;}";
     try {
@@ -624,9 +656,21 @@
 
   function addParticleSlider(st) {
     var $ = global.$;
-    if (!$ || st.sliderAdded || !st.isLapse) return;
+    if (!$ || st.sliderAdded) return;
     var id = st.id.indexOf("tl:") === 0 ? st.id.slice(3) : st.id;
+
+    // Two shapes to find. A time lapse's opacity control is
+    // "<id>-opacity-slider" with the lapse's range class; an ordinary
+    // layer's is "<id>-opacity" with .simple-layer-opacity-range. The
+    // grouped layer is now BOTH kinds, so look for either and build the
+    // sibling out of whatever the host already wears -- that is what
+    // keeps it sized and themed like the panel rather than like a patch.
     var host = $("#" + id + "-opacity-slider");
+    var handleClass = "time-lapse-slider-handle";
+    if (!host.length) {
+      host = $("#" + id + "-opacity");
+      handleClass = "";
+    }
     if (!host.length || typeof host.slider !== "function") return;
 
     var sid = id + "-particle-opacity-slider";
@@ -634,16 +678,20 @@
 
     injectSliderStyle();
 
-    // Same classes as the one above it, so it inherits the panel's
-    // sizing and theme, plus one of our own for the differences.
+    // Strip jQuery UI's own classes off the copy: they are applied by
+    // .slider() below, and carrying them into fresh markup leaves an
+    // element styled as a slider that is not yet wired to one.
+    var base = (host.attr("class") || "").split(/\s+/).filter(function (c) {
+      return c && c.indexOf("ui-") !== 0;
+    }).join(" ");
+
     host.addClass("wind-speed-opacity-slider");
     host.attr("title", "Wind speed opacity");
     host.after(
       "<div title='Particle opacity' id='" + sid + "'" +
-      " class='simple-time-lapse-layer-range-first" +
-      " wind-particle-opacity-slider'>" +
+      " class='" + base + " wind-particle-opacity-slider'>" +
       "<div id='" + sid + "-handle'" +
-      " class=' time-lapse-slider-handle ui-slider-handle'></div></div>");
+      " class='" + handleClass + " ui-slider-handle'></div></div>");
 
     try {
       $("#" + sid).slider({
@@ -658,6 +706,40 @@
       });
       st.sliderAdded = true;
     } catch (e) { /* no jQuery UI: one control, as before */ }
+  }
+
+  /**
+   * The tile grid covering the canvas, anchored on its NW corner.
+   *
+   * Counted in TILES from that corner rather than measured between two
+   * corners' longitudes, because google.maps normalises longitude into
+   * [-180, 180): a view spanning the dateline reports a west edge east
+   * of its east edge, and any range built from the pair is either
+   * inverted or -- once guarded -- collapsed to nothing. Counting has
+   * no such case, and tx running past n is exactly right: that is the
+   * next copy of the world, where the wrapped tiles belong.
+   *
+   * Returns null before the overlay has a projection or a size.
+   */
+  function tileRect(st, z) {
+    if (!st.proj || !st.w || !st.h) return null;
+    var pt = new google.maps.Point(st.origin.x, st.origin.y);
+    var nw = st.proj.fromDivPixelToLatLng(pt);
+    if (!nw) return null;
+    var mapZoom = global.map && global.map.getZoom();
+    if (typeof mapZoom !== "number") mapZoom = z;
+    var side = TILE_PX * Math.pow(2, mapZoom - z);
+    if (!(side > 0)) return null;
+    var nwTx = lonToTileX(nw.lng(), z);
+    var nwTy = latToTileY(Math.min(85, Math.max(-85, nw.lat())), z);
+    return {
+      side: side, nwTx: nwTx, nwTy: nwTy,
+      x0: Math.floor(nwTx), y0: Math.floor(nwTy),
+      // +1 for the partial tile the corner starts inside of, +1 for the
+      // partial tile at the far edge.
+      cols: Math.ceil(st.w / side) + 1,
+      rows: Math.ceil(st.h / side) + 1,
+    };
   }
 
   // ---- the speed raster ---------------------------------------------
@@ -710,6 +792,7 @@
    */
   function renderSpeedRaster(st) {
     if (!st.speedCtx || !st.proj || !st.w || !st.h) return false;
+    var paintStart = nowMs();
     var ctx = st.speedCtx;
     var z = st.tileZoom, n = 1 << z;
     var proj = st.proj;
@@ -720,66 +803,92 @@
     var lut = st.rampLut;
     var tmin = st.cfg.tileMin, tspan = st.cfg.tileMax - tmin;
 
-    // The tile rect under the view, from its two corners.
-    var pt = new google.maps.Point(st.origin.x, st.origin.y);
-    var nw = proj.fromDivPixelToLatLng(pt);
-    pt.x = st.origin.x + st.w; pt.y = st.origin.y + st.h;
-    var se = proj.fromDivPixelToLatLng(pt);
-    if (!nw || !se) return false;
-    var x0 = Math.floor(lonToTileX(nw.lng(), z));
-    var x1 = Math.floor(lonToTileX(se.lng(), z));
-    var y0 = Math.floor(latToTileY(Math.min(85, Math.max(-85, nw.lat())), z));
-    var y1 = Math.floor(latToTileY(Math.min(85, Math.max(-85, se.lat())), z));
-    if (x1 < x0) x1 = x0;
-    if (y1 < y0) { var sw = y0; y0 = y1; y1 = sw; }
+    // The tile grid under the view.
+    //
+    // Anchored on the canvas's NW corner and counted out in TILES, not
+    // derived from the two corners' longitudes. The corner-to-corner
+    // version could not cross the dateline: google.maps normalises
+    // longitude into [-180, 180), so a Pacific view reported its west
+    // edge as +162 and its east edge as -82, which is x1 < x0 -- and
+    // the guard for that collapsed the range to a single column. The
+    // raster drew as a 256 px strip at the left edge while the
+    // particles, which never leave canvas coordinates, covered the map.
+    //
+    // Counting from the corner has no such case: tx simply runs past n
+    // into the next copy of the world, which is where the wrapped tiles
+    // belong anyway.
+    var tile = tileRect(st, z);
+    if (!tile) return false;
+    var side = tile.side, nwTx = tile.nwTx, nwTy = tile.nwTy;
 
     ctx.clearRect(0, 0, st.w, st.h);
 
     // One tile's worth of scratch, reused. A fresh ImageData per tile
-    // is a 256 KB allocation each.
-    if (!st.tileImage || st.tileImage.width !== TILE_PX) {
-      st.tileImage = ctx.createImageData(TILE_PX, TILE_PX);
+    // is an allocation each.
+    if (!st.tileImage || st.tileImage.width !== RASTER_PX) {
+      st.tileImage = ctx.createImageData(RASTER_PX, RASTER_PX);
       st.tileCanvas = document.createElement("canvas");
-      st.tileCanvas.width = TILE_PX; st.tileCanvas.height = TILE_PX;
+      st.tileCanvas.width = RASTER_PX; st.tileCanvas.height = RASTER_PX;
       st.tileCtx = st.tileCanvas.getContext("2d");
     }
     var img = st.tileImage, outPx = img.data;
+    var STEP = TILE_PX / RASTER_PX;
     var any = false, missing = false;
 
-    for (var tx = x0; tx <= x1; tx++) {
-      for (var ty = y0; ty <= y1; ty++) {
+    for (var i = 0; i < tile.cols; i++) {
+      var tx = tile.x0 + i;
+      for (var j = 0; j < tile.rows; j++) {
+        var ty = tile.y0 + j;
         if (ty < 0 || ty >= n) continue;
         var wrapped = ((tx % n) + n) % n;
         var data = getTile(st, z, wrapped, ty);
         if (!data) { if (data !== false) missing = true; continue; }
 
-        for (var i = 0, o = 0; i < TILE_PX * TILE_PX; i++, o += 4) {
-          if (data[o + 3] === 0) { outPx[o + 3] = 0; continue; }
-          var u = tmin + (data[o] / 255) * tspan;
-          var v = tmin + (data[o + 1] / 255) * tspan;
-          var t = (Math.sqrt(u * u + v * v) - lo) / span;
-          t = t < 0 ? 0 : (t > 1 ? 1 : t);
-          var c = ((t * 255) | 0) * 3;
-          outPx[o] = lut[c];
-          outPx[o + 1] = lut[c + 1];
-          outPx[o + 2] = lut[c + 2];
-          outPx[o + 3] = 255;
+        // px/py/po, NOT i/j/o. `var` is function-scoped, so naming
+        // this counter `i` shared it with the COLUMN loop above --
+        // decoding the first tile left i at 65536 and the column loop
+        // ended after one pass. The raster drew as a single strip at
+        // the left edge, which looks exactly like a projection bug and
+        // is not one.
+        //
+        // Reads every STEPth source pixel rather than averaging: the
+        // tile is already a smooth upsampling of a much coarser
+        // forecast grid, so neighbouring pixels are near-identical and
+        // averaging them would cost four reads to reproduce one.
+        for (var py = 0, po = 0; py < RASTER_PX; py++) {
+          var srow = ((py * STEP) * TILE_PX) * 4;
+          for (var px = 0; px < RASTER_PX; px++, po += 4) {
+            var so = srow + (px * STEP) * 4;
+            if (data[so + 3] === 0) { outPx[po + 3] = 0; continue; }
+            var u = tmin + (data[so] / 255) * tspan;
+            var v = tmin + (data[so + 1] / 255) * tspan;
+            var t = (Math.sqrt(u * u + v * v) - lo) / span;
+            t = t < 0 ? 0 : (t > 1 ? 1 : t);
+            var c = ((t * 255) | 0) * 3;
+            outPx[po] = lut[c];
+            outPx[po + 1] = lut[c + 1];
+            outPx[po + 2] = lut[c + 2];
+            outPx[po + 3] = 255;
+          }
         }
         st.tileCtx.putImageData(img, 0, 0);
 
-        // Where this tile lands on the canvas. Its NW corner in
-        // lat/lng, projected, minus the canvas origin.
-        var tlat = tileYToLat(ty, z), tlon = tileXToLon(tx, z);
-        var dp = proj.fromLatLngToDivPixel(
-            new google.maps.LatLng(tlat, tlon));
-        if (!dp) continue;
-        var lat2 = tileYToLat(ty + 1, z), lon2 = tileXToLon(tx + 1, z);
-        var dp2 = proj.fromLatLngToDivPixel(
-            new google.maps.LatLng(lat2, lon2));
-        if (!dp2) continue;
+        // Where this tile lands, by arithmetic from the canvas corner.
+        //
+        // NOT by projecting each tile's own lat/lng: google.maps.LatLng
+        // NORMALISES longitude into [-180, 180), so every tile past the
+        // dateline came back mapped to the other side of the world. On
+        // a Pacific view that collapsed the whole raster into a thin
+        // strip at the left edge, while the particles -- which never
+        // leave canvas coordinates -- drew correctly across the map.
+        //
+        // Mercator is linear in tile space, so the offset from the
+        // canvas's own NW corner is exact: (tx - nwTx) tiles across,
+        // scaled by a tile's width on screen. tx may run past n here,
+        // and should -- that is the wrapped copy of the world, and it
+        // belongs to the right of the first.
         ctx.drawImage(st.tileCanvas,
-                      dp.x - st.origin.x, dp.y - st.origin.y,
-                      dp2.x - dp.x, dp2.y - dp.y);
+                      (tx - nwTx) * side, (ty - nwTy) * side, side, side);
         any = true;
       }
     }
@@ -788,21 +897,30 @@
     // Cached only once every tile is in. A partial paint left cached
     // would leave the gaps on screen for as long as the view held
     // still, which is the same bug the field key had.
-    st.speedKey = (any && !missing) ? speedKey(st) : null;
+    var done = any && !missing;
+    st.speedKey = done ? speedKey(st) : null;
+    // ...and backed off when it is NOT, for the same reason buildField
+    // is. A repaint is ~48 tiles x 65,536 pixels of palette lookup;
+    // retrying that at the animation rate while a lapse streams its
+    // next hour asks for tens of millions of operations a second and
+    // locks the tab hard enough that the page stops answering at all.
+    // Charged against what this paint actually cost, so it scales with
+    // the window instead of assuming one.
+    st.paintAgainAt = done
+        ? 0
+        : nowMs() + Math.max(REBUILD_MS, (nowMs() - paintStart) * REBUILD_DUTY);
     return any;
-  }
-
-  function tileXToLon(x, z) { return (x / (1 << z)) * 360 - 180; }
-
-  function tileYToLat(y, z) {
-    var m = Math.PI - (2 * Math.PI * y) / (1 << z);
-    return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(m) - Math.exp(-m)));
   }
 
   /** Repaint only when the view, the hour or the size moved. */
   function ensureSpeedRaster(st) {
     if (!st.cfg.speedRaster || !st.speedCanvas) return;
     if (st.speedKey && st.speedKey === speedKey(st)) return;
+    // Hold off if the last paint came out incomplete. Unlike the field,
+    // there is no "first paint" exception: a half-drawn raster is
+    // already on screen and the map underneath shows through the gaps,
+    // so waiting costs nothing the user can see.
+    if (st.paintAgainAt && nowMs() < st.paintAgainAt) return;
     renderSpeedRaster(st);
   }
 
@@ -1503,6 +1621,8 @@
         st.getTileUrl = st.frames[shown];
         st.fieldKey = null;            // resample from the cache
         st.buildAgainAt = 0;           // and do it now, not after a back-off
+        st.speedKey = null;            // the raster is a frame behind too
+        st.paintAgainAt = 0;
         // Warm the hours after this one while this one plays. By the
         // time the lapse steps again their tiles are decoded and the
         // rebuild is pure arithmetic with nothing to wait for.
@@ -1822,6 +1942,7 @@
         // user touches it, so the layer looks exactly as configured.
         particleDim: 1, sliderAdded: false, queryRetargeted: false,
         speedCanvas: null, speedCtx: null, speedKey: null, rampLut: null,
+        paintAgainAt: 0,
         fieldSpacing: FIELD_SPACING, fieldKey: null, fieldAny: false,
         canvas: null, ctx: null, particles: null, running: false,
         inflight: 0, burst: 0,

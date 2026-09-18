@@ -24,6 +24,10 @@ const vm = require("vm");
 // paint" and "did it skip a repaint it did not need" become observable.
 let drawnTiles = 0;
 
+// The module's clock, under the probe's control, so the back-offs can be
+// stepped past deterministically instead of slept through.
+let nowFake = 0;
+
 // ---- a map, and the positional overlay array the viewer relies on ----
 function MVCArray() { this.a = []; }
 MVCArray.prototype.setAt = function (i, v) {
@@ -81,7 +85,8 @@ const sandbox = {
   setInterval: () => 0,
   requestAnimationFrame: () => 1,
   cancelAnimationFrame: () => {},
-  performance: { now: () => 0 },
+  // A clock the probe drives, so the back-offs can be stepped past.
+  performance: { now: () => nowFake },
 };
 sandbox.window = sandbox;
 sandbox.document = {
@@ -126,6 +131,9 @@ sandbox.map = {
   // what a browser without IntersectionObserver also does.
 };
 sandbox.layerObj = LAYERS;
+// A tile request that never resolves. This probe only needs tiles to be
+// ABSENT -- the tilecache probe is the one that exercises loading.
+sandbox.Image = function () { this.onload = null; this.onerror = null; };
 // The viewer builds queryObj asynchronously, so it starts ABSENT here --
 // retargetQuery has to cope with that and retry, which is the case that
 // actually happens in a browser.
@@ -368,9 +376,36 @@ out.plainAfterShow = pst.running;
   const before = drawnTiles;
   W._ensureSpeedRaster(mst);             // unchanged view: must not repaint
   out.paintSkippedWhenUnchanged = drawnTiles === before;
+
+
   mst.frameId = fids[2];                 // new hour: must repaint
+  mst.speedKey = null; mst.paintAgainAt = 0;   // as refreshRunState does
   W._ensureSpeedRaster(mst);
   out.paintRedrewOnFrameChange = drawnTiles > before;
+
+  // An INCOMPLETE paint must back off. A repaint is tens of tiles of
+  // per-pixel palette lookup; retrying at the animation rate while a
+  // lapse streams its next hour locked the tab hard enough that the
+  // page stopped answering script at all.
+  //
+  // Everything cold again -- the one-entry tile memo too, or getTile
+  // answers from it and the paint still looks complete.
+  mst.tiles = Object.create(null);
+  mst.memoData = null; mst.memoFrame = null;
+  mst.speedKey = null; mst.paintAgainAt = 0;
+  nowFake = 5000;
+  W._renderSpeedRaster(mst);
+  out.paintBackoffArmed = mst.paintAgainAt > 5000;
+  const armedAt = mst.paintAgainAt;
+  nowFake = 5000 + 5;
+  W._ensureSpeedRaster(mst);
+  out.paintHeldWhileBackedOff = mst.paintAgainAt === armedAt;
+  nowFake = armedAt + 1;
+  W._ensureSpeedRaster(mst);
+  // Not measured in DRAWS: the cache is cold and the stubbed Image
+  // never resolves, so there is nothing to draw. A paint having RUN is
+  // what re-arms the clock.
+  out.paintResumedAfterBackoff = mst.paintAgainAt > armedAt;
 }
 
 console.log(JSON.stringify(out, null, 1));

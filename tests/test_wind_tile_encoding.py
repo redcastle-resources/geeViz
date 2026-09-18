@@ -1884,9 +1884,14 @@ def test_the_next_frames_are_warmed_before_they_are_needed(cache):
     assert cache["warmedFrames"] == ["f1", "f2"], (
         f"warmed {cache['warmedFrames']}, expected the two frames after "
         f"the one on screen")
-    assert cache["warmedCount"] == 8, (
-        f"warmed {cache['warmedCount']} tiles; the view spans a 2x2 tile "
-        f"rect, so two frames is 8")
+    # 3x3 per frame, not 2x2. The grid is counted out from the canvas's
+    # NW CORNER, which starts partway into a tile, so a 512 px view at
+    # 256 px tiles touches three columns and three rows. Deriving the
+    # rect from the two corners' longitudes gave 2x2 -- and could not
+    # cross the dateline at all, which is why it is gone.
+    assert cache["warmedCount"] == 18, (
+        f"warmed {cache['warmedCount']} tiles; a 512 px view touches a "
+        f"3x3 tile rect, so two frames is 18")
 
 
 def test_warming_never_enters_the_in_flight_queue(cache):

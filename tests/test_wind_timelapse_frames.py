@@ -322,3 +322,21 @@ def test_the_raster_repaints_only_when_it_must(result):
     assert result["paintRedrewOnFrameChange"], (
         "the raster did not repaint when the hour advanced — the colors "
         "would stay on the previous frame's wind")
+
+
+def test_an_incomplete_raster_backs_off(result):
+    """The lockup guard.
+
+    A repaint is tens of tiles of per-pixel palette lookup. While a
+    lapse streams the next hour the paint keeps coming out incomplete,
+    and retrying at the animation rate asked for tens of millions of
+    operations a second — enough that the tab stopped answering script
+    at all, which is a worse failure than a slow one because nothing on
+    the page still works.
+    """
+    assert result["paintBackoffArmed"], (
+        "an incomplete raster did not arm the back-off; it will repaint "
+        "on every animation frame")
+    assert result["paintHeldWhileBackedOff"], "the back-off did not hold"
+    assert result["paintResumedAfterBackoff"], (
+        "the back-off never released — the raster would stay half-drawn")
