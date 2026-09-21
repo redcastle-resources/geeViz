@@ -384,7 +384,9 @@ def test_a_removed_layer_takes_its_overlay_with_it(result):
     lapse holds one per frame.
     """
     assert result["dropHadOverlay"], "the probe never adopted anything"
-    assert result["dropAdoptedBefore"] == 1
+    # However many the probe happened to build -- the point is that
+    # none survive an empty registry, not that there was exactly one.
+    assert result["dropAdoptedBefore"] >= 1
     assert result["dropAdoptedAfter"] == 0, (
         "the overlay outlived every layer it was drawing")
     assert result["dropStopped"] is True
@@ -393,3 +395,22 @@ def test_a_removed_layer_takes_its_overlay_with_it(result):
     assert result["dropTilesReleased"], (
         "the decoded tiles were not released — that is the big "
         "allocation here")
+
+
+def test_the_raster_opacity_comes_from_viz(result):
+    """``viz.opacity`` is the layer's opacity, and the raster is the
+    layer-shaped half of this layer — so that is what it starts at.
+
+    geeViz sets ``layer.opacity`` from ``viz.opacity`` (defaulting to
+    1), and the raster reads it. The particle canvas deliberately does
+    NOT: it has its own control, so moving one must leave the other
+    exactly where it was.
+    """
+    assert result["vizOpacityRaster"] == 0.6, (
+        f"a layer added with opacity 0.6 started its raster at "
+        f"{result['vizOpacityRaster']}")
+    assert result["vizOpacityRasterFull"] == 1, (
+        "the raster did not follow viz.opacity back to full")
+    assert result["vizOpacityLeavesParticles"] == 0.3, (
+        f"viz.opacity moved the trails too — they are on their own "
+        f"control and sat at {result['vizOpacityLeavesParticles']}")

@@ -589,20 +589,34 @@
     var li = $("#" + id + "-class-container").find("li").first();
     if (!li.length) return;                    // panel not built yet
 
-    var span = li.find("span").first();
-    if (!span.length) return;
-    var bg = span.attr("style") || "";
-    var m = /background:([\s\S]*?)(?:;\s*width|$)/.exec(bg);
-    var swatch = m ? m[1] : "";
-    if (!swatch) return;
-
     var lo = st.cfg.rampMin, hi = st.cfg.rampMax, unit = st.cfg.units || "";
     if (lo === undefined || hi === undefined) return;
+    var pal = st.cfg.rampPalette || [];
+    if (pal.length < 2) return;
+
+    // The ramp is built HERE from the palette rather than lifted out of
+    // the server's swatch, because the comet has to be a separate
+    // element to move. A background layer cannot be animated across the
+    // bar without dragging the ramp with it.
+    var stops = [];
+    for (var i = 0; i < pal.length; i++) {
+      var c = String(pal[i]).replace(/^#?/, "#");
+      stops.push(c + " " + Math.round(i * 100 / (pal.length - 1)) + "%");
+    }
 
     st.legendStyled = true;
     li.empty();
-    li.append($("<div>").addClass("wind-legend-ramp")
-        .attr("style", "background:" + swatch));
+    var ramp = $("<div>").addClass("wind-legend-ramp")
+        .attr("style", "background:linear-gradient(90deg," +
+                       stops.join(",") + ")");
+    // A trail crossing the bar, at the layer's own particle colour. The
+    // key should show the flow as motion, since motion is the half of
+    // this layer a static chip cannot describe.
+    var rgb = st.cfg.rgb || [255, 255, 255];
+    ramp.append($("<i>").addClass("wind-legend-comet").attr("style",
+        "background:linear-gradient(90deg,rgba(" + rgb.join(",") + ",0)," +
+        "rgba(" + rgb.join(",") + ",.95))"));
+    li.append(ramp);
     // <i>, not <span>. The class-legend CSS styles `li span` as the
     // swatch chip -- bordered, fixed width -- so numbers put in spans
     // came out as two little boxes instead of as labels.
@@ -702,7 +716,10 @@
       ".wind-two-sliders .wind-speed-opacity-slider," +
       ".wind-two-sliders .wind-particle-opacity-slider" +
       "{clear:right !important;margin-left:0 !important;}" +
-      ".wind-two-sliders .wind-particle-opacity-slider" +
+      // The gap goes on the LOWER one -- the raster's, now that the
+      // particle control sits above it. The upper keeps the stock top
+      // margin that clears the row.
+      ".wind-two-sliders .wind-speed-opacity-slider" +
       "{margin-top:9px !important;}" +
       // Floats do not grow their parent, so the row is given the height
       // the second slider needs -- without it that slider overflows the
@@ -718,7 +735,21 @@
       // the bar to 42px and ran the two end labels together.
       ".wind-legend-ramp{display:block !important;width:150px !important;" +
       "height:13px !important;border:1px solid #968b83;" +
-      "border-radius:2px;}" +
+      "border-radius:2px;position:relative;overflow:hidden;}" +
+      // The trail, crossing the bar on a loop. 3px so it reads as a
+      // streak rather than a wipe, and it starts fully off the left
+      // edge so the bar is briefly clean -- a comet that never leaves
+      // reads as a gradient, not as motion.
+      ".wind-legend-comet{position:absolute;top:50%;left:0;" +
+      "margin-top:-1.5px;width:34px;height:3px;border-radius:2px;" +
+      "animation:wind-legend-flow 2.6s linear infinite;}" +
+      "@keyframes wind-legend-flow{" +
+      "from{transform:translateX(-34px);}" +
+      "to{transform:translateX(150px);}}" +
+      // Anything that loops forever has to answer this, or it is an
+      // accessibility problem rather than a nicety.
+      "@media (prefers-reduced-motion:reduce){" +
+      ".wind-legend-comet{animation:none;left:auto;right:6px;}}" +
       ".wind-legend-ends{display:flex;justify-content:space-between;" +
       "width:150px;font-size:11px;opacity:.85;margin-top:1px;}" +
       ".wind-legend-ends i{font-style:normal;}";
@@ -768,11 +799,23 @@
     // their parent -- without the extra height the second slider
     // overflows the layer entry and lands on the one below it.
     host.closest("li").addClass("wind-two-sliders");
-    host.after(
+    // BEFORE the host, not after. The pair should read in the order
+    // the map draws them: particles are painted over the raster, so the
+    // particle control belongs above the raster's. Both are float:right
+    // with clear:right, so DOM order is top-to-bottom order.
+    host.before(
       "<div title='Particle opacity' id='" + sid + "'" +
       " class='" + base + " wind-particle-opacity-slider'>" +
       "<div id='" + sid + "-handle'" +
       " class='" + handleClass + " ui-slider-handle'></div></div>");
+
+    // The viewer paints its own slider's track with an INLINE
+    // background-color, so a copy that inherits only the class comes
+    // out in jQuery UI's default grey and does not match the control
+    // directly above it. Take the colour from the host rather than
+    // hard-coding one, so it follows the tenant's theme.
+    var trackBg = host.css("background-color");
+    if (trackBg) $("#" + sid).css("background-color", trackBg);
 
     try {
       $("#" + sid).slider({

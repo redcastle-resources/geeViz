@@ -409,6 +409,34 @@ out.plainAfterShow = pst.running;
   out.paintResumedAfterBackoff = mst.paintAgainAt > armedAt;
 }
 
+// ---- the raster's opacity comes from viz.opacity --------------------
+// geeViz sets layer.opacity from viz.opacity, so a merged layer added
+// with {opacity: 0.6} must start its raster at 0.6, and one added
+// without the param at 1 -- not at whatever the particle control says.
+{
+  const OID = "solo";
+  sandbox.layerObj[OID] = {
+    layerId: 20, visible: true, opacity: 0.6, name: OID,
+    layer: { sh: (c, z) => "https://t.example/solo/" + z },
+    viz: {
+      windParticles: true, windSpeedRaster: true,
+      windTileMin: -40, windTileMax: 40, particleColor: "#fff",
+      windSpeedPalette: ["3d6ea3", "4ca44c", "ffffff"],
+      windRampMinMs: 0, windRampMaxMs: 30,
+    },
+  };
+  W.scan();
+  const sst = W._adopted[OID];
+  sst.overlay.onAdd();
+  sst.particleDim = 0.3;                 // particle control moved
+  W._refreshRunState();
+  out.vizOpacityRaster = +sst.speedCanvas.style.opacity;
+  out.vizOpacityLeavesParticles = +sst.canvas.style.opacity;
+  sandbox.layerObj[OID].opacity = 1;
+  W._refreshRunState();
+  out.vizOpacityRasterFull = +sst.speedCanvas.style.opacity;
+}
+
 // ---- switching the layer OFF must wipe BOTH canvases ----------------
 // Reported from a real map: the trails vanished and the speed raster
 // stayed painted over the ground, with nothing in the panel able to
