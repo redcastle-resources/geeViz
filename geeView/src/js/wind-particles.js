@@ -680,58 +680,37 @@
     if (document.getElementById(STYLE_ID)) return;
     styleInjected = true;
     var css =
-      // ---- the two opacity sliders --------------------------------
+      // ---- the second opacity slider -------------------------------
       //
-      // Quiet tracks, on purpose. The first version tinted each track
-      // with what it governs -- the speed ramp's own colours, white for
-      // the trails -- and both halves of that were wrong. A rainbow
-      // track carries no VALUE: it is busy end to end, so there is
-      // nowhere for the handle position to read against, and it
-      // duplicates the legend, which is the honest home for the ramp.
-      // The white one was worse: the layer row's background is a
-      // near-white gradient, so a white track was invisible and the
-      // control read as missing rather than as pale.
+      // NOTHING about how a slider looks is set here. It is a copy of
+      // the layer's own opacity control and inherits
+      // .simple-layer-opacity-range wholesale, so it matches every
+      // other opacity slider in the panel -- same track, same handle,
+      // same vertical centring.
       //
-      // What identifies them is a CHIP beside each, in the same
-      // language as the legend. What the track shows is the value.
+      // An earlier version restyled both: a taller track, a lighter
+      // handle, a palette-tinted background and an identifying chip.
+      // All of it was wrong. Restyling one pair of sliders makes them
+      // the odd ones out in a panel full of the stock control, and the
+      // handle's centring is tuned to the stock track height -- change
+      // the track and the handle sits off-centre. The tooltips say
+      // which is which.
+      //
+      // What IS needed is stacking. The control is float:right and
+      // 64px wide; two of them share one line and scrunch together.
+      // `clear:right` puts each on its own line.
       ".wind-two-sliders .wind-speed-opacity-slider," +
       ".wind-two-sliders .wind-particle-opacity-slider" +
-      "{height:6px !important;border-radius:3px !important;" +
-      "background:rgba(0,0,0,.42) !important;" +
-      "border:1px solid rgba(0,0,0,.25) !important;" +
-      "clear:right !important;margin-left:0 !important;}" +
+      "{clear:right !important;margin-left:0 !important;}" +
       ".wind-two-sliders .wind-particle-opacity-slider" +
-      "{margin-top:8px !important;}" +
-      // The handle was 10x13 of near-black with square corners on a
-      // 7px track -- taller than the thing it rides and the darkest
-      // mark in the row, so two of them stacked read as two blobs.
-      // Smaller, rounded, and lighter: a grip, not a landmark.
-      ".wind-two-sliders .ui-slider-handle" +
-      "{cursor:ew-resize;width:8px !important;height:12px !important;" +
-      "border-radius:2px !important;margin-top:-4px;" +
-      "background:#cfd6d9 !important;border:1px solid #4a4340 !important;}" +
-      // The chips. 14x8, immediately left of each track, saying which
-      // half of the layer the slider fades. The particle chip carries
-      // its own dark ground so a white streak is visible on the row's
-      // pale background -- the mistake the track version made.
-      ".wind-two-sliders .wind-speed-opacity-slider::before," +
-      ".wind-two-sliders .wind-particle-opacity-slider::before" +
-      "{content:'';position:absolute;left:-19px;top:-2px;" +
-      "width:14px;height:8px;border:1px solid rgba(0,0,0,.45);" +
-      "border-radius:2px;}" +
-      ".wind-two-sliders .wind-speed-opacity-slider::before" +
-      "{background:linear-gradient(90deg," +
-      "#3d6ea3,#4ca44c,#d7d64a,#c4622d,#8a2f4a);}" +
-      ".wind-two-sliders .wind-particle-opacity-slider::before" +
-      "{background:linear-gradient(90deg,rgba(255,255,255,0) 10%," +
-      "rgba(255,255,255,.95) 85%,rgba(255,255,255,0) 95%),#243039;}" +
+      "{margin-top:9px !important;}" +
       // Floats do not grow their parent, so the row is given the height
-      // the second slider needs. Without it that slider overflowed the
-      // entry and sat on the layer below.
-      "li.wind-two-sliders{min-height:44px;}" +
+      // the second slider needs -- without it that slider overflows the
+      // entry and lands on the layer below.
+      "li.wind-two-sliders{min-height:38px;}" +
       // A time lapse's controls already stack; it only needs the gap.
       ".simple-time-lapse-layer-range-first.wind-particle-opacity-slider" +
-      "{margin-top:5px !important;}" +
+      "{margin-top:6px !important;}" +
       // ---- the legend entry, rebuilt as a colour bar ----------------
       // A CONCRETE width, not 100%. ul.legend-labels is float:left and
       // therefore shrink-to-fit, so a percentage resolves against
