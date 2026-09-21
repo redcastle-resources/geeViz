@@ -680,45 +680,63 @@
     if (document.getElementById(STYLE_ID)) return;
     styleInjected = true;
     var css =
-      // The stock track is 3 PX TALL. One of those is a hairline you
-      // can just about grab; two side by side are indistinguishable
-      // from each other and from a rendering fault, which is what the
-      // first version shipped as. Give them enough height that the
-      // tint below actually reads as a tint.
-      ".wind-speed-opacity-slider,.wind-particle-opacity-slider" +
-      "{height:7px !important;border-radius:3px !important;" +
-      "border:1px solid rgba(0,0,0,.35) !important;}" +
-      // Tinted to what each governs: the speed ramp's own colors for
-      // the raster, white for the trails. Two identical tracks give no
-      // clue which fades what.
-      ".wind-speed-opacity-slider{background:linear-gradient(90deg," +
-      "#3d6ea3,#4ca44c,#d7d64a,#c4622d,#8a2f4a) !important;}" +
-      ".wind-particle-opacity-slider{background:linear-gradient(90deg," +
-      "rgba(255,255,255,.2),rgba(255,255,255,.95)) !important;}" +
-      // STACKED, not side by side. An ordinary layer's opacity control
-      // is float:right and 64px wide; two of them share one line and
-      // end up scrunched against each other, reading as one broken
-      // control rather than two. `clear:right` puts each on its own
-      // line, and the row is given the height the floats will not
-      // contribute themselves.
-      "li.wind-two-sliders{min-height:42px;}" +
+      // ---- the two opacity sliders --------------------------------
+      //
+      // Quiet tracks, on purpose. The first version tinted each track
+      // with what it governs -- the speed ramp's own colours, white for
+      // the trails -- and both halves of that were wrong. A rainbow
+      // track carries no VALUE: it is busy end to end, so there is
+      // nowhere for the handle position to read against, and it
+      // duplicates the legend, which is the honest home for the ramp.
+      // The white one was worse: the layer row's background is a
+      // near-white gradient, so a white track was invisible and the
+      // control read as missing rather than as pale.
+      //
+      // What identifies them is a CHIP beside each, in the same
+      // language as the legend. What the track shows is the value.
       ".wind-two-sliders .wind-speed-opacity-slider," +
       ".wind-two-sliders .wind-particle-opacity-slider" +
-      "{clear:right !important;margin-left:0 !important;}" +
+      "{height:6px !important;border-radius:3px !important;" +
+      "background:rgba(0,0,0,.42) !important;" +
+      "border:1px solid rgba(0,0,0,.25) !important;" +
+      "clear:right !important;margin-left:0 !important;}" +
       ".wind-two-sliders .wind-particle-opacity-slider" +
-      "{margin-top:7px !important;}" +
+      "{margin-top:8px !important;}" +
+      // The handle was 10x13 of near-black with square corners on a
+      // 7px track -- taller than the thing it rides and the darkest
+      // mark in the row, so two of them stacked read as two blobs.
+      // Smaller, rounded, and lighter: a grip, not a landmark.
+      ".wind-two-sliders .ui-slider-handle" +
+      "{cursor:ew-resize;width:8px !important;height:12px !important;" +
+      "border-radius:2px !important;margin-top:-4px;" +
+      "background:#cfd6d9 !important;border:1px solid #4a4340 !important;}" +
+      // The chips. 14x8, immediately left of each track, saying which
+      // half of the layer the slider fades. The particle chip carries
+      // its own dark ground so a white streak is visible on the row's
+      // pale background -- the mistake the track version made.
+      ".wind-two-sliders .wind-speed-opacity-slider::before," +
+      ".wind-two-sliders .wind-particle-opacity-slider::before" +
+      "{content:'';position:absolute;left:-19px;top:-2px;" +
+      "width:14px;height:8px;border:1px solid rgba(0,0,0,.45);" +
+      "border-radius:2px;}" +
+      ".wind-two-sliders .wind-speed-opacity-slider::before" +
+      "{background:linear-gradient(90deg," +
+      "#3d6ea3,#4ca44c,#d7d64a,#c4622d,#8a2f4a);}" +
+      ".wind-two-sliders .wind-particle-opacity-slider::before" +
+      "{background:linear-gradient(90deg,rgba(255,255,255,0) 10%," +
+      "rgba(255,255,255,.95) 85%,rgba(255,255,255,0) 95%),#243039;}" +
+      // Floats do not grow their parent, so the row is given the height
+      // the second slider needs. Without it that slider overflowed the
+      // entry and sat on the layer below.
+      "li.wind-two-sliders{min-height:44px;}" +
+      // A time lapse's controls already stack; it only needs the gap.
       ".simple-time-lapse-layer-range-first.wind-particle-opacity-slider" +
       "{margin-top:5px !important;}" +
-      // The handle has to clear a 7px track without swallowing it.
-      ".wind-particle-opacity-slider .ui-slider-handle," +
-      ".wind-speed-opacity-slider .ui-slider-handle" +
-      "{cursor:ew-resize;height:13px !important;margin-top:-4px;}" +
       // ---- the legend entry, rebuilt as a colour bar ----------------
       // A CONCRETE width, not 100%. ul.legend-labels is float:left and
       // therefore shrink-to-fit, so a percentage resolves against
       // whatever the content already happens to be -- which collapsed
-      // the bar to 42px and ran the two end labels together. The
-      // original chip worked only because it carried a fixed 132px.
+      // the bar to 42px and ran the two end labels together.
       ".wind-legend-ramp{display:block !important;width:150px !important;" +
       "height:13px !important;border:1px solid #968b83;" +
       "border-radius:2px;}" +
@@ -1652,11 +1670,40 @@
     if (el.style.opacity !== v) el.style.opacity = v;
   }
 
+  /** Take an overlay off the map and out of the DOM, for good. */
+  function dropOverlay(st) {
+    st.running = false;
+    try {
+      if (st.overlay && st.overlay.setMap) st.overlay.setMap(null);
+    } catch (e) { /* already detached */ }
+    [st.canvas, st.speedCanvas].forEach(function (c) {
+      if (c && c.parentNode) c.parentNode.removeChild(c);
+    });
+    st.canvas = st.ctx = st.speedCanvas = st.speedCtx = null;
+    // Drop the decoded tiles too. They are the big allocation here --
+    // a frame's worth is megabytes, and a lapse holds one per frame.
+    st.tiles = Object.create(null);
+    st.field = st.fieldOk = st.fieldB = st.fieldOkB = null;
+    st.particles = null;
+  }
+
   function refreshRunState() {
     var reg = registry();
     var pageVisible = !global.document || !global.document.hidden;
     for (var id in adopted) {
       var st = adopted[id];
+
+      // Gone entirely? Map.clearMap() and a re-add empty the registry,
+      // and an overlay whose every frame has disappeared has nothing
+      // left to draw. Without this its canvases stay in the pane for
+      // the life of the page -- cleared, so nothing shows, but
+      // accumulating one pair per wind layer ever added, each still
+      // answering the idle and resize handlers.
+      var stillThere = false;
+      for (var lid in st.frames) {
+        if (reg && reg[lid]) { stillThere = true; break; }
+      }
+      if (!stillThere) { dropOverlay(st); delete adopted[id]; continue; }
 
       // Which frame is on? NOT the one whose checkbox is ticked.
       //
@@ -1718,7 +1765,22 @@
                  (anyFrame ? anyVisible : (L ? L.visible !== false : true));
       if (want !== st.running) {
         st.running = want;
-        if (!want && st.ctx) st.ctx.clearRect(0, 0, st.w, st.h);
+        if (!want) {
+          // BOTH canvases. Clearing only the particle one left the
+          // speed raster painted over the map after the layer was
+          // switched off -- the trails vanished, the colours did not,
+          // and nothing in the panel could get rid of them. The raster
+          // is not redrawn by tick() while stopped, so a stale paint
+          // simply stays until something else happens to repaint it.
+          if (st.ctx) st.ctx.clearRect(0, 0, st.w, st.h);
+          if (st.speedCtx) {
+            st.speedCtx.clearRect(0, 0, st.w, st.h);
+            // ...and forget the paint, or coming back on would find a
+            // matching key and skip the repaint it now needs.
+            st.speedKey = null;
+            st.paintAgainAt = 0;
+          }
+        }
         // Only a genuine off->on gets a fresh scatter. A frame change
         // does not pass through here, so trails survive it.
         if (want) st.particles = null;

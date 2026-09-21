@@ -27,6 +27,7 @@ let drawnTiles = 0;
 // The module's clock, under the probe's control, so the back-offs can be
 // stepped past deterministically instead of slept through.
 let nowFake = 0;
+let clearCalls = 0;   // clearRect calls, across every 2d context
 
 // ---- a map, and the positional overlay array the viewer relies on ----
 function MVCArray() { this.a = []; }
@@ -95,7 +96,7 @@ sandbox.document = {
   createElement: () => ({
     width: 0, height: 0, style: {},
     getContext: () => ({
-      clearRect() {}, setTransform() {}, beginPath() {},
+      clearRect() { clearCalls++; }, setTransform() {}, beginPath() {},
       moveTo() {}, lineTo() {}, stroke() {},
       // The speed raster's scratch tile, and the composite onto the
       // canvas. Counting drawImage is how "did it actually paint" and
@@ -406,6 +407,55 @@ out.plainAfterShow = pst.running;
   // never resolves, so there is nothing to draw. A paint having RUN is
   // what re-arms the clock.
   out.paintResumedAfterBackoff = mst.paintAgainAt > armedAt;
+}
+
+// ---- switching the layer OFF must wipe BOTH canvases ----------------
+// Reported from a real map: the trails vanished and the speed raster
+// stayed painted over the ground, with nothing in the panel able to
+// remove it. Only st.ctx was being cleared.
+{
+  const st2 = W._adopted["tl:merged"] || W._adopted[Object.keys(W._adopted)[0]];
+  const fids2 = Object.keys(st2.frames);
+  // On, and painted.
+  fids2.forEach((k) => { sandbox.layerObj[k].visible = true;
+                         sandbox.layerObj[k].opacity = 0; });
+  sandbox.layerObj[fids2[0]].opacity = 1;
+  W._refreshRunState();
+  out.offOnRunningWhileOn = st2.running;
+
+  st2.speedKey = "painted";                 // pretend a complete paint
+  const wipesBefore = clearCalls;
+
+  // Off: every frame's checkbox unticked.
+  fids2.forEach((k) => { sandbox.layerObj[k].visible = false; });
+  W._refreshRunState();
+  out.offOnRunningWhileOff = st2.running;
+  out.offOnWipedBothCanvases = clearCalls - wipesBefore >= 2;
+  out.offOnSpeedKeyForgotten = st2.speedKey === null;
+
+  // ...and back on, which must repaint rather than trust the old key.
+  fids2.forEach((k) => { sandbox.layerObj[k].visible = true; });
+  W._refreshRunState();
+  out.offOnRunningAfterBack = st2.running;
+  out.offOnRepaintsOnReturn = st2.speedKey === null;
+}
+
+// ---- a REMOVED layer must take its overlay with it ------------------
+// Map.clearMap() empties the registry. An overlay whose frames have all
+// disappeared has nothing left to draw, and leaving it behind
+// accumulates a canvas pair per wind layer ever added.
+{
+  const st3 = W._adopted[Object.keys(W._adopted)[0]];
+  const before = Object.keys(W._adopted).length;
+  out.dropHadOverlay = !!st3;
+  // Empty the registry, exactly as clearMap does.
+  Object.keys(sandbox.layerObj).forEach((k) => delete sandbox.layerObj[k]);
+  W._refreshRunState();
+  out.dropAdoptedBefore = before;
+  out.dropAdoptedAfter = Object.keys(W._adopted).length;
+  out.dropCanvasesReleased = st3.canvas === null && st3.speedCanvas === null;
+  out.dropTilesReleased = Object.keys(st3.tiles).length === 0;
+  out.dropStopped = st3.running === false;
 }
 
 console.log(JSON.stringify(out, null, 1));

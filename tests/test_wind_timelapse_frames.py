@@ -340,3 +340,56 @@ def test_an_incomplete_raster_backs_off(result):
     assert result["paintHeldWhileBackedOff"], "the back-off did not hold"
     assert result["paintResumedAfterBackoff"], (
         "the back-off never released — the raster would stay half-drawn")
+
+
+def test_switching_the_layer_off_wipes_both_canvases(result):
+    """Reported from a real map: the trails vanished and the speed
+    raster stayed painted over the ground.
+
+    Only the particle context was being cleared. The raster is a SECOND
+    canvas, and tick() does not redraw it while the overlay is stopped —
+    so a stale paint simply stayed there, with nothing in the layer
+    panel able to remove it. Unchecking a layer and having half of it
+    remain is the kind of failure that makes a viewer feel broken.
+    """
+    assert result["offOnRunningWhileOn"] is True, (
+        "the probe never got the layer running")
+    assert result["offOnRunningWhileOff"] is False
+    assert result["offOnWipedBothCanvases"], (
+        "switching the layer off cleared only one canvas — the speed "
+        "raster is still painted over the map")
+    assert result["offOnSpeedKeyForgotten"], (
+        "the paint key survived the layer being switched off, so "
+        "switching it back on would match and skip the repaint")
+
+
+def test_switching_it_back_on_repaints(result):
+    """The other half. Forgetting the key on the way out is only right
+    if coming back in actually redraws."""
+    assert result["offOnRunningAfterBack"] is True, (
+        "the layer did not restart when switched back on")
+    assert result["offOnRepaintsOnReturn"], (
+        "no repaint is queued on return; the map would come back with "
+        "an empty raster")
+
+
+def test_a_removed_layer_takes_its_overlay_with_it(result):
+    """``Map.clearMap()`` empties the registry, and an overlay whose
+    frames have all disappeared has nothing left to draw.
+
+    Left behind it is invisible — the canvases get cleared — but it
+    accumulates one canvas pair per wind layer ever added, each still
+    answering the map's idle and resize handlers, and each still holding
+    its decoded tiles. A frame's worth of those is megabytes, and a
+    lapse holds one per frame.
+    """
+    assert result["dropHadOverlay"], "the probe never adopted anything"
+    assert result["dropAdoptedBefore"] == 1
+    assert result["dropAdoptedAfter"] == 0, (
+        "the overlay outlived every layer it was drawing")
+    assert result["dropStopped"] is True
+    assert result["dropCanvasesReleased"], (
+        "the canvases are still in the overlay pane")
+    assert result["dropTilesReleased"], (
+        "the decoded tiles were not released — that is the big "
+        "allocation here")
