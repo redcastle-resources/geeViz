@@ -695,11 +695,18 @@
       "#3d6ea3,#4ca44c,#d7d64a,#c4622d,#8a2f4a) !important;}" +
       ".wind-particle-opacity-slider{background:linear-gradient(90deg," +
       "rgba(255,255,255,.2),rgba(255,255,255,.95)) !important;}" +
-      // Separation, and it differs by host. An ordinary layer's
-      // controls sit on ONE line, so the pair needs a gap between
-      // them; a time lapse's stack, so the pair needs a gap above.
-      ".simple-layer-opacity-range.wind-particle-opacity-slider" +
-      "{margin-left:8px !important;}" +
+      // STACKED, not side by side. An ordinary layer's opacity control
+      // is float:right and 64px wide; two of them share one line and
+      // end up scrunched against each other, reading as one broken
+      // control rather than two. `clear:right` puts each on its own
+      // line, and the row is given the height the floats will not
+      // contribute themselves.
+      "li.wind-two-sliders{min-height:42px;}" +
+      ".wind-two-sliders .wind-speed-opacity-slider," +
+      ".wind-two-sliders .wind-particle-opacity-slider" +
+      "{clear:right !important;margin-left:0 !important;}" +
+      ".wind-two-sliders .wind-particle-opacity-slider" +
+      "{margin-top:7px !important;}" +
       ".simple-time-lapse-layer-range-first.wind-particle-opacity-slider" +
       "{margin-top:5px !important;}" +
       // The handle has to clear a 7px track without swallowing it.
@@ -760,6 +767,10 @@
 
     host.addClass("wind-speed-opacity-slider");
     host.attr("title", "Wind speed opacity");
+    // The ROW has to know it carries two, because floats do not grow
+    // their parent -- without the extra height the second slider
+    // overflows the layer entry and lands on the one below it.
+    host.closest("li").addClass("wind-two-sliders");
     host.after(
       "<div title='Particle opacity' id='" + sid + "'" +
       " class='" + base + " wind-particle-opacity-slider'>" +

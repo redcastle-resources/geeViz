@@ -182,4 +182,4 @@ __all__ = [
     "create_proxy_app",
 ]
 
-__version__ = "2026.9.2"
+__version__ = "2026.9.3"
