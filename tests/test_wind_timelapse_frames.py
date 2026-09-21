@@ -414,3 +414,24 @@ def test_the_raster_opacity_comes_from_viz(result):
     assert result["vizOpacityLeavesParticles"] == 0.3, (
         f"viz.opacity moved the trails too — they are on their own "
         f"control and sat at {result['vizOpacityLeavesParticles']}")
+
+
+def test_the_legend_is_looked_for_under_the_frames_too(result):
+    """A time lapse's legend is filed under its FIRST FRAME's id.
+
+    The viewer builds the legend per frame and nulls ``classLegendDict``
+    on every frame but the first, so the container that actually exists
+    belongs to that frame rather than to the lapse. Searching only the
+    lapse id found nothing and returned quietly — which is exactly how
+    the lapse kept the old chip-and-caption legend while the
+    single-frame layer got the colour bar, with nothing failing.
+    """
+    ids = result["legendIdsLapse"]
+    assert ids[0] == "merged", (
+        "the lapse's own id should be tried first — it is the cheap hit "
+        "for a layer that does file its legend there")
+    assert result["legendIdsLapseHasFrames"], (
+        f"every frame id must be a candidate; got {ids}")
+    assert "tl:" not in " ".join(ids), (
+        "the group prefix leaked into an element id — no element is "
+        "named 'tl:...'")

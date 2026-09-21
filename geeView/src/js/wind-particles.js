@@ -565,6 +565,22 @@
   }
 
   /**
+   * Element-id stems the legend entry might be filed under.
+   *
+   * An ordinary layer's is its own id. A TIME LAPSE's is the FIRST
+   * FRAME's, because the viewer builds the legend per frame and nulls
+   * classLegendDict on every frame but the first — so the container
+   * that exists belongs to that frame, not to the lapse. Checking only
+   * the lapse id found nothing and returned quietly, which left the
+   * lapse on the old chip-and-caption legend while the single-frame
+   * layer got the colour bar.
+   */
+  function legendContainerIds(st) {
+    var bare = st.id.indexOf("tl:") === 0 ? st.id.slice(3) : st.id;
+    return [bare].concat(Object.keys(st.frames || {}));
+  }
+
+  /**
    * Rebuild the legend entry as a COLOUR BAR.
    *
    * The viewer has native markup for a continuous ramp -- title, a
@@ -586,7 +602,22 @@
     if (!$ || st.legendStyled || !st.cfg.speedRaster) return;
     var id = st.id.indexOf("tl:") === 0 ? st.id.slice(3) : st.id;
     injectSliderStyle();
-    var li = $("#" + id + "-class-container").find("li").first();
+
+    // Where the legend entry actually lives.
+    //
+    // For an ordinary layer the container is "<layerId>-class-container".
+    // For a TIME LAPSE it is keyed on the FIRST FRAME's id, not the
+    // lapse's -- the viewer builds the legend per frame and nulls
+    // classLegendDict on every frame but the first, so the container
+    // that exists belongs to that frame. Looking only under the lapse
+    // id found nothing and returned quietly, which is why the lapse
+    // kept the old chip-and-caption legend while the single-frame
+    // layer got the colour bar.
+    var li = $();
+    var candidates = legendContainerIds(st);
+    for (var i = 0; i < candidates.length && !li.length; i++) {
+      li = $("#" + candidates[i] + "-class-container").find("li").first();
+    }
     if (!li.length) return;                    // panel not built yet
 
     var lo = st.cfg.rampMin, hi = st.cfg.rampMax, unit = st.cfg.units || "";
@@ -2199,6 +2230,7 @@
     // particles move, which they do whether or not the frame ever
     // advances. That is precisely the bug this pair exists to catch.
     _adopted: adopted,
+    _legendContainerIds: legendContainerIds,
     _refreshRunState: function () { return refreshRunState(); },
     // The tile fetch and the frame warmer. Their in-flight bookkeeping
     // is what buildField reads to decide a field is finished, and it is

@@ -409,6 +409,22 @@ out.plainAfterShow = pst.running;
   out.paintResumedAfterBackoff = mst.paintAgainAt > armedAt;
 }
 
+// ---- where the legend entry is filed --------------------------------
+// The viewer builds a lapse's legend under the FIRST FRAME's id, not
+// the lapse's, because it nulls classLegendDict on every frame but the
+// first. Looking only under the lapse id found nothing and returned
+// quietly, so the lapse kept the old chip legend while the single-frame
+// layer got the colour bar.
+{
+  const lst = W._adopted["tl:merged"];
+  out.legendIdsLapse = W._legendContainerIds(lst);
+  out.legendIdsLapseHasFrames =
+    Object.keys(lst.frames).every((f) => out.legendIdsLapse.indexOf(f) > -1);
+  out.legendIdsLapseFirst = out.legendIdsLapse[0];
+  const pst3 = W._adopted["plain"];
+  out.legendIdsPlain = pst3 ? W._legendContainerIds(pst3) : null;
+}
+
 // ---- the raster's opacity comes from viz.opacity --------------------
 // geeViz sets layer.opacity from viz.opacity, so a merged layer added
 // with {opacity: 0.6} must start its raster at 0.6, and one added
