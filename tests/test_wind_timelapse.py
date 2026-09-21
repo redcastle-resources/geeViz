@@ -261,6 +261,17 @@ def test_the_legend_is_one_entry(lapse):
     assert swatch.count("linear-gradient") >= 2, (
         "the swatch is not the comet over the ramp — one of the two "
         "halves of the layer has nothing in the key")
+    # Counting gradients is not enough, and this is how the legend
+    # shipped BLANK: speed_viz["palette"] is a comma STRING, iterating
+    # it yields single characters, _rgb_of reads each as an invalid hex
+    # and answers white -- so the swatch was a white box that still
+    # contained two perfectly good linear-gradients. Assert on COLOR.
+    import re
+    stops = re.findall(r"rgba\((\d+),(\d+),(\d+),", swatch)
+    assert stops, f"the swatch has no rgba stops at all: {swatch[:120]}"
+    assert any(s != ("255", "255", "255") for s in stops), (
+        "every stop in the swatch is white — the palette was iterated "
+        "as a string and each character read as an invalid hex")
     assert "width:" in swatch, (
         "the entry stands in for a color bar, so it needs a bar's width "
         "rather than a chip's")

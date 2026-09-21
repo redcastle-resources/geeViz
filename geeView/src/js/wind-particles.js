@@ -165,6 +165,7 @@
 
   // One <style> for the two opacity sliders; see injectSliderStyle.
   var styleInjected = false;
+  var STYLE_ID = "geeviz-wind-particles-style";
 
   /**
    * The tile-URL builder on a google.maps.ImageMapType.
@@ -564,6 +565,53 @@
   }
 
   /**
+   * Rebuild the legend entry as a COLOUR BAR.
+   *
+   * The viewer has native markup for a continuous ramp -- title, a
+   * full-width bar, and the two end values underneath -- but it is only
+   * reachable by handing it ``min``/``max``/``palette``, and those go
+   * to ``getMapId``. This layer's image is already ``visualize``d, so a
+   * palette there is an Earth Engine error, not a legend.
+   *
+   * So the entry arrives through the class-legend path instead, which
+   * renders a small chip with the label beside it. For a class that is
+   * right; for a continuous stretch it is not -- a 132 px chip captioned
+   * "Wind speed 0-34 mi/hr" does not tell you which end is 34. This
+   * reshapes that one entry into the bar-plus-endpoints layout, keeping
+   * the swatch the server built (the comet over the ramp, which is what
+   * the map actually shows) as the bar's background.
+   */
+  function restyleLegend(st) {
+    var $ = global.$;
+    if (!$ || st.legendStyled || !st.cfg.speedRaster) return;
+    var id = st.id.indexOf("tl:") === 0 ? st.id.slice(3) : st.id;
+    injectSliderStyle();
+    var li = $("#" + id + "-class-container").find("li").first();
+    if (!li.length) return;                    // panel not built yet
+
+    var span = li.find("span").first();
+    if (!span.length) return;
+    var bg = span.attr("style") || "";
+    var m = /background:([\s\S]*?)(?:;\s*width|$)/.exec(bg);
+    var swatch = m ? m[1] : "";
+    if (!swatch) return;
+
+    var lo = st.cfg.rampMin, hi = st.cfg.rampMax, unit = st.cfg.units || "";
+    if (lo === undefined || hi === undefined) return;
+
+    st.legendStyled = true;
+    li.empty();
+    li.append($("<div>").addClass("wind-legend-ramp")
+        .attr("style", "background:" + swatch));
+    // <i>, not <span>. The class-legend CSS styles `li span` as the
+    // swatch chip -- bordered, fixed width -- so numbers put in spans
+    // came out as two little boxes instead of as labels.
+    li.append($("<div>").addClass("wind-legend-ends")
+        .append($("<i>").text(String(lo)))
+        .append($("<i>").text(String(hi) + (unit ? " " + unit : ""))));
+  }
+
+  /**
    * Point the inspector at real weather, not at the encoding.
    *
    * The merged layer draws u/v bytes. Clicking it would report those
@@ -624,30 +672,55 @@
    * the raster, white for the trails.
    */
   function injectSliderStyle() {
-    if (styleInjected || !global.document) return;
+    if (!global.document) return;
+    // Keyed on the ELEMENT, not on a module-level flag. The flag is
+    // reset by a fresh copy of this module while the old <style> is
+    // still in the document, and the reverse -- a stale stylesheet
+    // with none of the new rules -- is worse than a duplicate.
+    if (document.getElementById(STYLE_ID)) return;
     styleInjected = true;
     var css =
-      // Tinted to what each one governs: the speed ramp's own colors
-      // for the raster, white for the trails. Two identical tracks
-      // side by side give no clue which fades what.
+      // The stock track is 3 PX TALL. One of those is a hairline you
+      // can just about grab; two side by side are indistinguishable
+      // from each other and from a rendering fault, which is what the
+      // first version shipped as. Give them enough height that the
+      // tint below actually reads as a tint.
+      ".wind-speed-opacity-slider,.wind-particle-opacity-slider" +
+      "{height:7px !important;border-radius:3px !important;" +
+      "border:1px solid rgba(0,0,0,.35) !important;}" +
+      // Tinted to what each governs: the speed ramp's own colors for
+      // the raster, white for the trails. Two identical tracks give no
+      // clue which fades what.
       ".wind-speed-opacity-slider{background:linear-gradient(90deg," +
-      "#3d6ea3,#4ca44c,#d7d64a,#c4622d,#8a2f4a) !important;" +
-      "border:none !important;}" +
+      "#3d6ea3,#4ca44c,#d7d64a,#c4622d,#8a2f4a) !important;}" +
       ".wind-particle-opacity-slider{background:linear-gradient(90deg," +
-      "rgba(255,255,255,.18),rgba(255,255,255,.95)) !important;" +
-      "border:none !important;}" +
+      "rgba(255,255,255,.2),rgba(255,255,255,.95)) !important;}" +
       // Separation, and it differs by host. An ordinary layer's
       // controls sit on ONE line, so the pair needs a gap between
       // them; a time lapse's stack, so the pair needs a gap above.
-      // Without either they read as one broken control.
       ".simple-layer-opacity-range.wind-particle-opacity-slider" +
-      "{margin-left:7px !important;}" +
+      "{margin-left:8px !important;}" +
       ".simple-time-lapse-layer-range-first.wind-particle-opacity-slider" +
-      "{margin-top:4px !important;}" +
+      "{margin-top:5px !important;}" +
+      // The handle has to clear a 7px track without swallowing it.
       ".wind-particle-opacity-slider .ui-slider-handle," +
-      ".wind-speed-opacity-slider .ui-slider-handle{cursor:ew-resize;}";
+      ".wind-speed-opacity-slider .ui-slider-handle" +
+      "{cursor:ew-resize;height:13px !important;margin-top:-4px;}" +
+      // ---- the legend entry, rebuilt as a colour bar ----------------
+      // A CONCRETE width, not 100%. ul.legend-labels is float:left and
+      // therefore shrink-to-fit, so a percentage resolves against
+      // whatever the content already happens to be -- which collapsed
+      // the bar to 42px and ran the two end labels together. The
+      // original chip worked only because it carried a fixed 132px.
+      ".wind-legend-ramp{display:block !important;width:150px !important;" +
+      "height:13px !important;border:1px solid #968b83;" +
+      "border-radius:2px;}" +
+      ".wind-legend-ends{display:flex;justify-content:space-between;" +
+      "width:150px;font-size:11px;opacity:.85;margin-top:1px;}" +
+      ".wind-legend-ends i{font-style:normal;}";
     try {
       var el = document.createElement("style");
+      el.id = STYLE_ID;
       el.type = "text/css";
       el.appendChild(document.createTextNode(css));
       (document.head || document.documentElement).appendChild(el);
@@ -673,10 +746,10 @@
     }
     if (!host.length || typeof host.slider !== "function") return;
 
+    injectSliderStyle();
+
     var sid = id + "-particle-opacity-slider";
     if ($("#" + sid).length) { st.sliderAdded = true; return; }
-
-    injectSliderStyle();
 
     // Strip jQuery UI's own classes off the copy: they are applied by
     // .slider() below, and carrying them into fresh markup leaves an
@@ -1663,6 +1736,7 @@
       }
       if (st.cfg.speedRaster && !st.sliderAdded) addParticleSlider(st);
       if (st.cfg.speedRaster && !st.queryRetargeted) retargetQuery(st);
+      if (st.cfg.speedRaster && !st.legendStyled) restyleLegend(st);
       setCanvasAlpha(st.speedCanvas, st.cfg.speedOpacity);
       setCanvasAlpha(st.canvas, st.cfg.speedRaster
           ? st.particleDim
@@ -1873,6 +1947,10 @@
       // 1 m/s advection floor that must not reach the colors.
       rampMinMs: v.windRampMinMs !== undefined ? v.windRampMinMs : 0,
       rampMaxMs: v.windRampMaxMs !== undefined ? v.windRampMaxMs : 40,
+      // ...and the same stretch in display units, for the legend ends.
+      rampMin: v.windRampMin,
+      rampMax: v.windRampMax,
+      units: v.windUnits || "",
       // Its own alpha, independent of the particles'. Driven by the
       // lapse's existing opacity slider; the particles get their own.
       speedOpacity: 1,
@@ -1941,6 +2019,7 @@
         // 0..1 from the injected particle-opacity slider. 1 until the
         // user touches it, so the layer looks exactly as configured.
         particleDim: 1, sliderAdded: false, queryRetargeted: false,
+        legendStyled: false,
         speedCanvas: null, speedCtx: null, speedKey: null, rampLut: null,
         paintAgainAt: 0,
         fieldSpacing: FIELD_SPACING, fieldKey: null, fieldAny: false,
@@ -1957,7 +2036,9 @@
       // else would, and the spinner would spin on an idle layer.
       reportProgress(st);
       bindOnce();
-      if (st.cfg.speedRaster) { addParticleSlider(st); retargetQuery(st); }
+      if (st.cfg.speedRaster) {
+        addParticleSlider(st); retargetQuery(st); restyleLegend(st);
+      }
       refreshRunState();
     }
   }

@@ -1117,7 +1117,15 @@ Underneath it sits the layer's own SPEED RAMP, at low opacity. That
     # stylesheet change in a bundle shared with every other viewer.
     tail = "; width: 132px; height: 13px; vertical-align: middle" if wide else ""
 
-    pal = [c for c in (palette or []) if c]
+    # Accept either shape. `speed_viz["palette"]` is a COMMA STRING --
+    # that is what Earth Engine's viz wants -- while windSpeedPalette is
+    # a list. Iterating the string yields single CHARACTERS, each of
+    # which _rgb_of reads as an invalid hex and answers white for, so
+    # the swatch came out blank with no error anywhere. Splitting first
+    # makes the caller's choice stop mattering.
+    if isinstance(palette, str):
+        palette = palette.split(",")
+    pal = [c for c in (palette or []) if str(c).strip()]
     if len(pal) < 2:
         return f"{comet}, #24303a{tail}"
 
@@ -1684,6 +1692,13 @@ def _wind_vizzes(viz):
         "windRampMaxMs": vmax_ms,
         "windSpeedPalette": palette,
 
+        # The same stretch in DISPLAY units, for the legend's end
+        # labels. The m/s pair above is what the renderer clamps with;
+        # these are what a reader sees, and deriving one from the other
+        # in the client would mean shipping the unit conversion twice.
+        "windRampMin": vmin,
+        "windRampMax": vmax,
+
         # ---- lifetime ------------------------------------------
         # Each particle draws its own lifetime from
         # [particleMinAge, particleMaxAge], so short, medium and long
@@ -1902,7 +1917,9 @@ def _merged_viz(viz, speed_viz, particle_viz, query_obj, date_format=None):
             particle_viz["particleTaper"],
             particle_viz["particleHeadBoost"],
             particle_viz["particleMaxWidth"],
-            palette=speed_viz["palette"],
+            # The LIST, not speed_viz["palette"] -- that one is the
+            # comma string Earth Engine's viz takes.
+            palette=particle_viz["windSpeedPalette"],
             ramp_opacity=1.0,
             wide=True,
         )
