@@ -1810,18 +1810,37 @@ def test_the_canvas_is_restacked_when_layers_are_reordered():
 
 
 def test_the_canvas_stays_in_the_tile_overlay_pane():
-    """``overlayLayer``, not ``mapPane``.
+    """``mapPane``, not ``overlayLayer``.
 
-    mapPane is below the tile overlays entirely, which would bury the
-    particles under every raster no matter what the list says -- the
-    opposite error, equally wrong. Sharing overlayLayer is what makes
-    the ordering a z-index question at all.
+    This test used to assert the opposite, on the stated grounds that
+    "mapPane is below the tile overlays entirely". Measured in a browser,
+    with a wind layer and the satellite Labels overlay on one map, that
+    is backwards: ``map.overlayMapTypes`` render as containers INSIDE
+    mapPane, stacked with small z-indexes, and the OverlayView panes sit
+    above all of them --
+
+        mapPane      100   <- every tile layer lives in here
+        overlayLayer 101   <- where the canvases used to go
+        overlayShadow 102, markerLayer 103, ...
+
+    -- so a canvas in overlayLayer was above every raster no matter what
+    the layer list said, and the z-index ``applyStacking`` maintains
+    ordered the two wind canvases against each other and nothing else.
+    The visible symptom was the satellite labels, which
+    ``addLabelOverlay`` deliberately parks at the top index so place
+    names stay readable, sitting under the wind.
+
+    Kept as a source check because it is cheap and names the pane
+    exactly; ``test_wind_pane_stacking.py`` is the behavioral one, and
+    it reports which pane the canvases were actually appended to.
     """
     src = _strip_js_comments(JS.read_text(encoding="utf-8"))
-    assert "getPanes().overlayLayer" in src, (
-        "the canvas moved out of the tile-overlay pane; z-index can no "
-        "longer order it against the rasters")
-    assert "getPanes().mapPane" not in src
+    assert "getPanes().mapPane" in src, (
+        "the canvas left the pane the tile layers are in; z-index can no "
+        "longer order it against them")
+    assert "getPanes().overlayLayer" not in src, (
+        "a canvas is still going to overlayLayer, which floats it above "
+        "every tile layer including the labels overlay")
 
 
 # ---------------------------------------------------------------------------

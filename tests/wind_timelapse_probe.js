@@ -118,7 +118,12 @@ sandbox.google = {
     },
     OverlayView: function () {
       this.setMap = function () {};
-      this.getPanes = () => ({ overlayLayer: { appendChild() {} } });
+      // mapPane is the one that matters: it is where
+      // map.overlayMapTypes render, so it is the pane the canvases
+      // are appended to. overlayLayer is kept here only so a stub
+      // that still names it does not read as the right answer.
+      this.getPanes = () => ({ mapPane: { appendChild() {} },
+                               overlayLayer: { appendChild() {} } });
       this.getProjection = () => null;
     },
   },

@@ -691,6 +691,29 @@
   }
 
   /**
+   * The ``r, g, b`` of a computed background-color, alpha discarded.
+   *
+   * Browsers report this as ``rgb(a, b, c)`` or ``rgba(a, b, c, d)``;
+   * anything else (a named color, or an empty string on a control the
+   * theme has not painted) falls back to the viewer's own track color
+   * rather than to nothing, since nothing renders as jQuery UI's
+   * default grey and looks broken next to the control above it.
+   */
+  function rgbOfTrack(css) {
+    var m = /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(String(css || ""));
+    return m ? m[1] + "," + m[2] + "," + m[3] : "55,46,44";
+  }
+
+  /** Paint a slider track at one alpha, the way the viewer paints its
+   *  own. ``!important`` because the class carries a flat background. */
+  function setTrackAlpha(id, rgb, alpha) {
+    var el = global.document && global.document.getElementById(id);
+    if (!el) return;
+    el.style.setProperty("background-color",
+                         "rgba(" + rgb + "," + alpha + ")", "important");
+  }
+
+  /**
    * Where the particle dimmer starts, from the viz.
    *
    * ``windParticleDim`` is geeViz.weather's master ``opacity``, sent
@@ -875,10 +898,14 @@
     // The viewer paints its own slider's track with an INLINE
     // background-color, so a copy that inherits only the class comes
     // out in jQuery UI's default grey and does not match the control
-    // directly above it. Take the colour from the host rather than
+    // directly above it. Take the color from the host rather than
     // hard-coding one, so it follows the tenant's theme.
-    var trackBg = host.css("background-color");
-    if (trackBg) $("#" + sid).css("background-color", trackBg);
+    //
+    // And take only the RGB: the host's ALPHA is the speed raster's
+    // opacity, which is a different number from the particles' whenever
+    // windSpeedOpacity is set. setTrackAlpha supplies ours.
+    var trackRgb = rgbOfTrack(host.css("background-color"));
+    setTrackAlpha(sid, trackRgb, st.particleDim);
 
     try {
       $("#" + sid).slider({
@@ -891,6 +918,12 @@
         },
         slide: function (e, ui) {
           st.particleDim = ui.value;
+          // The viewer fades its own track as you drag it
+          // (setRangeSliderThumbOpacity), so a copy that does not
+          // is visibly the odd one out in a panel of controls that
+          // all do -- and on a wind layer the two sit one above the
+          // other, which is the worst place to differ.
+          setTrackAlpha(sid, trackRgb, ui.value);
           refreshRunState();
         },
       });
@@ -1120,7 +1153,28 @@
     var ov = new google.maps.OverlayView();
 
     ov.onAdd = function () {
-      var pane = this.getPanes().overlayLayer;
+      // mapPane, NOT overlayLayer.
+      //
+      // `map.overlayMapTypes` -- every geeViz raster layer -- render as
+      // containers inside mapPane, stacked with small z-indexes (1, 2,
+      // ... matching their overlayMapTypes index). The OverlayView panes
+      // sit ABOVE all of that: mapPane is 100, overlayLayer 101, and
+      // everything after it higher still. Measured, in a browser, with
+      // a labels layer and a wind layer on one map.
+      //
+      // So a canvas in overlayLayer is above EVERY tile layer no matter
+      // what z-index it carries -- z-index only orders siblings inside
+      // one stacking context, and these were not siblings. The symptom
+      // was a labels layer, added on top and showing on top of
+      // everything else, that could not be got above the wind.
+      //
+      // In mapPane the canvas is a sibling of the tile containers and
+      // applyStacking's layerId z-index means what it says.
+      //
+      // mapPane "may not receive DOM events" per the Maps docs, which
+      // costs nothing here: both canvases are pointer-events:none so a
+      // query click reaches the map regardless.
+      var pane = this.getPanes().mapPane;
 
       // The speed raster, when this layer draws its own. A SECOND
       // canvas rather than painting into the particle one: frame()
@@ -1129,8 +1183,10 @@
       // a canvas would mean redrawing ~800,000 palette lookups per
       // animation frame to show a picture that did not change.
       //
-      // Appended first, so it sits under the trails at the same
-      // z-index. Same pane, so both order against the tile layers.
+      // Appended first, so it sits under the trails: the two share one
+      // z-index, and a tie among positioned siblings is broken by DOM
+      // order. Both are in the tile layers' own pane, so that single
+      // z-index is also what orders the pair against them.
       if (st.cfg.speedRaster) {
         var sc = document.createElement("canvas");
         sc.style.position = "absolute";
@@ -1719,10 +1775,15 @@
   /**
    * Put the canvas at its layer's place in the stack.
    *
-   * ``overlayLayer`` is the pane that holds "polylines, polygons,
-   * ground overlays AND TILE LAYER OVERLAYS" -- which is where
-   * ``map.overlayMapTypes`` go. The raster layers and this canvas share
-   * one pane, so a z-index orders them against each other.
+   * ``map.overlayMapTypes`` render as containers inside the ``mapPane``
+   * pane, stacked with small z-indexes matching their array index. The
+   * canvas is appended to that same pane (see ``onAdd``) precisely so
+   * this z-index orders it against them.
+   *
+   * It did not used to be. The canvas lived in ``overlayLayer``, a pane
+   * ABOVE mapPane, so this number ordered the two wind canvases against
+   * each other and nothing else -- no tile layer could be brought above
+   * the wind, whatever the layer list said.
    *
    * ``layerId`` is the index the viewer passes to
    * ``overlayMapTypes.setAt``, so matching it puts the particles in the
@@ -2270,6 +2331,15 @@
     // particles move, which they do whether or not the frame ever
     // advances. That is precisely the bug this pair exists to catch.
     _adopted: adopted,
+    // The second opacity slider, and the two helpers that keep its
+    // track looking like every other track in the panel. Exercised
+    // rather than described: the viewer fades its own track as you drag
+    // (setRangeSliderThumbOpacity) and a copy that silently does not is
+    // invisible in the source and obvious on screen.
+    _addParticleSlider: addParticleSlider,
+    _rgbOfTrack: rgbOfTrack,
+    _setTrackAlpha: setTrackAlpha,
+    _initialDim: initialDim,
     _legendContainerIds: legendContainerIds,
     _refreshRunState: function () { return refreshRunState(); },
     // The tile fetch and the frame warmer. Their in-flight bookkeeping
