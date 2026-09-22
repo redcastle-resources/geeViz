@@ -747,18 +747,33 @@
       ".wind-two-sliders .wind-speed-opacity-slider," +
       ".wind-two-sliders .wind-particle-opacity-slider" +
       "{clear:right !important;margin-left:0 !important;}" +
-      // The gap goes on the LOWER one -- the raster's, now that the
-      // particle control sits above it. The upper keeps the stock top
-      // margin that clears the row.
+      // rem, NOT px -- this panel is sized in rem and the viewer's root
+      // font-size moves with the viewport (12px narrow, 16px wide). The
+      // first cut of these three numbers was measured at a 12px root and
+      // written down in px, so on a wide window everything around them
+      // grew a third and they did not: the gap stayed 9px between two
+      // sliders that were now 3.19px tall instead of 2.39, and the row
+      // stayed 38px holding content that wanted 51. That reads as a
+      // pinched, crowded pair, and it only shows up at one end of the
+      // range -- which is why it survived being looked at.
+      //
+      // The gap goes on the UPPER one, the particle control, as a bottom
+      // margin: `clear:right` makes the lower float clear the upper
+      // float's MARGIN edge, so one declaration owns the spacing instead
+      // of two fighting over it.
       ".wind-two-sliders .wind-speed-opacity-slider" +
-      "{margin-top:9px !important;}" +
+      "{margin-top:0 !important;}" +
+      ".wind-two-sliders .wind-particle-opacity-slider" +
+      "{margin-bottom:1rem !important;}" +
       // Floats do not grow their parent, so the row is given the height
       // the second slider needs -- without it that slider overflows the
-      // entry and lands on the layer below.
-      "li.wind-two-sliders{min-height:38px;}" +
+      // entry and lands on the layer below. 3.2rem is 38.4px at a 12px
+      // root (what shipped) and 51.2px at 16px (what the row actually
+      // needs there).
+      "li.wind-two-sliders{min-height:3.2rem;}" +
       // A time lapse's controls already stack; it only needs the gap.
       ".simple-time-lapse-layer-range-first.wind-particle-opacity-slider" +
-      "{margin-top:6px !important;}" +
+      "{margin-top:0.5rem !important;}" +
       // ---- the legend entry, rebuilt as a colour bar ----------------
       // A CONCRETE width, not 100%. ul.legend-labels is float:left and
       // therefore shrink-to-fit, so a percentage resolves against
