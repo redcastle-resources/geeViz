@@ -1025,11 +1025,27 @@ Layer `viz` keys: `units` (`km/hr` default, `m/s`, `mi/hr`, `kt`), `min`/`max`
 raster one flat colour), `palette` (defaults to `wx.WIND_PALETTE`),
 `directionConvention` (`"from"` default, meteorological — 270 is a westerly).
 
+**Opacity.** A wind layer draws two things, so it has two dimmers.
+`opacity` (1) is the master and sets where BOTH start —
+`{'opacity': 0.8}` gives a speed field and a flow each at 0.8.
+`windSpeedOpacity` overrides it for the speed raster alone, the
+counterpart to `particleOpacity`: one number per thing drawn.
+
+```python
+Map.addWindLayer(img, {'opacity': 0.8}, 'dimmed')
+Map.addWindLayer(img, {'opacity': 0.8, 'windSpeedOpacity': 0.3},
+                 'faint field, bright trails')
+```
+
+Fractions in `[0, 1]`, not percentages — `80` raises rather than quietly
+meaning 1. Grouped, each lands on one of the two opacity sliders in the
+layer panel; they only say where the sliders start.
+
 Particle `viz` keys — all optional, all with sensible defaults:
 
 | group | keys (default) |
 |---|---|
-| color | `particleColor` (`#fff`), `particleOpacity` (0.9) |
+| color | `particleColor` (`#fff`), `particleOpacity` (0.9) — alpha at the trail HEAD, a look rather than a dimmer; to fade the whole flow use `opacity` |
 | width | `particleStrokeWeight` (1.1), `particleMinWidth` (0.5px), `particleMaxWidth` (1.65px) |
 | shape | `particleTrailLength` (13), `particleTaper` (2.1), `particleHeadBoost` (1.6), `particleLineCap` (`round`) |
 | speed | `particleSpeed` (0.5 px/frame per m/s at the equator — zoom does not enter into it). The ONLY speed knob: the apparent-speed floor and ceiling are `min`/`max` converted to m/s, so streaks start and stop growing where the colour ramp does. A `min` of 0 becomes 1 m/s, or a light breeze draws a one-pixel dot |

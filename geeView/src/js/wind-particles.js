@@ -691,6 +691,23 @@
   }
 
   /**
+   * Where the particle dimmer starts, from the viz.
+   *
+   * ``windParticleDim`` is geeViz.weather's master ``opacity``, sent
+   * under its own name because the viewer has already claimed
+   * ``opacity`` for the raster's slider on a grouped layer. Falling
+   * back to ``opacity`` keeps a hand-built viz -- one that sets
+   * ``windParticles`` directly rather than going through
+   * ``addWindLayer`` -- behaving the obvious way.
+   */
+  function initialDim(v) {
+    var d = v && typeof v.windParticleDim === "number"
+        ? v.windParticleDim
+        : (v && typeof v.opacity === "number" ? v.opacity : 1);
+    return Math.min(1, Math.max(0, d));
+  }
+
+  /**
    * A second opacity slider, for the particles alone.
    *
    * The viewer gives a time lapse ONE opacity slider, and on a merged
@@ -865,7 +882,10 @@
 
     try {
       $("#" + sid).slider({
-        min: 0, max: 1, step: 0.05, value: 1,
+        // Starts where the particles actually are, not at 1. A handle
+        // parked at full while the flow renders at 0.8 is a control
+        // lying about the thing it controls.
+        min: 0, max: 1, step: 0.05, value: st.particleDim,
         create: function () {
           $("#" + sid + "-handle").text("");
         },
@@ -2157,9 +2177,14 @@
         // for builds that came out incomplete. See buildField.
         fieldB: null, fieldOkB: null, fieldBW: 0, fieldBH: 0,
         buildAgainAt: 0,
-        // 0..1 from the injected particle-opacity slider. 1 until the
-        // user touches it, so the layer looks exactly as configured.
-        particleDim: 1, sliderAdded: false, queryRetargeted: false,
+        // 0..1 from the injected particle-opacity slider, starting
+        // where the viz says. The viewer has no idea this second
+        // control exists, so unlike the raster's -- which is the
+        // layer's own slider and gets `opacity` for free -- this one
+        // has to be told. It sat hard-coded at 1, which is why setting
+        // `opacity` dimmed the speed field and left the flow alone.
+        particleDim: initialDim(L.viz), sliderAdded: false,
+        queryRetargeted: false,
         legendStyled: false,
         speedCanvas: null, speedCtx: null, speedKey: null, rampLut: null,
         paintAgainAt: 0,

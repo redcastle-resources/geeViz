@@ -2697,7 +2697,18 @@ class mapper:
                 * ``particleCount``, ``particleSpeedFactor``,
                   ``particleMaxAge``, ``particleTrailPersistence``,
                   ``particleLineWidth``, ``particleOpacity``: animation
-                  feel.
+                  feel. ``particleOpacity`` is the alpha at the trail
+                  HEAD — a look, not a dimmer; to fade the whole flow
+                  use ``opacity``.
+                * ``opacity`` (1): the master. A wind layer draws two
+                  things, and this sets where BOTH dimmers start, so
+                  ``{"opacity": 0.8}`` gives a speed field and a flow
+                  each at 0.8.
+                * ``windSpeedOpacity``: the speed raster alone,
+                  overriding ``opacity`` there. The counterpart to
+                  ``particleOpacity`` — one number per thing drawn.
+                  Both are fractions in [0, 1]; ``80`` raises rather
+                  than quietly meaning 1.
                 * ``directionConvention`` (str): ``"from"`` (default,
                   meteorological — 270 is a westerly) or ``"to"``.
             name (str): Layer name. Ungrouped, the two layers are

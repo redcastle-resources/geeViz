@@ -1498,6 +1498,27 @@ def windTiles(image, viz=None):
                          min=WIND_TILE_MIN_MS, max=WIND_TILE_MAX_MS)
 
 
+def _clamp01(value, name):
+    """An opacity, as a float in [0, 1].
+
+    Out-of-range is worth catching rather than clamping silently: 0-100
+    is the other convention people arrive with, and ``opacity=80`` would
+    otherwise pin to 1 and look exactly like the bug this whole change
+    fixes -- a value that was set and did nothing.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{name} must be a number between 0 and 1, got {value!r}")
+    if not 0.0 <= v <= 1.0:
+        raise ValueError(
+            f"{name} must be between 0 and 1, got {v!r}"
+            + (" (opacities here are fractions, not percentages)"
+               if v > 1 else ""))
+    return v
+
+
 def _wind_vizzes(viz):
     """The two viz dicts ``addWindLayer`` and ``addWindTimeLapse`` share.
 
@@ -1557,12 +1578,33 @@ def _wind_vizzes(viz):
         palette = [c.strip() for c in palette.split(",")]
     pal_csv = ",".join(c.lstrip("#") for c in palette)
 
+    # ---- opacity -------------------------------------------------------
+    # A wind layer draws TWO things, so a single number has to say which
+    # one it means. ``opacity`` is the master and means both: it is where
+    # each of the two dimmers starts, so ``opacity=0.8`` shows a speed
+    # field and a flow that are each at 0.8, which is what anyone setting
+    # it on an ordinary layer would expect.
+    #
+    # Neither of these dicts used to carry ``opacity`` at all, so a
+    # caller's value was dropped on the floor here and the viewer
+    # defaulted both to 1 -- setting it appeared to do nothing whatsoever.
+    #
+    # ``windSpeedOpacity`` overrides it for the raster alone, and is the
+    # counterpart to ``particleOpacity``: one per thing drawn.
+    #
+    # Clamped, because the canvas alpha and the slider both live in
+    # [0, 1] and an out-of-range value silently pins to an end rather
+    # than reporting itself.
+    master_opacity = _clamp01(viz.get("opacity", 1), "opacity")
+    speed_opacity = _clamp01(viz.get("windSpeedOpacity", master_opacity),
+                             "windSpeedOpacity")
 
     speed_viz = {
         "layerType": "geeImage",
         "bands": "speed",
         "min": vmin, "max": vmax,
         "palette": pal_csv,
+        "opacity": speed_opacity,
         "canQuery": True,
         "addToLegend": True,
         "yLabel": "Wind speed (" + units + ")",
@@ -1581,6 +1623,9 @@ def _wind_vizzes(viz):
         "windTileMin": WIND_TILE_MIN_MS,
         "windTileMax": WIND_TILE_MAX_MS,
         "windUnits": units,
+        # The master, not ``speed_opacity``. Ungrouped, this IS the
+        # particle layer's own opacity slider.
+        "opacity": master_opacity,
         "canQuery": False,          # the speed raster answers clicks
         # One swatch, in the particle color.
         #
@@ -1752,7 +1797,28 @@ def addWindLayer(Map, image, viz=None, name="Wind", visible=True,
             * ``palette`` -- speed ramp. Defaults to
               :data:`WIND_PALETTE`, taken from windy.com's legend.
             * ``particleColor`` -- trail color, default ``"#fff"``.
-            * ``particleOpacity`` (0.9) -- alpha at the head.
+            * ``particleOpacity`` (0.9) -- alpha at the head. A LOOK,
+              not a dimmer: it shapes the comet together with
+              ``particleTaper`` and ``particleHeadBoost``. To fade the
+              whole flow, use ``opacity``.
+
+            **Opacity.** A wind layer draws two things, so it has two
+            dimmers -- and ``opacity`` (1) is the master that sets where
+            both of them start, so ``{"opacity": 0.8}`` gives a speed
+            field and a flow that are each at 0.8.
+            ``windSpeedOpacity`` overrides it for the speed raster
+            alone, and is the counterpart to ``particleOpacity``: one
+            number per thing drawn::
+
+                {"opacity": 0.8}                          # both at 0.8
+                {"opacity": 0.8, "windSpeedOpacity": 0.3} # a faint
+                                                          # field under
+                                                          # bright trails
+
+            Fractions in [0, 1], not percentages -- ``80`` raises rather
+            than quietly meaning 1. Grouped, each value lands on one of
+            the two opacity sliders in the layer panel and both keep
+            working afterwards; these only say where they start.
 
             **Width.** Across the streak; LENGTH along it is
             ``particleTrailLength``. ``particleStrokeWeight`` (1.1) is
@@ -1889,6 +1955,20 @@ def _merged_viz(viz, speed_viz, particle_viz, query_obj, date_format=None):
 
     # The client draws the colored speed field from the same tiles.
     merged["windSpeedRaster"] = True
+
+    # ---- the two dimmers ------------------------------------------
+    # Grouped, there is one layer and two sliders. The viewer builds one
+    # of them from ``opacity`` and it drives the SPEED RASTER, so that is
+    # the value that goes there. The particle slider is ours, and it
+    # starts wherever the master says.
+    #
+    # Both are live controls; these only say where they start. Keeping
+    # each slider the single source of truth for its own canvas is why
+    # they are two numbers rather than one number and a multiplier -- a
+    # multiplier would put the handle at 0.8 while the thing it controls
+    # renders at 0.4.
+    merged["opacity"] = speed_viz["opacity"]
+    merged["windParticleDim"] = particle_viz["opacity"]
 
     # The click query still reads real weather. The viewer keeps the
     # queried object separate from the drawn one, so the inspector can
