@@ -157,3 +157,109 @@ def test_the_docstring_says_where_the_map_helpers_stand():
     code."""
     doc = el.__doc__ or ""
     assert "addEsri" in doc
+
+
+
+
+def _body_code(fn):
+    """A function's executable source: no comments, NO DOCSTRING.
+
+    The docstrings here describe the REST work in the very words these
+    assertions look for -- "returnCountOnly=true pre-flight",
+    "/tile/{z}/{y}/{x}". Stripping only ``#`` lines leaves them, and
+    the first version of these tests failed against correct code for
+    exactly that reason. Comments are stripped too, per the standing
+    hazard in this repo: source-grepping tests have repeatedly matched
+    their own explanation and passed vacuously.
+    """
+    import ast, textwrap
+    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+    fn_node = tree.body[0]
+    body = fn_node.body
+    if (body and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)):
+        body = body[1:]
+    return chr(10).join(ast.unparse(n) for n in body)
+
+# ── the shim is a patch over georest, not a fork of it ────────────────
+#
+# Everything below pins the second half of the migration: esriLib keeps
+# only what is geeViz's (a Map to add layers to, an SSRF policy) and
+# hands every REST and parsing concern to georest. Each of these was a
+# byte-identical copy before, which is the shape that gets a fix in one
+# place and not the other.
+
+
+@pytest.mark.parametrize("name,target", [
+    ("_resolve_portal", "_resolve_portal"),
+    ("_detect_service_type", "_detect_service_type"),
+    ("_resolve_url", "_resolve_url"),
+])
+def test_the_private_helpers_delegate_too(name, target):
+    src = inspect.getsource(getattr(el, name))
+    code = "\n".join(ln for ln in src.splitlines()
+                     if not ln.strip().startswith("#"))
+    assert "georest" in code, f"{name} still has its own copy"
+    assert f"_gp.{target}(" in code
+
+
+def test_portals_is_georests_dict_not_a_copy():
+    """It is documented as editable at runtime, and the lookup now
+    happens inside georest. A copy would accept
+    ``esriLib.PORTALS['x'] = ...`` and then ignore it -- the worst kind
+    of wrong, because the assignment appears to work."""
+    from georest.restesri import portal
+    assert el.PORTALS is portal.PORTALS
+
+    el.PORTALS["__probe__"] = "https://probe.example"
+    try:
+        assert el._resolve_portal("__probe__") == "https://probe.example", (
+            "a portal added through esriLib is not seen by the resolver")
+    finally:
+        el.PORTALS.pop("__probe__", None)
+
+
+def test_the_feature_query_is_georests():
+    """The count pre-flight, the spatial filter, the overflow guard and
+    the GeoJSON fetch were ~70 lines here and are one call now."""
+    code = _body_code(el.addEsriFeatureService)
+    assert "_gs.queryFeatureService(" in code
+    assert "returnCountOnly" not in code, "the pre-flight was rebuilt here"
+    assert "urlopen" not in code
+
+
+def test_the_tile_template_is_georests():
+    code = _body_code(el.addEsriImageService)
+    assert "_gs.getImageServiceTileUrl(" in code
+    assert "/tile/{z}" not in code, "the template was rebuilt here"
+
+
+def test_the_ssrf_guard_survives_delegation():
+    """geeViz's policy, not georest's -- and it used to be reached only
+    through _fetch_json. Calling georest directly skips that path, so
+    the guard has to be applied at the new boundary, or delegation
+    quietly removes a security check.
+
+    Asserted on the EXCEPTION, not on "nothing hit the network": this
+    function imports geeViz.geeView, which legitimately talks to the
+    local Earth Engine proxy. A first draft patched urlopen and counted
+    calls, and caught that traffic instead -- a test that fails on
+    correct code for a reason that has nothing to do with SSRF.
+    """
+    from geeViz._ssrf import BlockedAddressError
+
+    for blocked in ("http://169.254.169.254/FeatureServer/0",
+                    "http://127.0.0.1/FeatureServer/0",
+                    "http://[::1]/FeatureServer/0"):
+        with pytest.raises(BlockedAddressError):
+            el.addEsriFeatureService(blocked)
+
+
+def test_the_guard_runs_before_georest_is_called():
+    """Order matters: georest has no SSRF policy, so the check has to
+    happen on this side of the call rather than inside it."""
+    code = _body_code(el.addEsriFeatureService)
+    assert "_check_url" in code, "the SSRF guard is gone from this path"
+    assert code.index("_check_url") < code.index("_gs.queryFeatureService"), (
+        "the request is built before the address is checked")

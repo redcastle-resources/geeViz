@@ -312,6 +312,15 @@ class TestSearchPortalParsing(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestDetectServiceType(unittest.TestCase):
+    """The metadata fallback is patched on GEOREST, not on esriLib.
+
+    ``_detect_service_type`` delegates now, so the metadata fetch it
+    falls back to happens inside georest. Patching the esriLib name
+    leaves the real fetch in place: it fails against example.com and
+    the function returns "Unknown" -- a test that looks like a
+    detection bug and is really a patch aimed at the wrong module.
+    """
+
     def test_imageserver_url(self):
         self.assertEqual(
             el._detect_service_type("https://example.com/rest/services/NAIP/ImageServer"),
@@ -340,19 +349,19 @@ class TestDetectServiceType(unittest.TestCase):
     def test_unknown_returns_unknown_without_metadata(self):
         # When URL has no recognizable segment AND metadata fetch fails, should
         # return "Unknown" without raising
-        with patch("geeViz.esriLib.getServiceMetadata", side_effect=Exception("no network")):
+        with patch("georest.restesri.portal.getServiceMetadata", side_effect=Exception("no network")):
             result = el._detect_service_type("https://example.com/some/other/endpoint")
         self.assertEqual(result, "Unknown")
 
     def test_fields_key_in_meta_implies_featureserver(self):
         meta = {"fields": [{"name": "OBJECTID"}]}
-        with patch("geeViz.esriLib.getServiceMetadata", return_value=meta):
+        with patch("georest.restesri.portal.getServiceMetadata", return_value=meta):
             result = el._detect_service_type("https://example.com/other")
         self.assertEqual(result, "FeatureServer")
 
     def test_bandcount_in_meta_implies_imageserver(self):
         meta = {"bandCount": 4, "pixelType": "U8"}
-        with patch("geeViz.esriLib.getServiceMetadata", return_value=meta):
+        with patch("georest.restesri.portal.getServiceMetadata", return_value=meta):
             result = el._detect_service_type("https://example.com/other")
         self.assertEqual(result, "ImageServer")
 
@@ -523,13 +532,25 @@ class TestAddEsriFeatureService(unittest.TestCase):
         self.assertIn("max_features=1,000", msg)
         self.assertIn("where", msg)  # remediation hint
 
-    def test_overflow_message_mentions_chunk_size(self):
+    def test_overflow_message_is_actionable(self):
+        """It used to promise ``chunk_size=`` "(future extension)".
+
+        No such parameter was ever implemented -- not in esriLib, not in
+        georest -- so the remediation named a way out that did not
+        exist. The message comes from georest now that the query is
+        delegated, and it advertises only the two things that actually
+        work: raise the cap, or filter server-side.
+        """
         with patch("urllib.request.urlopen",
                    side_effect=_mock_feature_urlopen({"count": 9999}, _SAMPLE_GEOJSON)):
             with self.assertRaises(ValueError) as ctx:
                 el.addEsriFeatureService("https://example.com/FeatureServer/0",
                                          max_features=500)
-        self.assertIn("chunk_size", str(ctx.exception))
+        msg = str(ctx.exception)
+        self.assertIn("9,999", msg)          # what it found
+        self.assertIn("max_features=500", msg)   # against what cap
+        self.assertIn("where", msg)          # and a way out that exists
+        self.assertNotIn("chunk_size", msg)
 
     def test_exactly_at_max_features_succeeds(self):
         geojson = {**_SAMPLE_GEOJSON,

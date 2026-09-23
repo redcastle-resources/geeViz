@@ -21,8 +21,30 @@ ArcGIS / Esri REST services client for geeViz. **DEPRECATED.**
 
    The ``addEsri*Service`` functions are NOT going to georest: they add
    layers to a geeViz ``Map``, which is geeViz's concern, not a REST
-   client's. They stay available here (and as ``Map.addEsri*``) and now
-   do their REST work through georest.
+   client's. They stay available here (and as ``Map.addEsri*``).
+
+   **This module is a patch over georest, not a fork of it.** What is
+   left here is only what georest should not have:
+
+   * the geeViz ``Map`` calls -- ``addLayer``, ``addTileLayer``,
+     ``addDynamicMapService`` -- and the naming and viz-key handling
+     around them;
+   * :func:`geeViz._ssrf.check_url`, which is this package's policy and
+     has to be applied on THIS side of every delegated call, because
+     georest has none;
+   * the exception contract callers already depend on: georest reports
+     an unreachable host or a bad status as ``RuntimeError``, and this
+     module has always raised ``ConnectionError``, so it translates at
+     the boundary rather than rewriting what callers catch.
+
+   Everything else delegates. ``_resolve_portal``,
+   ``_detect_service_type`` and ``_resolve_url`` were byte-identical
+   copies of georest's and now call them; :data:`PORTALS` is georest's
+   own dict rather than a copy, so a name added at runtime through
+   either module resolves in both; the feature-service count pre-flight,
+   overflow guard and GeoJSON fetch are one call to
+   ``georest.restesri.services.queryFeatureService``; the ``{z}/{y}/{x}``
+   tile template comes from ``getImageServiceTileUrl``.
 
 Bridges three Esri service types into the existing geeViz viewer with no
 JavaScript changes required.  The viewer already supports both
@@ -96,14 +118,15 @@ from geeViz._ssrf import check_url as _check_url  # noqa: E402
 # Known public portals
 # ---------------------------------------------------------------------------
 
-PORTALS: dict[str, str] = {
-    "iipp": "https://imagery.geoplatform.gov/iipp",
-    "agol": "https://www.arcgis.com",
-    "usgs": "https://www.sciencebase.gov/sciencebase",
-    "noaa": "https://coastalatlas.noaa.gov",
-    "usfs": "https://data.fs.usda.gov/geodata",
-    "nasa": "https://nasa.maps.arcgis.com",
-}
+#: THE SAME OBJECT georest uses, not a copy of it.
+#:
+#: This dict is documented below as runtime-editable, and
+#: ``_resolve_portal`` now delegates to georest -- so a copy would
+#: mean ``esriLib.PORTALS["mine"] = ...`` was accepted and then
+#: silently ignored, because the lookup happens against the other
+#: dict. Aliasing keeps one source of truth and makes an edit
+#: through either name work.
+from georest.restesri.portal import PORTALS  # noqa: E402
 """Module-level dict mapping short names to portal base URLs.
 
 Add your own at runtime::
@@ -227,34 +250,14 @@ def _build_params(base: dict, token: str | None) -> dict:
 
 
 def _resolve_portal(portal: str) -> str:
-    """Resolve a portal argument to a base URL.
+    """Resolve a portal short name or URL to a base URL. Delegates.
 
-    Args:
-        portal (str): Either a short name from :data:`PORTALS` (e.g.
-            ``"iipp"``, ``"agol"``) or a full URL
-            (e.g. ``"https://gis.myagency.gov/portal"``).
-
-    Returns:
-        str: Portal base URL with no trailing slash.
-
-    Raises:
-        KeyError: If a short name is given but not found in :data:`PORTALS`.
+    The body was a byte-identical copy of georest's, which is how the
+    two would have drifted. :data:`PORTALS` is aliased to georest's own
+    dict above, so a name added at runtime resolves here too.
     """
-    if portal.startswith("http://") or portal.startswith("https://"):
-        return portal.rstrip("/")
-    if portal in PORTALS:
-        return PORTALS[portal].rstrip("/")
-    known = ", ".join(f'"{k}"' for k in PORTALS)
-    raise KeyError(
-        f"Unknown portal short name {portal!r}.  Known names: {known}.  "
-        f"Pass a full URL or add your portal to PORTALS first: "
-        f'PORTALS["{portal}"] = "https://..."'
-    )
-
-
-# ---------------------------------------------------------------------------
-# Portal search
-# ---------------------------------------------------------------------------
+    from georest.restesri import portal as _gp
+    return _gp._resolve_portal(portal)
 
 def searchPortal(
     query: str,
@@ -391,85 +394,24 @@ def getServiceMetadata(url: str, token: str | None = None) -> dict[str, Any]:
 
 
 def _detect_service_type(url: str, meta: dict | None = None) -> str:
-    """Return the service type string for *url*.
+    """Return the ArcGIS service type for *url*. Delegates.
 
-    Detection order:
-    1. URL path segments (fast, no HTTP call needed for clear cases).
-    2. ``meta["type"]`` or ``meta["serviceDataType"]`` if caller already
-       fetched metadata.
-    3. Fetch ``?f=json`` and inspect the response.
-
-    Returns one of: ``"ImageServer"``, ``"FeatureServer"``, ``"MapServer"``,
-    or ``"Unknown"``.
+    ``"ImageServer"``, ``"FeatureServer"``, ``"MapServer"`` or
+    ``"Unknown"``. The body was a byte-identical copy of georest's --
+    URL-segment match first, then metadata keys, then the ``fields`` /
+    ``bandCount`` shape sniff.
     """
-    # Normalise
-    clean = url.rstrip("/").lower()
-
-    # Canonical spellings: match URL segment (case-insensitive), return
-    # the correctly-cased ArcGIS type name.
-    _stype_map = {
-        "imageserver": "ImageServer",
-        "featureserver": "FeatureServer",
-        "mapserver": "MapServer",
-    }
-    for lower, canonical in _stype_map.items():
-        if f"/{lower}" in clean or clean.endswith(lower):
-            return canonical
-
-    # Fall back to metadata inspection
-    if meta is None:
-        try:
-            meta = getServiceMetadata(url)
-        except Exception:
-            return "Unknown"
-
-    # ArcGIS REST items carry a "type" key on the item record,
-    # but service endpoint JSON uses serviceDataType or serviceType.
-    for key in ("serviceDataType", "serviceType", "type"):
-        val = meta.get(key, "")
-        if isinstance(val, str):
-            v = val.lower()
-            if "image" in v:
-                return "ImageServer"
-            if "feature" in v:
-                return "FeatureServer"
-            if "map" in v:
-                return "MapServer"
-
-    # Check for fields[] → likely a FeatureServer layer
-    if "fields" in meta:
-        return "FeatureServer"
-    # Check for bandCount → ImageServer
-    if "bandCount" in meta or "pixelType" in meta:
-        return "ImageServer"
-
-    return "Unknown"
-
+    from georest.restesri import portal as _gp
+    return _gp._detect_service_type(url, meta)
 
 def _resolve_url(url_or_result: str | dict) -> str:
-    """Extract a service URL from either a raw URL string or a
-    :func:`searchPortal` result dict."""
-    if isinstance(url_or_result, str):
-        return url_or_result.rstrip("/")
-    if isinstance(url_or_result, dict):
-        # searchPortal result has a "url" key; fall back to id-based lookup
-        service_url = url_or_result.get("url", "")
-        if service_url:
-            return service_url.rstrip("/")
-        raise ValueError(
-            "Portal result dict has no 'url' key.  Either the item is not a "
-            "hosted service, or the portal did not return a URL for it.  "
-            "Check url_or_result['_raw'] for the full item record."
-        )
-    raise TypeError(
-        f"url_or_result must be a URL string or a searchPortal() result dict, "
-        f"got {type(url_or_result).__name__!r}"
-    )
+    """A service URL from a string or a ``searchPortal`` result. Delegates.
 
-
-# ---------------------------------------------------------------------------
-# addEsriImageService
-# ---------------------------------------------------------------------------
+    Another byte-identical copy, raising the same ``TypeError`` for a
+    non-string/dict and ``ValueError`` for a result with no ``url``.
+    """
+    from georest.restesri import portal as _gp
+    return _gp._resolve_url(url_or_result)
 
 def addEsriImageService(
     url_or_result: str | dict,
@@ -523,11 +465,12 @@ def addEsriImageService(
     if name is None:
         name = url.rstrip("/").split("/")[-2] if url.endswith(("ImageServer", "imageserver")) else url.rstrip("/").split("/")[-1]
 
-    # ArcGIS Image/Map Server tile endpoint: /tile/{z}/{y}/{x}
-    # Note: ArcGIS uses y then x (not the XYZ standard x then y).
-    tile_url = f"{url}/tile/{{z}}/{{y}}/{{x}}"
-    if token:
-        tile_url = f"{tile_url}?token={urllib.parse.quote(token, safe='')}"
+    # The {z}/{y}/{x} template -- ArcGIS order, y before x, not the XYZ
+    # standard -- and the token quoting are georest's. The body here was
+    # identical to it line for line, which is the kind of copy that gets
+    # a fix in one place and not the other.
+    from georest.restesri import services as _gs
+    tile_url = _gs.getImageServiceTileUrl(url, token=token)
 
     kw: dict[str, Any] = {}
     if viz_params:
@@ -707,78 +650,51 @@ def addEsriFeatureService(
             parts = url.rstrip("/").split("/")
             name = f"{parts[-2]} ({name})" if len(parts) >= 2 else name
 
-    # ---- Pre-flight: count only ----
-    count_params: dict[str, Any] = {
-        "where": where,
-        "returnCountOnly": "true",
-        "f": "json",
-    }
-    # LOCAL PATCH (2026-08-28): area filter. Applied to the COUNT as well as
-    # the fetch, so max_features guards the area asked about rather than the
-    # whole layer - FEMA NFHL is 5.8M features nationally, 52 in a 2 km box.
-    _bbox_params = {}
-    if bbox:
-        _bbox_params = {
-            "geometry": bbox,
-            "geometryType": "esriGeometryEnvelope",
-            "inSR": "4326",
-            "spatialRel": "esriSpatialRelIntersects",
-        }
-        count_params.update(_bbox_params)
-    if token:
-        count_params["token"] = token
+    # ---- count pre-flight + GeoJSON fetch, both georest's ----------
+    #
+    # queryFeatureService does exactly what the ~70 lines here used to:
+    # a returnCountOnly pre-flight that honors the SAME spatial filter
+    # as the fetch (so max_features guards the area asked about rather
+    # than the whole layer -- FEMA NFHL is 5.8M features nationally and
+    # 52 in a 2 km box), the overflow guard, then outSR=4326 GeoJSON.
+    #
+    # `bbox` stays the parameter name here because it is this module's
+    # published signature; georest spells the same thing as a geometry
+    # plus its type, and an envelope intersect is its default.
+    from georest.restesri import services as _gs
 
-    count_url = f"{url}{_FEATURE_QUERY_SUFFIX}"
-    try:
-        count_resp = _fetch_json(count_url, count_params)
-    except urllib.error.URLError as exc:
-        raise ConnectionError(
-            f"Could not reach Feature Service at {count_url!r}: {exc}"
-        ) from exc
-
-    # Esri may return {"count": N} or {"error": {...}}
-    if "error" in count_resp:
-        err = count_resp["error"]
-        raise ValueError(
-            f"Feature Service returned an error: "
-            f"{err.get('code')} — {err.get('message', str(err))}"
-        )
-
-    feature_count = count_resp.get("count", 0)
-
-    if feature_count > max_features:
-        raise ValueError(
-            f"Feature service has {feature_count:,} features "
-            f"(max_features={max_features:,}).\n"
-            f"Increase max_features OR pass a `where` clause to filter, "
-            f"e.g. where=\"STATE_FIPS='06'\", "
-            f"OR set chunk_size= to paginate (future extension)."
-        )
-
-    # ---- Fetch GeoJSON ----
-    query_params: dict[str, Any] = {
-        "where": where,
-        "outFields": "*",
-        "outSR": "4326",           # always WGS84 so the viewer renders it natively
-        "f": "geojson",
-    }
-    query_params.update(_bbox_params)
-    if token:
-        query_params["token"] = token
+    # geeViz's SSRF guard, which georest does not have and should not:
+    # it is this package's policy, not a REST client's. It used to be
+    # reached through _fetch_json; calling georest directly skips that
+    # path, so it has to be applied here or delegation quietly removes
+    # a security check.
+    _check_url(url)
 
     try:
-        geojson = _fetch_json(count_url, query_params)
+        geojson = _gs.queryFeatureService(
+            url,
+            where=where,
+            geometry=bbox,
+            max_features=max_features,
+            token=token,
+        )
+    except ValueError:
+        # An Esri error body, or the overflow guard. Both mean the same
+        # on either side of the boundary -- pass them through rather
+        # than flattening them into the network case.
+        raise
+    except RuntimeError as exc:
+        # georest reports an unreachable host or a bad HTTP status as
+        # RuntimeError. This module has always raised ConnectionError
+        # and its callers catch that, so translate at the boundary --
+        # the same thing _fetch_json does, for the same reason.
+        raise ConnectionError(
+            f"Could not reach Feature Service at {url!r}: {exc}"
+        ) from exc
     except urllib.error.URLError as exc:
         raise ConnectionError(
-            f"Could not fetch features from {count_url!r}: {exc}"
+            f"Could not reach Feature Service at {url!r}: {exc}"
         ) from exc
-
-    if "error" in geojson:
-        err = geojson["error"]
-        raise ValueError(
-            f"Feature Service query returned an error: "
-            f"{err.get('code')} — {err.get('message', str(err))}"
-        )
 
     actual = len(geojson.get("features", []))
     print(f"Adding Esri Feature Service: {name} ({actual:,} features)")
