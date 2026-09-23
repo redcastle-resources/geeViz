@@ -571,7 +571,7 @@ def publishes(variable, model):
     return isinstance(entry.get(_model(model)[0]), tuple)
 
 
-def _resolve_bands(key, spec, variable, stat):
+def _resolve_bands(key, spec, variable, stat, start_ms=None):
     """Which bands to select, what to rename them, which are Kelvin.
 
     ``variable`` is one of:
@@ -646,6 +646,24 @@ def _resolve_bands(key, spec, variable, stat):
                 f"{key!r} does not publish {v!r} in a usable form.{why} "
                 f"Models that do: {have or 'none'}.")
         name, units = band
+
+        # Does this band exist for the window being asked for?
+        #
+        # Checked against the START of the window, not the end: the
+        # collection is mapped band-by-band, so ONE image without the
+        # band fails the whole request. A window that straddles the
+        # boundary is just as broken as one entirely before it, and
+        # saying so here beats an Earth Engine error raised from inside
+        # a map() over an image the caller never named.
+        gate = BAND_AVAILABLE_FROM.get((v, key))
+        if gate is not None and start_ms is not None:
+            since, advice = gate
+            if start_ms < _ms(since):
+                raise ValueError(
+                    f"{key!r} has no {name!r} band that far back: it "
+                    f"enters the record on {since}, and the window asked "
+                    f"for starts before that. {advice}")
+
         if key.startswith("weathernext") and stat != "mean":
             name = name.replace("_mean", f"_{stat}")
         sel.append(name)
@@ -745,17 +763,23 @@ def getForecastData(startDate, endDate, model="gfs", variable="wind",
         subtractable.
     """
     key, spec = _model(model)
-    # What to select, and what to call it. Resolved before anything
-    # touches the clock, so an unavailable variable fails immediately
-    # rather than after the run search.
-    sel, names, conv = _resolve_bands(key, spec, variable, stat)
-    # Stamped on every image so a reader does not have to know the table.
-    units_prop = ({n: CANONICAL_UNITS[n] for n in names}
-                  if (names and normalize_units) else {})
 
+    # The window is parsed FIRST now, because resolving a band depends
+    # on it: some bands enter a collection partway through its record
+    # (see BAND_AVAILABLE_FROM) and whether one exists is a question
+    # about the dates. Still just parsing and comparison -- nothing here
+    # touches the network, and the run search below is unchanged.
     t0, t1 = _ms(startDate), _ms(endDate)
     if t1 < t0:
         raise ValueError(f"endDate precedes startDate ({startDate} .. {endDate})")
+
+    # What to select, and what to call it. Resolved before anything
+    # touches the clock, so an unavailable variable fails immediately
+    # rather than after the run search.
+    sel, names, conv = _resolve_bands(key, spec, variable, stat, start_ms=t0)
+    # Stamped on every image so a reader does not have to know the table.
+    units_prop = ({n: CANONICAL_UNITS[n] for n in names}
+                  if (names and normalize_units) else {})
     tn = _ms(now) if now is not None else int(
         datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000)
 
@@ -2486,16 +2510,68 @@ def _center_lon_lat(center):
 #:
 #: ``None`` means the model does not publish that variable.
 #:
-#: GFS does NOT have a stable band list, and the difference is by AGE.
-#: Sampled 2026-09-14: the oldest images in the collection carry
-#: ``total_precipitation_surface`` and no dewpoint at all, while every
-#: one of the last three days carries ``precipitation_rate`` and
-#: ``dew_point_temperature_2m_above_ground``. An audit that samples
-#: ``.first()``, or the head of the unfiltered collection, therefore
-#: reports the names here as broken -- they are correct for recent data,
-#: which is what a forecast request asks for. Sample the window you mean
-#: to use. (``gust``, ``haines_index`` and ``ventilation_rate`` come and
-#: go the same way.)
+#: GFS does NOT have a stable band list, and it varies along TWO axes.
+#:
+#: By DATE, at one boundary rather than on a rolling window: bisected
+#: against the live collection on 2026-09-23, an image at 2025-01-14
+#: carries 9 bands and one at 2025-01-15 carries 22.
+#: ``precipitation_rate``, ``dew_point_temperature_2m_above_ground``,
+#: ``gust``, ``haines_index`` and ``ventilation_rate`` all arrive in
+#: that one change. The names here are correct from 2025-01-15 on, which
+#: is what a forecast request asks for; :data:`BAND_AVAILABLE_FROM`
+#: turns an older window into a legible error rather than a server one.
+#:
+#: And by LEAD. A lead-0 analysis is a short image in both eras -- 6
+#: bands in 2024, 15 today -- and in particular carries no
+#: ``total_precipitation_surface``, because an accumulation over the
+#: forecast interval is undefined at the analysis hour rather than zero.
+#:
+#: So an audit that samples ``.first()``, or the head of the unfiltered
+#: collection, reports half this table as broken: it is looking at the
+#: oldest image in the archive at lead 0, the shortest one there is.
+#: Sample the window AND the lead you mean to use.
+#: Bands that entered a collection partway through its record.
+#:
+#: ``(variable, model) -> (iso_date, advice)``. A request whose window
+#: reaches back before ``iso_date`` cannot be served, and the failure is
+#: worth catching HERE rather than letting Earth Engine raise it: the
+#: server error arrives from inside a ``map()``, names the missing band
+#: and whichever ones happen to be present, and says nothing about why
+#: or what to ask for instead.
+#:
+#: The check is a date comparison, so it costs nothing.
+#: ``getForecastData`` is otherwise fully lazy -- it builds a
+#: server-side collection and makes no round trip at all (measured: 7 ms)
+#: -- and a ``bandNames().getInfo()`` to look before leaping would add
+#: ~0.8 s to every call to catch a case that is usually absent.
+#:
+#: Nothing here is substituted automatically. GFS precipitation is the
+#: reason: before the boundary it is an ACCUMULATION and after it a
+#: RATE -- different physical quantities in different units -- and
+#: quietly swapping one for the other yields numbers wrong by whatever
+#: the interval happens to be, while looking entirely plausible.
+#:
+#: Measured by bisecting the live collection on 2026-09-23. Both GFS
+#: entries share one boundary because they arrived in one catalog
+#: change: an image at 2025-01-14 carries 9 bands, 2025-01-15 carries 22.
+BAND_AVAILABLE_FROM = {
+    ("precipitation", "gfs"): (
+        "2025-01-15",
+        "GFS carried no rate band before then. It did carry "
+        "'total_precipitation_surface', an accumulation -- but only at "
+        "leads past the analysis hour, and this function returns the "
+        "shortest lead, so that is not a substitute here. Use a window "
+        "from 2025-01-15, or filter NOAA/GFS0P25 directly on "
+        "forecast_hours > 0 for the accumulation. 'euro' and "
+        "'weathernext' do not reach that far back either."),
+    ("dewpoint_2m", "gfs"): (
+        "2025-01-15",
+        "Before then GFS carried no dewpoint band at all. It did publish "
+        "'relative_humidity_2m' and 'specific_humidity_2m'; 'euro' and "
+        "'weathernext' carry dewpoint across the whole record."),
+}
+
+
 VARIABLES = {
     "temperature_2m": {
         "euro": ("temperature_2m_sfc", "C"),
@@ -2552,7 +2628,21 @@ VARIABLES = {
         # the run started. Useful, just not per-hour, and not
         # comparable to the two above.
         "euro": ("total_precipitation_sfc", "m"),
-        "gfs": None,
+        # GFS does publish one -- 'total_precipitation_surface', across
+        # the whole record -- but ONLY at leads past the analysis hour,
+        # and an accumulation at lead 0 is undefined rather than zero.
+        # This function returns the SHORTEST lead in the window (see
+        # _analyses), which for GFS is lead 0, so the band is absent
+        # from every image it would ever select. Measured 2026-09-23:
+        # lead 0 carries 6 bands in 2024 and 15 today, neither
+        # including it; lead 1+ carries it in both eras.
+        "gfs": ("It is published only at leads past the analysis hour, "
+                "and this function returns the shortest lead, so the "
+                "band is missing from every image it selects. For an "
+                "hourly rate ask for 'precipitation' (GFS publishes it "
+                "at every lead from 2025-01-15). For the accumulation "
+                "itself, filter NOAA/GFS0P25 directly on "
+                "forecast_hours > 0."),
         "weathernext": None,
         "label": "Precipitation since forecast start",
     },
