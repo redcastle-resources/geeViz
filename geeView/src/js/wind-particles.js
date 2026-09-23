@@ -1796,7 +1796,19 @@
    * which is why dragging a raster above the particles did nothing.
    */
   function applyStacking(st, canvas) {
-    var c = canvas || st.canvas;
+    // BOTH canvases when no particular one is named.
+    //
+    // The speed raster used to be stacked exactly once, in onAdd, while
+    // the refresh tick restacked only the particles. A drag then split
+    // the layer in half: the trails moved to the layer's new depth and
+    // the colored field stayed at the depth it was created at, so a
+    // wind layer dragged above another had its raster still underneath.
+    if (!canvas) {
+      if (st.speedCanvas) applyStacking(st, st.speedCanvas);
+      if (st.canvas) applyStacking(st, st.canvas);
+      return;
+    }
+    var c = canvas;
     if (!c) return;
     var reg = registry();
     // st.frameId, not st.id. For a time lapse st.id is the GROUP key
@@ -2190,6 +2202,10 @@
   }
 
   function scan() {
+    // Cheap and idempotent; the viewer defines
+    // updateMapLayerOrder well before any layer exists, but
+    // this file makes no assumption about load order.
+    patchReorder();
     var reg = registry();
     if (!reg || !global.map) return;
     for (var id in reg) {
@@ -2270,6 +2286,73 @@
     }
   }
 
+
+  /**
+   * Make a drag-reorder land on the wind layers at the same instant it
+   * lands on everything else.
+   *
+   * ``updateMapLayerOrder`` is what the sortable list calls on drop. It
+   * reassigns every ``layerObj[id].layerId``, then re-adds each VISIBLE
+   * layer with ``overlayMapTypes.setAt(layerId, layer.layer)`` -- and
+   * for a wind layer that re-adds the encoded u/v RGB this module took
+   * off the map, because as far as the viewer is concerned it is an
+   * ordinary geeImage layer that someone removed behind its back.
+   *
+   * The refresh tick already repairs both halves of that: it re-detaches
+   * the RGB and re-applies the z-index. But it runs on a 500 ms
+   * interval, so a drop left up to half a second of the raw encoding
+   * flashing magenta-green over the map, with the trails at their old
+   * depth. Long enough to see every time.
+   *
+   * So: run the viewer's own function, then repair immediately, in the
+   * same turn. Nothing is duplicated -- the tick does exactly this, just
+   * later, and both operations are idempotent.
+   *
+   * Wrapped rather than replaced, and the original is kept: it is a
+   * top-level function declaration, so the global binding and the window
+   * property are one slot, and both the sortable's `update` and `stop`
+   * handlers resolve through it.
+   *
+   * It is patched HERE, in this file, for the reason everything else
+   * about wind lives here: lcms-viewer.min.js is built from another repo
+   * and a change made inside it is a change the next rebuild can revert
+   * without anyone noticing.
+   */
+  var reorderPatched = false;
+
+  function patchReorder() {
+    if (reorderPatched) return true;
+    var orig = global.updateMapLayerOrder;
+    if (typeof orig !== "function") return false;
+    global.updateMapLayerOrder = function () {
+      var r = orig.apply(this, arguments);
+      try {
+        var reg = registry();
+        for (var id in adopted) {
+          var st = adopted[id];
+          // Every frame, not just the showing one: a lapse re-adds all
+          // of them and an unhidden frame is a magenta-green wash.
+          for (var fid in st.frames) {
+            var L = reg && reg[fid];
+            if (L) detach(L);
+          }
+          applyStacking(st);
+        }
+      } catch (e) {
+        // A repair that throws must not take the viewer's own reorder
+        // down with it -- the drop has already been applied, and the
+        // refresh tick will catch up regardless.
+        if (global.console && console.warn) {
+          console.warn("wind-particles: reorder repair failed", e);
+        }
+      }
+      return r;
+    };
+    global.updateMapLayerOrder._geeVizOriginal = orig;
+    reorderPatched = true;
+    return true;
+  }
+
   if (typeof setInterval === "function") setInterval(scan, 600);
 
   /** Advance N frames synchronously. Testing seam: rAF is throttled to a
@@ -2336,6 +2419,8 @@
     // rather than described: the viewer fades its own track as you drag
     // (setRangeSliderThumbOpacity) and a copy that silently does not is
     // invisible in the source and obvious on screen.
+    _patchReorder: patchReorder,
+    _applyStacking: applyStacking,
     _addParticleSlider: addParticleSlider,
     _rgbOfTrack: rgbOfTrack,
     _setTrackAlpha: setTrackAlpha,
