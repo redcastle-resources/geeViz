@@ -187,6 +187,15 @@ def _default_workload_tag_builder(
             "pid":    os.getpid(),
             "src":    "proxy-default",
         }
+        # Which deployment minted this. mint_workload_tag spells it out in
+        # the tag itself, which is the only way a puller can tell this
+        # tag apart from a sibling deployment's -- they share one GCP
+        # project and therefore one Cloud Monitoring stream. Omitted when
+        # unset so a standalone geeViz deployment, where nobody defines
+        # GEEVIZ_ENV, keeps minting exactly the tags it did before.
+        _mint_env = (os.environ.get("GEEVIZ_ENV") or "").strip()
+        if _mint_env:
+            parts["env"] = _mint_env
         # Add attribution parts only when they're set — keeps the tag
         # hash deterministic for the standalone case (which used to
         # mint with just the 4 fields above) and ONLY changes the hash

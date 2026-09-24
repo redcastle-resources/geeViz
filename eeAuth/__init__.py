@@ -108,6 +108,7 @@ from .tags import (
     build_workload_tag,
     sanitize_workload_tag_part,
     mint_workload_tag,
+    env_of_workload_tag,
     TagStore,
     InMemoryTagStore,
     SQLiteTagStore,
@@ -159,6 +160,7 @@ __all__ = [
     "build_workload_tag",
     "sanitize_workload_tag_part",
     "mint_workload_tag",
+    "env_of_workload_tag",
     # Tags — stores (mint here, look the parts back up later)
     "TagStore",
     "InMemoryTagStore",

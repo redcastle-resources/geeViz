@@ -157,14 +157,43 @@ def _canonical_parts(parts: dict[str, Any]) -> str:
     return "|".join(f"{k}={v}" for k, v in items)
 
 
+# How much of a tag the env suffix may take. Real values are "prod",
+# "test", "dev"; the clamp is only so a caller passing something long
+# cannot push the suffix into the 63-char truncation that would corrupt
+# it into a DIFFERENT env's name.
+_ENV_PART_MAX_LEN = 12
+
+
 def mint_workload_tag(
     parts: dict[str, Any], *, secret: str, digest_size: int = 8
 ) -> str:
     """Deterministic short tag from a parts dict + secret.
 
-    Returns ``wl_<hex>`` where the hex is a ``digest_size``-byte blake2b of
-    the canonicalized parts (default 16 hex chars → collision probability
+    Returns ``wl_<hex>``, or ``wl_<hex>__<env>`` when ``parts`` carries a
+    non-empty ``env``. The hex is a ``digest_size``-byte blake2b of the
+    canonicalized parts (default 16 hex chars → collision probability
     ~10⁻⁹ at millions of tags). Same input always yields the same tag.
+
+    Why the env is spelled out when the hash already covers it
+    ----------------------------------------------------------
+    ``env`` is part of the hash input, so test and prod already mint
+    DIFFERENT tags for the same person — but they mint two opaque hashes,
+    and opaque is the problem. Cloud Monitoring is per GCP *project*, and
+    every deployment of a tenant shares one, so a puller sees its own
+    tags and its siblings' in the same stream with ``workload_tag`` as the
+    only label to separate them by. Faced with a bare hash it did not
+    mint, it cannot tell "another deployment's traffic" from "traffic
+    nobody minted attribution for", and the honest fallback is to record
+    the row as unattributed. Production accumulated 141 CDU of test's
+    Earth Engine spend that way.
+
+    Long-form pre-v2 tags never had this problem: they spelled out tenant
+    and user, so a foreign tag was recognizable on sight. Naming the env
+    restores exactly that much legibility -- enough to answer "is this
+    mine?" without a lookup -- and nothing more. The identity stays in the
+    hash, where it is not readable from a billing label.
+
+    Recover it with :func:`env_of_workload_tag`.
 
     The tag is NOT reversible on its own — pair with a ``TagStore`` that
     records ``tag → parts`` at mint time so lookups can recover identity
@@ -177,11 +206,33 @@ def mint_workload_tag(
         (canonical + "|" + secret).encode("utf-8"),
         digest_size=digest_size,
     ).hexdigest()
-    tag = f"{_TAG_PREFIX}_{h}"
-    # Belt-and-suspenders: minted tags are guaranteed valid but pass them
-    # through build_workload_tag anyway so any future format tweak stays
-    # consistent with the sanitizer.
-    return build_workload_tag(tag)
+    env = sanitize_workload_tag_part(
+        str(parts.get("env") or "") if isinstance(parts, dict) else "")
+    # Hand the hash and the env to build_workload_tag as SEPARATE parts
+    # rather than pre-joining them. It sanitizes each part, and part
+    # sanitization collapses runs of ``_`` to keep ``__`` unambiguous as
+    # the separator -- so a pre-joined ``wl_<hex>__prod`` comes back out
+    # as ``wl_<hex>_prod``, with the separator gone and the env no longer
+    # parseable. Joining is build_workload_tag's job; let it do it.
+    return build_workload_tag(f"{_TAG_PREFIX}_{h}",
+                              env[:_ENV_PART_MAX_LEN])
+
+
+def env_of_workload_tag(tag: str) -> str:
+    """The env a minted tag names, or ``""`` if it names none.
+
+    ``""`` is the answer for two different things, and callers must treat
+    them alike: a tag minted before the suffix existed, and a tag minted
+    without an env. Both mean "this tag cannot tell you whose deployment
+    it is" — never "it isn't yours". Reading an empty result as foreign
+    would discard real spend for every tag minted before this change.
+    """
+    if not tag or not tag.startswith(f"{_TAG_PREFIX}_"):
+        return ""
+    parts = tag.split(SEPARATOR)
+    if len(parts) < 2:
+        return ""
+    return parts[-1].strip()
 
 
 # ---------------------------------------------------------------------------
