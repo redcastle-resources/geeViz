@@ -2679,6 +2679,114 @@ _UNPICKLING_CALLS = frozenset({
     "load_npz",         # scipy.sparse — unpickles object arrays
 })
 
+
+def _is_stdlib_json_loads(call: ast.Call, tree: ast.Module) -> bool:
+    """True for ``json.loads(...)`` where ``json`` is provably the stdlib.
+
+    ``json.loads`` parses text and cannot unpickle, but the name check
+    above refused it, so the agent could not parse a GeoJSON string and
+    retyped 23 neighborhood polygons as a Python literal instead (prod
+    session fca4b979, 2026-10-07). Exempt it only when this same block
+    does a top-level ``import json`` before the call and binds ``json``
+    nowhere else -- the namespace persists between calls, so a ``json``
+    left over from an earlier block proves nothing.
+    """
+    f = call.func
+    if not (isinstance(f, ast.Attribute) and f.attr == "loads"
+            and isinstance(f.value, ast.Name) and f.value.id == "json"):
+        return False
+    imported = any(
+        isinstance(s, ast.Import) and s.lineno < call.lineno
+        and any(a.name == "json" and a.asname in (None, "json")
+                for a in s.names)
+        for s in tree.body)
+    if not imported:
+        return False
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and n.id == "json" and not isinstance(n.ctx, ast.Load):
+            return False
+        if (isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                and n.value.id == "json" and not isinstance(n.ctx, ast.Load)):
+            return False  # json.loads = <something that unpickles>
+        if isinstance(n, ast.alias) and n.asname == "json" and n.name != "json":
+            return False
+        if isinstance(n, ast.ImportFrom) and any(
+                a.asname is None and a.name == "json" for a in n.names):
+            return False
+        if isinstance(n, ast.arg) and n.arg == "json":
+            return False
+        if (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                           ast.ExceptHandler, ast.MatchAs, ast.MatchStar))
+                and getattr(n, "name", None) == "json"):
+            return False
+        if isinstance(n, ast.MatchMapping) and n.rest == "json":
+            return False
+        if isinstance(n, (ast.Global, ast.Nonlocal)) and "json" in n.names:
+            return False
+    return True
+
+
+#: The module-level esriLib drawing helpers. Called bare they draw on
+#: ``gv.Map`` -- the process-wide map -- not the per-session map that
+#: run_code exposes as ``Map`` and map_control exports. The layer is
+#: "added" (it even prints "Adding layer: ...") and never appears.
+_ESRI_DRAW_FUNCS = frozenset({
+    "addEsriFeatureService", "addEsriService", "addEsriMapService",
+    "addEsriImageService", "addEsriTileLayer",
+})
+
+
+def _esri_off_map_calls(code: str) -> list[str]:
+    """BLOCKED messages for esriLib draw calls that would miss ``Map``.
+
+    Prod session 8f659285 (2026-10-07): ``from geeViz.esriLib import
+    addEsriFeatureService`` then ``addEsriFeatureService(url, ...)`` --
+    the WFIGS perimeters printed "Adding layer" and were absent from the
+    exported map. ``Map.addEsriFeatureService(...)`` passes
+    ``target_map=self``; so does any call that passes ``target_map=``.
+    Only meaningful when the session map is not ``gv.Map``; the caller
+    decides that.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    funcs, mods = {}, set()  # local name -> esriLib name
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and n.module == "geeViz.esriLib":
+            funcs.update((a.asname or a.name, a.name) for a in n.names
+                         if a.name in _ESRI_DRAW_FUNCS)
+        elif isinstance(n, ast.ImportFrom) and n.module == "geeViz":
+            mods.update(a.asname or a.name for a in n.names
+                        if a.name == "esriLib")
+        elif isinstance(n, ast.Import):
+            mods.update(a.asname for a in n.names
+                        if a.name == "geeViz.esriLib" and a.asname)
+    out = []
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        f = n.func
+        if isinstance(f, ast.Name) and f.id in funcs:
+            fn = funcs[f.id]
+        elif (isinstance(f, ast.Attribute) and f.attr in _ESRI_DRAW_FUNCS
+              and isinstance(f.value, ast.Name) and f.value.id in mods):
+            fn = f.attr
+        elif (isinstance(f, ast.Attribute) and f.attr in _ESRI_DRAW_FUNCS
+              and ast.unparse(f.value) == "geeViz.esriLib"):
+            fn = f.attr
+        else:
+            continue
+        if any(k.arg == "target_map" for k in n.keywords):
+            continue
+        out.append(
+            f"BLOCKED: esriLib {fn}() without target_map draws on a "
+            f"different map than this session's `Map`, so the layer never "
+            f"appears in the viewer or the export. Call "
+            f"Map.{fn}(...) with the same arguments instead."
+        )
+    return out
+
 #: Module names that must not be reachable as an ATTRIBUTE of something
 #: else. Any module that does ``import os`` at the top re-exports it:
 #: ``gil.os``, ``gv.os`` and ``cl.os`` are all the real os module, so the
@@ -2916,7 +3024,8 @@ def _check_code_patterns(code: str) -> list[str]:
                 _fname = node.func.attr
             elif isinstance(node.func, ast.Name):
                 _fname = node.func.id
-            if _fname in _UNPICKLING_CALLS:
+            if (_fname in _UNPICKLING_CALLS
+                    and not _is_stdlib_json_loads(node, tree)):
                 warnings.append(
                     f"BLOCKED: '{_fname}()' deserializes pickled data, which "
                     f"executes arbitrary code. Load data with a format that "
@@ -3452,6 +3561,9 @@ async def run_code(code: str, timeout: int = 120, reset: bool = False,
 
     # Static analysis: detect risky and blocked patterns before execution
     code_warnings = _check_code_patterns(code)
+    import geeViz.geeView as _gv_mod
+    if sess._map_ref is not _gv_mod.Map:
+        code_warnings += _esri_off_map_calls(code)
 
     # Refuse execution if any BLOCKED patterns were found
     blocked = [w for w in code_warnings if w.startswith("BLOCKED:")]
