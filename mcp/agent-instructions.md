@@ -75,7 +75,8 @@ When the user says a class of data without naming a specific dataset, use these 
 | "NLCD", "land cover" (US, recent) | Annual NLCD: `projects/sat-io/open-datasets/USGS/ANNUAL_NLCD/LANDCOVER`, band `b1` | 40 years of annual coverage. `USGS/NLCD_RELEASES/YYYY_REL/NLCD` is a single-year release and should only be used when the user names a specific release year. Rename `b1` and set class properties. |
 | "LCMS", "land cover" (US, historical + change) | `projects/gtac-data-publish/assets/LCMS/Product_Version/2025-11` — bands `Land_Cover`, `Land_Use`, `Change` | 1985→2025, CONUS + AK. The `USFS/GTAC/LCMS/*` ids are all DEPRECATED in the catalog and stop at 2024; using one prints a deprecation warning and silently costs you the newest year. Coverage is NOT monotonic — Hawaii and Puerto Rico exist only in `USFS/GTAC/LCMS/v2024-10`, so pin that older id for those, and only those. |
 | "MTBS", "wildfire severity" | `USFS/GTAC/MTBS/burned_area_boundaries/v1` + `USFS/GTAC/MTBS/annual_burn_severity_mosaics/v1` — always `.select([0], ['Severity'])` on the severity mosaics (band name changed 2023+) | MTBS band naming shifted; the explicit select avoids the mismatch. |
-| "Sentinel-2", "S2" | `COPERNICUS/S2_SR_HARMONIZED` (surface reflectance) or `COPERNICUS/S2_HARMONIZED` (TOA). Use `vizParamsFalse10k` / `vizParamsTrue10k` from `getImagesLib` for viz. | Harmonized handles the 2022 processing baseline shift. |
+| "Sentinel-2", "S2" | `gil.superSimpleGetS2(area, startDate, endDate, toaOrSR="SR")` (or `"TOA"`), then `.median()`. Never load `COPERNICUS/S2_SR_HARMONIZED` / `S2_HARMONIZED` yourself. Viz with `vizParamsFalse10k` / `vizParamsTrue10k`. | It reads the harmonized collections (2022 baseline shift handled), masks clouds and shadows with Cloud Score+, and renames bands. A hand-rolled QA60/SCL mask is weaker than Cloud Score+ and is one more thing to get wrong. |
+| "fall foliage", "fall color", "leaf color", "how golden / how red are the ..." | `gil.getFoliageChange(area, ...)`: a foliage-window composite MINUS a leaf-on composite. See "Fall foliage" below. | AskTerra 1.0's terraFoliage method. Color only means something as a change from the leaf-on baseline. |
 | "Landsat" (composite / recent) | `getImagesLib.getLandsatWrapper(...)` for cloud-masked, indices-added collection. Raw: `LANDSAT/LC08/C02/T1_L2` + `LANDSAT/LC09/C02/T1_L2` merged. Viz with `vizParamsFalse` / `vizParamsTrue` (no `10k`). | Wrapper adds NDVI/NBR/etc and applies SR scale factors. |
 | "tree canopy cover", "TCC" | `USGS/NLCD_RELEASES/2023_REL/TCC/v2023-5`, filter `year == 2023`, select `Science_Percent_Tree_Canopy_Cover` | NLCD TCC v2023-5 is the current release. |
 | "drought" (US) | `GRIDMET/DROUGHT` for PDSI/SPI/EDDI | Not `IDAHO_EPSCOR/GRIDMET` — that's weather, not drought. |
@@ -84,6 +85,16 @@ When the user says a class of data without naming a specific dataset, use these 
 | "wind", "forecast", "weather" (any variable, past or future) | `wx.getForecastData(start, end, model)` — `model` is `"gfs"`, `"euro"` or `"weathernext"` | Never hand-filter these collections; see the Weather section. |
 
 If the user names a specific product ("NLCD 2019", "the 2021 release", "MapBiomas Amazonia"), honor that. The defaults apply to open questions like "map land cover for Austin" — the answer is Annual NLCD, not a stale 2021 snapshot.
+
+### Fall foliage
+
+Foliage questions always compare the foliage dates with an earlier leaf-on (pre) date. Never describe color from foliage-date imagery alone.
+
+1. `fol = gil.getFoliageChange(area)` builds a composite of the last 21 days and a pre composite 42 days earlier (override with `startDatePre`/`endDatePre`/`startDatePost`/`endDatePost`; `includeLandsat=True` fills cloud gaps). It returns `pre`, `post`, `change` (post minus pre for `yellowness`, `orangeness`, `redness`, `greenness`, `brownness`, `ndvi`), `yellowing` and `reddening` (change masked below 0.1 / 0.25), and `dates`. Say which dates were compared.
+2. Map `fol['yellowing']` and `fol['reddening']` over `fol['post']`. Report change values, not raw index values.
+3. A baseline is not enough on its own: autumn raises yellowness in every forest (lower sun, curing understory). Before calling a species "golden" or "turning", compute the same change for an evergreen control in the same area (TreeMap `FORTYPCD` 201 Douglas-fir or 221 ponderosa pine) and report the DIFFERENCE. In early October 2026, Washington larch and Douglas-fir both rose about +0.2 in SR yellowness: no larch signal at all.
+4. `toaOrSR` matters: the thresholds were tuned on TOA (the default). Say which you used.
+5. Name places, trails or peaks only if a tool output in this session located them.
 
 ---
 
@@ -864,7 +875,8 @@ For water, vegetation, snow/ice, bare ground, urban/impervious, clouds, shadows 
 ## Critical signatures — look up with `search_codebase(name="...")`
 
 - `gil.getProcessedLandsatScenes(studyArea, startYear, endYear, startJulian, endJulian)` — Julian days required.
-- `gil.superSimpleGetS2(studyArea, startDate, endDate)` — preferred for S2. Returns IC with geeViz band names. Values 0–10000.
+- `gil.superSimpleGetS2(studyArea, startDate, endDate, toaOrSR="TOA")` — preferred for S2. Returns IC with geeViz band names. Values 0–10000.
+- `gil.getFoliageChange(studyArea, startDatePre=None, endDatePre=None, startDatePost=None, endDatePost=None, compositeDays=21, timeGap=42, includeLandsat=True, toaOrSR="TOA")` — fall foliage change; returns a dict (`pre`, `post`, `change`, `yellowing`, `reddening`, `dates`).
 - `cl.summarize_and_chart(ee_obj, geometry, ...)` — `date_format` controls x-axis labels (`"YYYY"`, `"YYYY-MM"`, `"YYYY-MM-dd"`). Default auto-detects. `feature_label` for per-feature subplots.
 - `tl.generate_gif(col, geometry, date_format=...)` — match `date_format` to your data's temporal resolution.
 
@@ -1296,6 +1308,11 @@ rather than pulling epoch millis back and looping over them in Python:
 ic.aggregate_array('valid_time').map(
     lambda t: ee.Date(t).format('YYYY-MM-dd HH:mm')).getInfo()
 ```
+
+`Date.format` takes a **Joda-Time pattern**: every letter is a pattern code,
+so literal text goes in single quotes. `format("YYYY-MM-dd HH:mm 'UTC'")`
+works; `format('YYYY-MM-dd HH:mm UTC')` fails with `Date.format: Bad
+date/time format` (`U` is not a pattern letter). Forecast valid times are UTC.
 
 **Select a frame by date, not by a pasted epoch integer.** `valid_time`
 is in millis, so use `ee.Date`, and take the NEAREST frame rather than an
