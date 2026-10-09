@@ -1306,6 +1306,12 @@ _LOG_DIR = os.path.join(_THIS_DIR, "logs")
 os.makedirs(_LOG_DIR, exist_ok=True)
 _TOOL_LOG_FILE = os.path.join(_LOG_DIR, "tool_calls.log")
 
+# httpx logs every request at INFO ("HTTP Request: POST ... 200 OK").
+# Inside run_code that lands in the call's stderr, where a successful
+# Gemini call reads like a failure. Warnings and errors still show.
+for _noisy in ("httpx", "httpcore"):
+    _logging.getLogger(_noisy).setLevel(_logging.WARNING)
+
 _tool_logger = _logging.getLogger("geeViz.mcp.tools")
 _tool_logger.setLevel(_logging.DEBUG)
 _tool_fh = _logging.FileHandler(_TOOL_LOG_FILE, encoding="utf-8")
@@ -3190,6 +3196,25 @@ def _check_code_patterns(code: str) -> list[str]:
                 "Warning: .getInfo() on a collection without .limit() can be very slow. "
                 "Consider adding .limit(N) or using .first().getInfo()."
             )
+
+    # --- EE performance: many separate .getInfo() calls in one block ---
+    # Each one is its own server round trip. The instructions say to batch
+    # them into one ee.Dictionary, and models still write five in a row
+    # (accuracy, kappa, matrix, producers, consumers: session b2dffb2c,
+    # 2026-10-09). Like the loop case, this is enforced, not suggested.
+    _MAX_GETINFO = 3
+    _n_getinfo = sum(1 for n in ast.walk(tree)
+                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                     and n.func.attr == "getInfo")
+    if _n_getinfo > _MAX_GETINFO:
+        warnings.append(
+            f"BLOCKED: {_n_getinfo} separate .getInfo() calls in one block; each is "
+            f"its own server round trip (at most {_MAX_GETINFO} allowed). Put the "
+            "values in ONE ee.Dictionary and call .getInfo() once, e.g. "
+            "vals = ee.Dictionary({'acc': cm.accuracy(), 'kappa': cm.kappa(), "
+            "'matrix': cm.array(), 'bands': img.bandNames()}).getInfo(); then read "
+            "vals['acc'] etc. Fetch a value once and reuse the Python variable."
+        )
 
     # Deduplicate while preserving order
     seen: set[str] = set()

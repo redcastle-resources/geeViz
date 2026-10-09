@@ -989,7 +989,7 @@ def interpret_image(
     from google.genai import types
 
     api_key = _get_gemini_key()
-    client = genai.Client(api_key=api_key)
+    client = _lu.genai_client(api_key)
 
     if prompt is None:
         if mode not in _INTERPRET_PROMPTS:
@@ -1006,7 +1006,7 @@ def interpret_image(
     response = client.models.generate_content(
         model=model,
         contents=[prompt, image_part],
-        config=types.GenerateContentConfig(temperature=temperature),
+        config=_lu.genai_config(temperature=temperature),
     )
 
     raw = response.text
@@ -1199,13 +1199,13 @@ def label_image(
 
     # Call Gemini
     api_key = _get_gemini_key()
-    client = genai.Client(api_key=api_key)
+    client = _lu.genai_client(api_key)
     image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
 
     response = client.models.generate_content(
         model=model,
         contents=[prompt_used, image_part],
-        config=types.GenerateContentConfig(
+        config=_lu.genai_config(
             temperature=temperature,
             response_mime_type="application/json",
         ),
