@@ -3226,6 +3226,54 @@ def _check_code_patterns(code: str) -> list[str]:
     return unique
 
 
+def _dedupe_new_outputs(new_files, files_before, output_dir, max_bytes=200 * 1024 * 1024):
+    """One output per distinct content among the files a run_code call wrote.
+
+    Returns ``None`` when nothing was duplicated, else ``(kept, note)``:
+    ``kept`` lists the files to show, ``note`` tells the model what was
+    left out and why. Of identical files, a NEW name is kept over one that
+    re-saved an earlier output's name; then the first written. The
+    duplicates stay on disk; they are only not shown again.
+    """
+    import hashlib
+    groups: dict = {}
+    for f in new_files:
+        p = os.path.join(output_dir, f)
+        try:
+            if os.path.getsize(p) > max_bytes:
+                groups.setdefault(("big", f), []).append(f)
+                continue
+            with open(p, "rb") as fh:
+                digest = hashlib.sha256(fh.read()).hexdigest()
+        except OSError:
+            groups.setdefault(("err", f), []).append(f)
+            continue
+        groups.setdefault(("sha", digest), []).append(f)
+    dupes = {k: v for k, v in groups.items() if len(v) > 1}
+    if not dupes:
+        return None
+
+    def _rank(f):
+        p = os.path.join(output_dir, f)
+        try:
+            mt = os.path.getmtime(p)
+        except OSError:
+            mt = 0
+        return (f in files_before, mt, f)        # new names first, then oldest write
+
+    kept, skipped = [], []
+    for v in groups.values():
+        v = sorted(v, key=_rank)
+        kept.append(v[0])
+        skipped += [(s, v[0]) for s in v[1:]]
+    kept = sorted(kept)
+    note = ("Note: the same content was saved under more than one name; it is "
+            "shown once. " + "; ".join(f"{s} is identical to {k}" for s, k in skipped)
+            + ". Save each output once, under one name: saving over an earlier "
+            "output's name does not replace its preview, it adds another.")
+    return kept, note
+
+
 def _get_method_chain(node: ast.AST) -> list[str]:
     """Walk an attribute/call chain and return method/attribute names encountered."""
     names: list[str] = []
@@ -3915,6 +3963,14 @@ async def run_code(code: str, timeout: int = 120, reset: bool = False,
         if f not in _files_before or mt > _mtimes_before.get(f, 0):
             _new_files.append(f)
     _new_files = sorted(_new_files)
+    # The same bytes saved under two names in one call would show (and
+    # download) twice in the chat. Models do this believing a save over an
+    # earlier output's name replaces its preview; it does not, it adds one
+    # (session f3c49da1, 2026-10-09). Show each distinct file once,
+    # preferring a new name over re-saving an older one, and say so.
+    _dup_note = _dedupe_new_outputs(_new_files, _files_before, sess.output_dir)
+    if _dup_note:
+        _new_files = _dup_note[0]
     _IMG_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
     output_markdown = None
     if _new_files:
@@ -3956,6 +4012,8 @@ async def run_code(code: str, timeout: int = 120, reset: bool = False,
     )
     if len(stdout_val) > 50000:
         stdout_val = stdout_val[:50000] + "\n... (truncated)"
+    if _dup_note:
+        stdout_val = (stdout_val.rstrip("\n") + "\n" if stdout_val else "") + _dup_note[1]
 
     return _scrub_json_response({
         "success": True,

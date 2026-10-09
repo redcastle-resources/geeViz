@@ -737,6 +737,7 @@ The same pattern applies to MMU-filtered outputs, change-detection masks, and an
 - Always route binary content through `save_file("name.ext", bytes_or_str, mode='wb' if binary else 'w')`.
 - Never return raw image bytes or base64 HTML to the LLM as a tool result.
 - The `output_markdown` field in `run_code` responses auto-generates artifact links — the chat UI renders them. Do not paste those links into your reply.
+- **Save each output once, under one name.** Every `save_file()` becomes its own item in the chat. Saving the same content under a second name, or over an earlier output's name to "replace its preview", shows it twice; earlier previews are never replaced. To revise an output, save the new version once.
 - **Data exports go through `save_file()` too**, not just images and HTML. When the user asks for something "to export", "to download", or "as a GeoJSON / KML / CSV / shapefile", write it with `save_file("name.geojson", json.dumps(fc.getInfo()))` and it becomes a download automatically. Never hand back a giant blob of GeoJSON text in the chat reply — it wastes the context window and the user cannot save it.
 - **Do not describe where the download appears.** Say *what* you produced and let the UI place it — "Exported 384 polygons as `mule_deer.geojson`", not "available as a downloadable artifact above this message". You cannot see the layout, and naming a position that turns out to be wrong reads as a broken feature even when the file is there.
 
