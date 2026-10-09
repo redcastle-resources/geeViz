@@ -782,7 +782,7 @@ def addEsriFeatureService(
     name: str | None = None,
     max_features: int = 1000,
     where: str = "1=1",
-    bbox: str | None = None,
+    bbox: str | list | tuple | None = None,
     token: str | None = None,
     target_map=None,
     simplify="auto",
@@ -815,6 +815,9 @@ def addEsriFeatureService(
         where (str, optional): SQL WHERE clause sent to the service for
             server-side filtering.  Defaults to ``"1=1"`` (all features).
             Example: ``where="STATE_FIPS='06'"`` (California only).
+        bbox (str, list or tuple, optional): Spatial filter,
+            ``"xmin,ymin,xmax,ymax"`` in WGS84 degrees, or the same four
+            numbers as a list or tuple.
         token (str, optional): ArcGIS token for secured services.
         simplify (str, bool or float, optional): ``"auto"`` (default)
             asks the service for geometry generalized to ~5 m -- far
@@ -905,6 +908,12 @@ def addEsriFeatureService(
     if _offset_m is not None and _georest_generalizes(_gs):
         _gen_kw = {"max_allowable_offset": round(_offset_m * _DEG_PER_M, 9),
                    "geometry_precision": 6}
+
+    # A 4-tuple is the natural spelling of a bbox in Python, but georest
+    # only parses the "xmin,ymin,xmax,ymax" string; a tuple goes out as
+    # "[-124.6, 41.9, ...]" and the service rejects the 'geometry' parameter.
+    if isinstance(bbox, (list, tuple)):
+        bbox = ",".join(str(v) for v in bbox)
 
     try:
         geojson = _gs.queryFeatureService(

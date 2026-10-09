@@ -770,7 +770,13 @@ def getForecastData(startDate, endDate, model="gfs", variable="wind",
             ``None`` to keep nearest-neighbour, which is what a
             categorical band wants; interpolating a class code produces
             classes that do not exist.
-        now: Override the clock. Testing seam.
+        now: Override the clock. Also how to replay ONE past run as it
+            was issued: ``now`` at the run's init and a window after it
+            is an "entirely future" request, served from that run --
+            ``getForecastData('2026-09-22T01:00', '2026-09-24T12:00',
+            'weathernext', now='2026-09-22T00:00')`` is the 00Z run's
+            leads 1..60. Filtering the raw collection by string prefix
+            instead scans the whole archive on every evaluation.
         lookback_days: How far back to hunt for a run. Bounds the scan --
             an unbounded search for the newest run walks every image ever
             published and times out.
@@ -784,6 +790,13 @@ def getForecastData(startDate, endDate, model="gfs", variable="wind",
         Bands are ``u``/``v`` for ``"wind"``, the variable keys for a
         variable request, or the product's own names when ``variable``
         is ``None``.
+
+        To label a frame, format its valid time (always UTC) on the
+        server: ``ee.Date(img.get('valid_time')).format("YYYY-MM-dd HH:mm 'UTC'")``.
+        Earth Engine formats dates with Joda-Time patterns, where every
+        letter is a pattern code, so literal text must be in single
+        quotes: a bare ``UTC`` in the pattern raises
+        ``Date.format: Bad date/time format``.
 
         Three things are therefore the same no matter which model
         produced the image: **the time stamp** means the valid time,
