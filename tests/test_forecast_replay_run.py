@@ -20,7 +20,8 @@ INSTRUCTIONS = (pathlib.Path(__file__).resolve().parents[1]
 def test_instructions_name_the_replay_route():
     text = INSTRUCTIONS.read_text(encoding="utf-8")
     assert "One past run, as issued" in text
-    assert "now='2026-09-22T00:00'" in text
+    assert "pass `now=` that run's init time" in text
+    assert "Never pick a run by\n  filtering the raw collection" in text
 
 
 def _ee_ready():

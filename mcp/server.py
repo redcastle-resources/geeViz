@@ -322,6 +322,18 @@ if _SANDBOX_ENABLED:
             if _called_from_trusted_lib():
                 return
             raise PermissionError(f"Sandbox: {event} is blocked.")
+        elif event == "pickle.find_class":
+            # Unpickling, by whatever name it is reached. The static check
+            # refuses calls NAMED like an unpickler, but an alias is not a
+            # name: ``f = pd.compat.pickle_compat.loads; f(payload)`` ran a
+            # __reduce__ payload. Every unpickle that loads a callable
+            # passes through find_class, so refuse it for as long as user
+            # code runs, and from trusted frames too: the payload executes
+            # inside the library's own frames, which is exactly what makes
+            # them look trusted.
+            raise PermissionError(
+                "Sandbox: unpickling is blocked (it can run arbitrary code). "
+                "Load data from JSON, CSV, GeoJSON or Earth Engine instead.")
         elif event == "open":
             # Path-scoped file access. Original design: block deny-listed
             # paths REGARDLESS of caller so attackers couldn't smuggle
@@ -1802,7 +1814,53 @@ def _get_session(session_id: str | None = None) -> _SessionState:
     with _sessions_lock:
         if sid not in _sessions:
             _sessions[sid] = _SessionState(sid)
+            if sid != _DEFAULT_SESSION_ID:
+                _recover_history(_sessions[sid])
         return _sessions[sid]
+
+
+_RUN_CODE_CALL_MARK = _wl_re.compile(r"^# --- run_code call \d+ ---\n", _wl_re.M)
+
+
+def _recover_history(sess: "_SessionState") -> None:
+    """Reload a session's code history from its saved script, if any.
+
+    The history lives in memory, so a restarted server (a deploy, an
+    idle shutdown, another instance) met "save this script" in a session
+    that had run code with "No code has been executed yet". Every
+    successful run_code also rewrites ``<script_dir>/session_*.py`` with
+    one marked section per call; the newest such file is the history.
+    Variables are not restored, only the code.
+    """
+    try:
+        files = [os.path.join(sess.script_dir, f) for f in os.listdir(sess.script_dir)
+                 if f.startswith("session_") and f.endswith(".py")]
+    except FileNotFoundError:
+        return
+    if not files:
+        return
+    newest = max(files, key=os.path.getmtime)
+    try:
+        with open(newest, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return
+    blocks = [b.strip("\n") for b in _RUN_CODE_CALL_MARK.split(text)[1:] if b.strip()]
+    for block in blocks:
+        a = _analyze_block_ast(block)
+        sess.code_history.append(block)
+        sess.code_history_meta.append({
+            "source": block,
+            "names_bound": set(a["bound_static"]),
+            "names_read": set(a["read"]),
+            "names_touched": set(a["touched"]),
+            "is_import": a["is_import"],
+            "wildcard_import": a["wildcard_import"],
+            "parse_error": a["parse_error"],
+            "succeeded": True,
+        })
+    if blocks:
+        sess.current_script_path = newest
 
 
 # Backward-compatible module-level references for non-session-aware code
@@ -2049,6 +2107,51 @@ def _ensure_initialized_locked(session_id: str | None = None):
     def _session_save_file(filename, content, mode="w"):
         return _safe_write_file(filename, content, mode, output_dir=sess.output_dir)
 
+    # Files the user uploaded in this conversation. The web server stages
+    # each converted vector upload (shapefile, KML, GPKG, GeoJSON...) as
+    # GeoJSON in <session output dir>/uploads/. Without this the only copy
+    # was the GeoJSON pasted into the prompt, which the model had to
+    # retype into code: a large layer came back cut short or empty.
+    _uploads_dir = os.path.join(sess.output_dir, "uploads")
+
+    def _session_list_uploads():
+        """Names of the files uploaded in this conversation, for load_upload()."""
+        try:
+            return sorted(f for f in os.listdir(_uploads_dir) if not f.startswith("."))
+        except FileNotFoundError:
+            return []
+
+    def _session_load_upload(name=None):
+        """Read a file the user uploaded in this conversation.
+
+        Vector uploads are stored as GeoJSON and come back as a dict, ready
+        for ``ee.FeatureCollection(load_upload("name"))`` with every vertex
+        and attribute intact. ``name`` may be the stored name or the name
+        the user uploaded ("tracts.zip" finds "tracts.geojson"); with one
+        upload it may be omitted.
+        """
+        names = _session_list_uploads()
+        if not names:
+            raise FileNotFoundError(
+                "No uploads in this conversation. If the user mentions a file, "
+                "it never arrived: say so and ask them to attach it.")
+        if name is None:
+            if len(names) != 1:
+                raise ValueError(f"Several uploads; pass one of {names}")
+            pick = names[0]
+        else:
+            want = os.path.basename(str(name)).lower()
+            stem = want.rsplit(".", 1)[0] if "." in want else want
+            pick = (next((n for n in names if n.lower() == want), None)
+                    or next((n for n in names if n.lower().rsplit(".", 1)[0] == stem), None))
+            if pick is None:
+                raise FileNotFoundError(f"No upload named {name!r}; uploads: {names}")
+        path = os.path.join(_uploads_dir, pick)
+        with open(path, encoding="utf-8") as fh:
+            if pick.lower().endswith((".geojson", ".json")):
+                return json.load(fh)
+            return fh.read()
+
     sess._map_ref = session_map
     # Helpful stubs that fire when the agent accidentally tries to call an
     # MCP tool name as a Python function INSIDE run_code. The session audit
@@ -2090,6 +2193,8 @@ def _ensure_initialized_locked(session_id: str | None = None):
         "numpy": _np_mod,
         "np": _np_mod,
         "save_file": _session_save_file,
+        "load_upload": _session_load_upload,
+        "list_uploads": _session_list_uploads,
         # Clear-error stubs for MCP tool names the agent sometimes calls
         # from inside run_code as if they were Python functions.
         "search_datasets": _mcp_tool_stub("search_datasets"),
@@ -2325,7 +2430,7 @@ def _diff_namespace(before: dict, after: dict, skip_names: set = None) -> set:
 # block that happens to reference them.
 _REPL_BOOTSTRAP_NAMES = {
     "ee", "Map", "gv", "gil", "sal", "cl", "tl", "rl", "gm",
-    "palettes", "save_file", "__builtins__",
+    "palettes", "save_file", "load_upload", "list_uploads", "__builtins__",
 }
 
 
@@ -3548,7 +3653,8 @@ async def run_code(code: str, timeout: int = 120, reset: bool = False,
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 for alias in node.names:
                     bound_name = alias.asname or alias.name.split(".")[-1]
-                    if bound_name in ("ee", "Map", "gv", "gil", "sal", "cl", "tl", "rl", "gm", "palettes", "save_file"):
+                    if bound_name in ("ee", "Map", "gv", "gil", "sal", "cl", "tl", "rl", "gm", "palettes", "save_file",
+                                      "load_upload", "list_uploads"):
                         skip = True
                         break
             if not skip:

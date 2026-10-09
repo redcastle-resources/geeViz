@@ -111,5 +111,5 @@ def test_foliage_questions_route_to_the_change_method_with_a_control():
     i = INSTR.index("### Fall foliage")
     section = INSTR[i:INSTR.index("\n---", i)]
     assert "MINUS" in INSTR[INSTR.index('"fall foliage"'):][:400]
-    assert "evergreen control" in section and "DIFFERENCE" in section
+    assert "keeps its color through the season" in section and "report the difference" in section
     assert "Never describe color from foliage-date imagery alone" in section

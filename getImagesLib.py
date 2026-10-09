@@ -7502,8 +7502,8 @@ def foliageIndices(img: ee.Image) -> ee.Image:
     Every index is a ratio, so the input scale (0-1 or 0-10000) does not
     matter. Pixels whose visible bands sum to zero are masked.
 
-    Color on its own says little: a yellow-green conifer and a golden larch
-    can read alike. Compare against a leaf-on baseline with
+    Color on its own says little: different vegetation can read alike at
+    one date. Compare against a leaf-on baseline with
     :func:`getFoliageChange` rather than reporting these values raw.
 
     Args:
@@ -7598,12 +7598,11 @@ def getFoliageChange(
     subtracts pre from post. Turning color is the CHANGE in yellowness and
     redness from the leaf-on baseline, never the foliage-date values alone.
 
-    A baseline is necessary but not sufficient: autumn raises yellowness in
-    EVERY forest (lower sun, curing understory). In early October 2026, SR
-    yellowness rose +0.20 on Washington larch and +0.21 on Douglas-fir,
-    which never turns gold. Before calling a stand golden, compare its
-    change with an evergreen control in the same area (e.g. TreeMap
-    FORTYPCD 201 Douglas-fir, 221 ponderosa pine) and report the
+    A baseline is necessary but not sufficient: the season shifts these
+    indices everywhere (sun angle, drying ground cover), including in
+    vegetation that never changes color. Before calling a stand turned,
+    compute the same change over a nearby type that keeps its color (an
+    evergreen class from the same land-cover source) and report the
     difference, not the raw change.
 
     Dates: ``post`` defaults to the last ``compositeDays`` days ending today;
@@ -7620,7 +7619,7 @@ def getFoliageChange(
         compositeDays (int, optional): Window length when a start or end is missing. Defaults to 21.
         timeGap (int, optional): Days between the post and pre windows when pre is not given. Defaults to 42.
         includeLandsat (bool, optional): Merge Landsat scenes (scaled to 0-10000) with Sentinel-2 to fill cloud gaps. Defaults to True.
-        toaOrSR (str, optional): "TOA" (AskTerra 1.0's choice, which the thresholds were tuned on) or "SR". The two differ a lot in autumn: TOA blue carries atmospheric haze that grows as the sun drops, and in early October 2026 Washington larch showed falling yellowness in TOA but +0.2 in SR. Defaults to "TOA".
+        toaOrSR (str, optional): "TOA" (AskTerra 1.0's choice, which the thresholds were tuned on) or "SR". The two can disagree in autumn, because top-of-atmosphere blue carries haze that grows as the sun drops; say which you used. Defaults to "TOA".
         yellowThresh (float, optional): Minimum yellowness increase for the ``yellowing`` layer. Defaults to 0.1.
         rednessThresh (float, optional): Minimum redness increase for the ``reddening`` layer. Defaults to 0.25.
 
