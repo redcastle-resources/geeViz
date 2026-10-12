@@ -17,6 +17,29 @@ import pytest
 import geeViz.mcp.server as srv
 
 
+@pytest.fixture(autouse=True)
+def _real_geeview(monkeypatch):
+    """run_code imports outputLib.thumbs, which needs the real geeView.
+
+    test_esriLib installs a stub geeViz.geeView while pytest collects and
+    removes it only after its own tests, so in a full run this file (which
+    sorts first) would otherwise get the stub.
+    """
+    import importlib
+    import sys
+    import geeViz
+    # record both before importing: the import itself rebinds them, and
+    # teardown must hand test_esriLib back its stub
+    monkeypatch.setattr(geeViz, "geeView", getattr(geeViz, "geeView", None), raising=False)
+    monkeypatch.setitem(sys.modules, "geeViz.geeView", sys.modules.get("geeViz.geeView"))
+    mod = sys.modules.get("geeViz.geeView")
+    if mod is None or not hasattr(mod, "ee"):
+        monkeypatch.delitem(sys.modules, "geeViz.geeView", raising=False)
+        mod = importlib.import_module("geeViz.geeView")
+    monkeypatch.setitem(sys.modules, "geeViz.geeView", mod)
+    monkeypatch.setattr(geeViz, "geeView", mod, raising=False)
+
+
 @pytest.fixture
 def sid():
     s = "test_dup_" + uuid.uuid4().hex[:10]

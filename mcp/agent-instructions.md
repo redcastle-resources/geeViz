@@ -960,7 +960,7 @@ what it returns:
 |---|---|---|---|---|---|---|---|
 | `"gfs"` | `NOAA/GFS0P25` | 0.25° (27.8 km) | 2015-04 | every 6h | 384h (16d), every run | 1h to lead 120, then 3h | open |
 | `"euro"` | `ECMWF/NRT_FORECAST/IFS/OPER` | 0.25° (27.8 km) | 2024-11 | every 6h | **360h from 00/12, only 144h from 06/18** | 3h to lead 144, then 6h | open |
-| `"weathernext"` | WeatherNext 3, 0.1° | 0.1° (11.1 km) | 2026-01 | every 1h | **360h from 00/06/12/18, only 48h from the other 20** | 1h | gated |
+| `"weathernext"` | WeatherNext 3, 0.1° | 0.1° (11.1 km) | 2024-01, but none for 2025 (2024 has 00/06/12/18 runs only) | every 1h | **360h from 00/06/12/18, only 48h from the other 20** | 1h | gated |
 | `"weathernext_stations"` | WeatherNext 3, 0.05° | 0.05° (5.6 km) | 2026-01 | every 1h | same split | 1h | gated |
 
 `weathernext` is a 64-member ensemble published **pre-aggregated** —

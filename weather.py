@@ -24,7 +24,7 @@ model               resolution  archive    init      horizon        lead step   
 ==================  ==========  =========  ========  =============  ==========  ======
 ``gfs``             0.25°       2015-04    every 6h  384h (16d)     1h → 3h     open
 ``euro``            0.25°       2024-11    every 6h  360h / 144h    3h → 6h     open
-``weathernext``     0.1°        2026-01    every 1h  360h / 48h     1h          gated
+``weathernext``     0.1°        2024-01*   every 1h  360h / 48h     1h          gated
 ``weathernext_st``  0.05°       2026-01    every 1h  360h / 48h     1h          gated
 ==================  ==========  =========  ========  =============  ==========  ======
 
@@ -32,6 +32,10 @@ model               resolution  archive    init      horizon        lead step   
   metres per model are in ``MODELS[key]["native_scale_m"]``.
 * **archive** — the earliest image present. A floor, not a guarantee:
   these are near-real-time feeds and old data may be rolled off.
+  The * on ``weathernext``: it has all of 2024 (00/06/12/18 UTC runs only, 360h
+  each), then **nothing for 2025**, then the full hourly schedule from
+  2026-01 on. A 2025 window is empty, not an error; see
+  ``MODELS["weathernext"]["archive_gaps"]``.
 * **init** — how often a new run starts. All four initialize on the
   hour; GFS and ECMWF only at 00/06/12/18 UTC.
 * **horizon** — how far one run reaches. Where two numbers are given the
@@ -283,8 +287,11 @@ MODELS = {
         "iso_times": True,                # ISO 8601 strings
         "native_scale_m": 11132,          # 0.1 deg
         "resolution_deg": 0.1,
-        "archive_start": "2026-01-01",
-        "init_interval_h": 1,             # every hour
+        "archive_start": "2024-01-01",
+        # [start, end) spans with no images. Measured 2026-10-12: 2024 is
+        # complete (6-hourly long runs only), 2025 is absent.
+        "archive_gaps": [("2025-01-01", "2026-01-01")],
+        "init_interval_h": 1,             # every hour (from 2026; 6h in 2024)
         # Two interleaved run types in ONE collection: the 6-hourly
         # synoptic inits reach 15 days, the 20 interim hourly inits stop
         # at 2. So "the most recent run" usually cannot cover a forward
@@ -2679,8 +2686,9 @@ BAND_AVAILABLE_FROM = {
         "leads past the analysis hour, and this function returns the "
         "shortest lead, so that is not a substitute here. Use a window "
         "from 2025-01-15, or filter NOAA/GFS0P25 directly on "
-        "forecast_hours > 0 for the accumulation. 'euro' and "
-        "'weathernext' do not reach that far back either."),
+        "forecast_hours > 0 for the accumulation. 'weathernext' carries "
+        "precipitation for all of 2024 (not 2025), and 'euro' from "
+        "2024-11-12."),
     ("dewpoint_2m", "gfs"): (
         "2025-01-15",
         "Before then GFS carried no dewpoint band at all. It did publish "
