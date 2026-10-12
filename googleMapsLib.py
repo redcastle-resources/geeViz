@@ -438,6 +438,7 @@ def streetview_metadata(
         >>> if meta['status'] == 'OK':
         ...     print(f"Imagery from {meta['date']}")
     """
+    _check_street_view_enabled("streetview_metadata")
     return _fetch_json(_SV_METADATA_URL, {
         "location": f"{lat},{lon}",
         "radius": str(radius),
@@ -473,6 +474,7 @@ def streetview_image(
     Returns:
         bytes or None: JPEG image bytes.
     """
+    _check_street_view_enabled("streetview_image")
     meta = streetview_metadata(lon, lat, radius=radius, source=source)
     if meta.get("status") != "OK":
         return None
@@ -511,6 +513,7 @@ def streetview_images_cardinal(
     Returns:
         dict or None: ``{"N": bytes, "E": bytes, "S": bytes, "W": bytes}``.
     """
+    _check_street_view_enabled("streetview_images_cardinal")
     meta = streetview_metadata(lon, lat, radius=radius, source=source)
     if meta.get("status") != "OK":
         return None
@@ -564,6 +567,7 @@ def streetview_panorama(
         ...     with open("panorama_360.jpg", "wb") as f:
         ...         f.write(pano)
     """
+    _check_street_view_enabled("streetview_panorama")
     from PIL import Image
     import io as _io
 
@@ -1046,6 +1050,53 @@ def interpret_image(
     }
 
 
+STREET_VIEW_OFF_RULE = (
+    "- **Street View — not available here.** The `gm.streetview_*` helpers "
+    "raise an error in this deployment, and the image tools' `streetview` "
+    "mode has no Street View images to work on. When a user asks for Street "
+    "View or a ground-level view, say it is not available here and offer "
+    "satellite, aerial or map imagery of the place instead."
+)
+
+
+def street_view_instructions(text: str, enabled: bool) -> str:
+    """Agent instructions with the Street View rule for this deployment.
+
+    The shared instructions wrap their Street View rule in
+    ``<!--STREETVIEW_BEGIN-->`` / ``<!--STREETVIEW_END-->``. On, the rule
+    stays (markers removed); off, it is replaced by
+    :data:`STREET_VIEW_OFF_RULE`, so the model never plans a call the
+    runtime (:func:`_check_street_view_enabled`) will refuse.
+    """
+    import re
+    pat = re.compile(r"<!--STREETVIEW_BEGIN-->\r?\n(.*?)\r?\n<!--STREETVIEW_END-->", re.S)
+    text = pat.sub((lambda m: m.group(1)) if enabled else (lambda m: STREET_VIEW_OFF_RULE), text)
+    return text.replace("<!--STREETVIEW_STATUS-->", "")
+
+
+def street_view_enabled() -> bool:
+    """The ``GEEVIZ_STREET_VIEW_ENABLED`` setting (absent means on)."""
+    val = str(os.environ.get("GEEVIZ_STREET_VIEW_ENABLED", "1")).strip().lower()
+    return val not in ("0", "false", "no", "off", "disabled")
+
+
+def _check_street_view_enabled(tool_name: str) -> None:
+    """Raise if Street View is turned off for the calling tenant.
+
+    The geeViz_agent framework sets ``GEEVIZ_STREET_VIEW_ENABLED`` from
+    ``tenant.tools.enable_street_view``; ``0`` / ``false`` / ``no`` /
+    ``off`` turns every ``streetview_*`` helper off. Absent means on (the
+    default outside the agent). Checked before any request, so a tenant
+    whose Maps key does not allow Street View gets a clear message
+    instead of a 403 from Google.
+    """
+    if not street_view_enabled():
+        raise RuntimeError(
+            f"Street View ('{tool_name}') is not available here. Use satellite, "
+            f"aerial or map imagery instead (gm.static_map, NAIP or Sentinel-2 "
+            f"through Earth Engine).")
+
+
 def _check_gmaps_ai_enabled(tool_name: str) -> None:
     """Raise if the calling tenant has disabled Google-Maps AI tools.
 
@@ -1376,6 +1427,7 @@ def streetview_html(
     Returns:
         str or None: Self-contained HTML string, or None if no imagery.
     """
+    _check_street_view_enabled("streetview_html")
     meta = streetview_metadata(lon, lat, radius=radius, source=source)
     if meta.get("status") != "OK":
         return None

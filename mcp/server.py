@@ -804,6 +804,10 @@ try:
             "quality, solar, timezone, roads) remain available."
         )
     _SERVER_INSTRUCTIONS = _SERVER_INSTRUCTIONS.replace("<!--GMAPS_AI_STATUS-->", _ai_block)
+    # Street View: same env var googleMapsLib enforces (set by run_ui from
+    # tenant.tools.enable_street_view; absent = on for standalone use).
+    from geeViz.googleMapsLib import street_view_instructions, street_view_enabled
+    _SERVER_INSTRUCTIONS = street_view_instructions(_SERVER_INSTRUCTIONS, street_view_enabled())
     print(f"[geeViz MCP] Loaded instructions: {len(_SERVER_INSTRUCTIONS)} chars, {len(_SERVER_INSTRUCTIONS.split())} words (gmaps AI: {'ENABLED' if _ai_on else 'DISABLED'})", file=sys.stderr, flush=True)
 except Exception:
     _SERVER_INSTRUCTIONS = None
@@ -1864,6 +1868,7 @@ def _recover_history(sess: "_SessionState") -> None:
             "wildcard_import": a["wildcard_import"],
             "parse_error": a["parse_error"],
             "succeeded": True,
+            "recovered": True,
         })
     if blocks:
         sess.current_script_path = newest
@@ -3197,6 +3202,23 @@ def _check_code_patterns(code: str) -> list[str]:
                 "Consider adding .limit(N) or using .first().getInfo()."
             )
 
+    # --- Training accuracy reported as validation accuracy ---
+    # Classifier.confusionMatrix() scores the classifier on the samples it
+    # was trained on, and an answer called that "cross-validation accuracy"
+    # (daily review 2026-10-12). A note, not a block: it is a fine thing
+    # to look at, just not the number to report.
+    if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+           and n.func.attr == "confusionMatrix" for n in ast.walk(tree)):
+        warnings.append(
+            "Note: classifier.confusionMatrix() is accuracy on the classifier's "
+            "own training samples, which overstates real accuracy. Do not "
+            "report it as validation or cross-validation accuracy. For an "
+            "honest figure, hold samples out (samples.randomColumn() split), "
+            "train on the rest, then held_out.classify(clf).errorMatrix(label, "
+            "'classification'). If you report the training figure, call it "
+            "training accuracy."
+        )
+
     # --- EE performance: many separate .getInfo() calls in one block ---
     # Each one is its own server round trip. The instructions say to batch
     # them into one ee.Dictionary, and models still write five in a row
@@ -3519,6 +3541,15 @@ _EE_ERROR_HINTS = [
         "pass with ee.FeatureCollection(list_of_features), or replace "
         ".filterBounds(big_fc) with ee.Geometry.BBox(...).",
     ),
+    (
+        "Please specify a non-zero error margin",
+        "HINT: The geometry is planar (ee.Geometry.BBox(...) always is, and "
+        "so is anything built with geodesic=False), and area / perimeter / "
+        "centroid / intersection / union on it need an error margin. Pass "
+        "one: geom.area(maxError=1), geom.centroid(maxError=1), "
+        "a.intersection(b, maxError=1). Or build the box with "
+        "ee.Geometry.Rectangle([w, s, e, n]), which is geodesic.",
+    ),
 ]
 
 
@@ -3537,6 +3568,37 @@ def _translate_ee_error(error_text: str) -> str:
         if needle in error_text:
             return f"{hint}\n\n--- original traceback below ---\n{error_text}"
     return error_text
+
+
+_NAME_ERROR_RE = _wl_re.compile(r"NameError: name '(\w+)' is not defined")
+
+
+def _lost_state_hint(error_text: str, sess: "_SessionState") -> str:
+    """Explain a NameError for a name no run_code call in this process bound.
+
+    Variables live in this process's memory. A deploy, an idle shutdown or
+    Cloud Run moving the session to another instance clears them between
+    turns, and the model, seeing a bare NameError for a variable it made
+    earlier, probes with globals() / dir() instead of re-creating it.
+    History reloaded by _recover_history does not count: it brings back the
+    code, not the variables.
+    """
+    m = _NAME_ERROR_RE.search(error_text or "")
+    if not m:
+        return error_text
+    name = m.group(1)
+    if any(name in meta.get("names_bound", ()) for meta in sess.code_history_meta
+           if not meta.get("recovered")):
+        return error_text
+    hint = (
+        f"HINT: No call in this session's current Python state has defined "
+        f"'{name}'. If an earlier call did, its variables are gone: a server "
+        f"restart or a move to another server clears them between turns. "
+        f"Re-run the code that defined '{name}' (and anything it depends on) "
+        f"at the top of this call. Do not probe with globals() or dir(), "
+        f"and do not open files an earlier call saved: they may be gone too."
+    )
+    return f"{hint}\n\n--- original traceback below ---\n{error_text}"
 
 
 # ---------------------------------------------------------------------------
@@ -3917,7 +3979,7 @@ async def run_code(code: str, timeout: int = 120, reset: bool = False,
             "stdout": stdout_buf.getvalue(),
             "stderr": stderr_val,
             "result": None,
-            "error": _translate_ee_error(error_holder[0]),
+            "error": _lost_state_hint(_translate_ee_error(error_holder[0]), sess),
             "script_path": None,
         })
 
